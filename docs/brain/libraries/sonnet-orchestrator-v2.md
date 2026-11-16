@@ -70,6 +70,18 @@ Every commerce-touching tool schema description points at its `commerce/*` op ab
 
 Migration status (spec [[../specs/commerce-sdk-migrate-dashboard-agent-ai]] Phase 3): the tool-schema pointers landed in this Fix commit; the executor call-site repointing (converting each `executeToolCall` branch from `.from("subscriptions")` / `.from("orders")` / `@/lib/appstle` to the SDK op above) is tracked as the follow-up landing.
 
+### Software mode (software-mode-orchestrator-toolset)
+
+`runOrchestratorDecision` reads `getSupportMode(workspaceId)` ([[support-mode]]) and passes it to
+`buildToolDefinitions(mode)` and `buildPreContext(..., supportMode)`. `cpg` is unchanged: same CPG tool list
+(`buildCpgToolDefinitions`) and prompt. `software` gets only `get_product_knowledge` (described as the knowledge base) +
+`get_shopgrowth_store` (live ShopGrowth store reads, [[shopgrowth-support]]), and `buildSoftwareSystemPrompt`: no
+journeys/playbooks/workflows, no CPG hard rules, decision types `ai_response | kb_response | escalate |
+shopgrowth_action`. `shopgrowth_action` is a decision type (`SonnetDecision.shopgrowth_action = {action, params,
+confirmation_quote}`), not a tool, so it always runs through the action executor's confirmation gate.
+`executeToolCall` refuses `get_shopgrowth_store` on a cpg workspace. Exports for tests: `toolNamesForMode`,
+`buildSoftwareSystemPrompt`, `SOFTWARE_MODE_TOOL_NAMES`.
+
 ## Prompt caching (cost-critical)
 
 `buildPreContext` returns **`{ system, userBlockPrefix, userBlock }`** — a deliberate three-way split for prompt caching (the orchestrator is ~98% of all AI spend, and input context dwarfs output ~184:1):

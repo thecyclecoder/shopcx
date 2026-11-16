@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { shouldDispatchInboundMessage } from "@/lib/inbound-dispatch-gate";
 import { dispatchInboundMessage } from "@/lib/inngest/dispatch-inbound-message";
+import { getSupportMode, isSoftwareMode } from "@/lib/support-mode";
+import { verifyWidgetIdentity, identityTags } from "@/lib/widget-identity";
 
 export async function POST(
   req: NextRequest,
@@ -9,7 +11,7 @@ export async function POST(
 ) {
   const { workspaceId } = await params;
   const body = await req.json();
-  const { email, name, first_name, last_name, message, session_id, page_context } = body as {
+  const { email, name, first_name, last_name, message, session_id, page_context, identity } = body as {
     email: string;
     name?: string;
     first_name?: string;
@@ -17,17 +19,38 @@ export async function POST(
     message: string;
     session_id?: string;
     page_context?: { product_id?: string; product_handle?: string; product_title?: string; page_path?: string };
+    identity?: string;
   };
 
-  if (!email || !message) {
+  if (!message) {
+    return NextResponse.json({ error: "message required" }, { status: 400 });
+  }
+
+  // Verified identity pass. On software workspaces the chatting staff member is proven by
+  // ShopGrowth's signed pass and a valid one is REQUIRED (401 otherwise) — the typed email is never
+  // trusted. On cpg workspaces the pass is optional; when present it wins over any typed email.
+  const mode = await getSupportMode(workspaceId);
+  const pass = identity ? await verifyWidgetIdentity(workspaceId, identity) : null;
+
+  if (isSoftwareMode(mode) && !pass) {
+    return NextResponse.json({ error: "A verified identity is required" }, { status: 401 });
+  }
+
+  // The contact is keyed to the verified email when a pass is present, else the typed one.
+  const resolvedEmail = pass?.email || email;
+  if (!resolvedEmail) {
     return NextResponse.json({ error: "email and message required" }, { status: 400 });
   }
 
   // Validate email format
   const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-  if (!emailRegex.test(email)) {
+  if (!emailRegex.test(resolvedEmail)) {
     return NextResponse.json({ error: "Please enter a valid email address" }, { status: 400 });
   }
+
+  // When a pass is present, the display name comes from verified data too.
+  const resolvedName = pass?.name || name;
+  const storeTags = pass ? identityTags(pass) : [];
 
   const admin = createAdminClient();
 
@@ -49,10 +72,10 @@ export async function POST(
   }
 
   // Find or create customer
-  const normalizedEmail = email.toLowerCase().trim();
+  const normalizedEmail = resolvedEmail.toLowerCase().trim();
   let { data: customer } = await admin
     .from("customers")
-    .select("id")
+    .select("id, tags")
     .eq("workspace_id", workspaceId)
     .eq("email", normalizedEmail)
     .single();
@@ -68,17 +91,19 @@ export async function POST(
       .upsert({
         workspace_id: workspaceId,
         email: normalizedEmail,
-        first_name: first_name || name || null,
+        first_name: first_name || resolvedName || null,
         last_name: last_name || null,
+        // Verified store tags keep the contact keyed to the proven store. No new columns.
+        tags: storeTags.length ? storeTags : undefined,
       }, { onConflict: "workspace_id,email", ignoreDuplicates: true })
-      .select("id")
+      .select("id, tags")
       .maybeSingle();
     if (created) {
       customer = created;
     } else {
       const { data: raced } = await admin
         .from("customers")
-        .select("id")
+        .select("id, tags")
         .eq("workspace_id", workspaceId)
         .eq("email", normalizedEmail)
         .maybeSingle();
@@ -98,6 +123,18 @@ export async function POST(
 
   const customerId = customer?.id || null;
 
+  // Merge the verified store tags onto an existing contact (union — never clobber other tags).
+  if (customerId && storeTags.length) {
+    const existingTags = Array.isArray(customer?.tags) ? (customer!.tags as string[]) : [];
+    const missing = storeTags.filter((t) => !existingTags.includes(t));
+    if (missing.length) {
+      await admin
+        .from("customers")
+        .update({ tags: [...existingTags, ...missing] })
+        .eq("id", customerId);
+    }
+  }
+
   // Check for existing session with open ticket
   let ticketId: string | null = null;
   let sessionId = session_id || null;
@@ -114,7 +151,7 @@ export async function POST(
       // Check ticket is still open/pending
       const { data: ticket } = await admin
         .from("tickets")
-        .select("id, status, channel")
+        .select("id, status, channel, tags")
         .eq("id", session.ticket_id)
         .single();
 
@@ -127,6 +164,17 @@ export async function POST(
             closed_at: null,
             last_customer_reply_at: new Date().toISOString(),
           }).eq("id", ticket.id);
+        }
+        // Keep the reused ticket's verified store tags in sync (union — never clobber).
+        if (storeTags.length) {
+          const existingTicketTags = Array.isArray(ticket.tags) ? (ticket.tags as string[]) : [];
+          const missing = storeTags.filter((t) => !existingTicketTags.includes(t));
+          if (missing.length) {
+            await admin
+              .from("tickets")
+              .update({ tags: [...existingTicketTags, ...missing] })
+              .eq("id", ticket.id);
+          }
         }
       }
       // If ticket was escalated to email (channel switched), don't reuse — new chat needed
@@ -178,6 +226,8 @@ export async function POST(
         subject: message.slice(0, 80) || "Live Chat",
         last_customer_reply_at: new Date().toISOString(),
         page_context: resolvedContext,
+        // Verified store tags so the orchestrator tools read shop/app from proven data.
+        tags: storeTags.length ? storeTags : undefined,
       })
       .select("id")
       .single();
@@ -203,7 +253,7 @@ export async function POST(
             ticket_id: ticketId,
             customer_id: customerId,
             email: normalizedEmail,
-            name: name || null,
+            name: resolvedName || null,
           })
           .select("id")
           .single();

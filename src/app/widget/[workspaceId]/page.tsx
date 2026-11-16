@@ -95,12 +95,21 @@ export default function ChatWidgetPage() {
   const [chatList, setChatList] = useState<{ id: string; ticket_id: string; subject: string; status: string; last_message: string; updated_at: string }[]>([]);
   const [showChatList, setShowChatList] = useState(true);
   const [emailPrefilled, setEmailPrefilled] = useState(false);
+  // Signed identity pass passed through from widget.js. When present the merchant's staff member is
+  // proven by ShopGrowth — the email field is hidden and the server keys the contact to the store.
+  const [identity, setIdentity] = useState("");
 
   // Load config + auto-fill customer data from URL params (Shopify logged-in customer)
   useEffect(() => {
     const urlParams = new URLSearchParams(window.location.search);
     const paramEmail = urlParams.get("email") || "";
     const paramName = urlParams.get("name") || "";
+    const paramIdentity = urlParams.get("identity") || "";
+    if (paramIdentity) {
+      setIdentity(paramIdentity);
+      // A verified pass carries the email+name; hide the typed email field entirely.
+      setEmailPrefilled(true);
+    }
     if (paramEmail) {
       setEmail(paramEmail);
       setEmailPrefilled(true);
@@ -182,9 +191,13 @@ export default function ChatWidgetPage() {
 
   const loadChatList = async () => {
     // Prove ownership with the session ids this browser created — not the email.
+    // With a verified pass the server scopes the list to the store instead, so no
+    // stored session ids are needed (staff may be on a fresh device).
     const ids = readStoredSessionIds(workspaceId);
-    if (!ids.length) { setChatList([]); return; }
-    const qs = ids.map((id) => `session_id=${encodeURIComponent(id)}`).join("&");
+    if (!ids.length && !identity) { setChatList([]); return; }
+    const parts = ids.map((id) => `session_id=${encodeURIComponent(id)}`);
+    if (identity) parts.push(`identity=${encodeURIComponent(identity)}`);
+    const qs = parts.join("&");
     const res = await fetch(`/api/widget/${workspaceId}/chats?${qs}`);
     const data = await res.json();
     // New route returns { chats: [...] }; tolerate a bare array for safety.
@@ -199,7 +212,7 @@ export default function ChatWidgetPage() {
     setStarted(true);
     setChatEnded(false);
     // Load messages for this ticket
-    const res = await fetch(`/api/widget/${workspaceId}/messages?session_id=${chatSessionId}`);
+    const res = await fetch(`/api/widget/${workspaceId}/messages?session_id=${chatSessionId}${identity ? `&identity=${encodeURIComponent(identity)}` : ""}`);
     const data = await res.json();
     if (data.messages) setMessages(data.messages);
     // Save to localStorage
@@ -230,14 +243,14 @@ export default function ChatWidgetPage() {
   // Load existing messages when session restores
   useEffect(() => {
     if (!sessionId) return;
-    fetch(`/api/widget/${workspaceId}/messages?session_id=${sessionId}`)
+    fetch(`/api/widget/${workspaceId}/messages?session_id=${sessionId}${identity ? `&identity=${encodeURIComponent(identity)}` : ""}`)
       .then((r) => r.json())
       .then((data) => {
         if (data.messages) setMessages(data.messages);
         if (data.ticket_id) setTicketId(data.ticket_id);
       })
       .catch(() => {});
-  }, [sessionId, workspaceId]);
+  }, [sessionId, workspaceId, identity]);
 
   // Subscribe to realtime messages — use realtime as notification, fetch full message from API
   useEffect(() => {
@@ -246,7 +259,7 @@ export default function ChatWidgetPage() {
 
     const fetchMessages = async () => {
       try {
-        const res = await fetch(`/api/widget/${workspaceId}/messages?session_id=${sessionId}`);
+        const res = await fetch(`/api/widget/${workspaceId}/messages?session_id=${sessionId}${identity ? `&identity=${encodeURIComponent(identity)}` : ""}`);
         const data = await res.json();
         if (data.messages) {
           setMessages((prev) => {
@@ -297,7 +310,7 @@ export default function ChatWidgetPage() {
       .subscribe();
 
     return () => { supabase.removeChannel(channel); };
-  }, [ticketId, sessionId, workspaceId]);
+  }, [ticketId, sessionId, workspaceId, identity]);
 
 
   // Auto-scroll on new messages or typing indicator
@@ -307,11 +320,15 @@ export default function ChatWidgetPage() {
 
   const handleStart = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!email.trim() || !firstName.trim() || !lastName.trim()) return;
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(email.trim())) {
-      setEmailError("Please enter a valid email address");
-      return;
+    // With a verified pass the server resolves email + name from the signed data, so no typed
+    // fields are required — just start.
+    if (!identity) {
+      if (!email.trim() || !firstName.trim() || !lastName.trim()) return;
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!emailRegex.test(email.trim())) {
+        setEmailError("Please enter a valid email address");
+        return;
+      }
     }
     setEmailError("");
     setStarted(true);
@@ -367,6 +384,9 @@ export default function ChatWidgetPage() {
           message: msg,
           session_id: sessionId || undefined,
           page_context,
+          // The verified pass — the server requires it on software workspaces and prefers it over
+          // the typed email everywhere.
+          identity: identity || undefined,
         }),
       });
       const data = await res.json();
@@ -605,7 +625,9 @@ export default function ChatWidgetPage() {
 
         {!started ? (
           <form onSubmit={handleStart} className="mt-4 space-y-3 rounded-xl border border-zinc-200 bg-zinc-50 p-4">
-            {emailPrefilled ? (
+            {identity ? (
+              <p className="text-sm text-zinc-500">Chatting as your verified store account</p>
+            ) : emailPrefilled ? (
               <p className="text-sm text-zinc-500">Chatting as <span className="font-medium text-zinc-700">{firstName || email}</span></p>
             ) : (
               <>
