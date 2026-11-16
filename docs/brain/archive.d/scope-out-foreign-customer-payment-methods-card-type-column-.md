@@ -1,0 +1,1 @@
+- **Scope out foreign customer_payment_methods.card_type column noise** · verified 2026-11-16 · → [[../libraries/error-feed]]
