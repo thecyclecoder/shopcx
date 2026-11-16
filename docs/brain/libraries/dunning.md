@@ -148,6 +148,16 @@ const RECOVERABLE_DUNNING_STATUSES = [...OPEN_DUNNING_STATUSES, "exhausted"]
 
 The set of dunning cycle statuses that are eligible for recovery when a customer adds a new payment method. Includes `active`, `rotating`, `retrying`, `skipped`, and `exhausted` (so a dunning-CANCELLED sub reactivates). Does NOT include cycles with a `closed_reason` set (which means the customer paused/cancelled the subscription, not dunning — these must never be resurrected). Used by the recovery-gate check in [[dunning-webhook]] and by [[../libraries/dunning-strand-detector]]. (Phase 3 of [[../specs/a-dunning-cycle-must-never-silently-strand-a-subscription]] — 2026-09-21.)
 
+### `effectiveLadderStep` / `getEffectiveLadderStep` / `LADDER_LOOKBACK_DAYS`
+
+```ts
+function effectiveLadderStep(priorClosedNewestFirst: { status: string | null; created_at: string | null }[], now?: Date, lookbackDays?: number): number
+async function getEffectiveLadderStep(workspaceId: string, shopifyContractId: string, currentCycleId: string): Promise<number>
+const LADDER_LOOKBACK_DAYS = 120
+```
+
+The skip → cancel ladder rung for a dunning cycle: 1 + the run of `exhausted` cycles right before it, stopping at the first `recovered` one or one older than 120 days. Replaces the lifetime `cycle_number` as the input to `resolveCycleAction` (which counted recovered cycles and cancelled one-time-failure customers on their next decline). The DB wrapper falls back to rung 1 on a read error. See [[../lifecycles/dunning]] § Ladder rung (2026-11-16).
+
 ### `PaymentMethod` — interface
 
 ### `DunningSettings` — interface

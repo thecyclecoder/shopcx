@@ -15,6 +15,7 @@ import {
   shouldHaltRetryForSubStatus,
   shouldExhaustForRetryCap,
   resolveCycleAction,
+  effectiveLadderStep,
   OPEN_DUNNING_STATUSES,
   ACTIVE_SLOT_STATUSES,
   holdsActiveCycleSlot,
@@ -152,4 +153,47 @@ test("open cycles: 'paused' IS open — it must be closable by a sub pause/cance
   // it still reached new-card-recovery (→ resume + charge) and still held the slot with no
   // way to clear it. Nothing writes 'paused' today, but legacy rows retain it.
   assert.equal(isOpenDunningStatus("paused"), true);
+});
+
+// ── the ladder rung: consecutive unrecovered renewals, not lifetime cycle_number ──────────
+
+const NOW = new Date("2026-11-16T12:00:00Z");
+const daysAgo = (n: number) => new Date(NOW.getTime() - n * 86400000).toISOString();
+
+test("ladder: no prior cycles is rung 1 (skip)", () => {
+  assert.equal(effectiveLadderStep([], NOW), 1);
+  assert.equal(resolveCycleAction(effectiveLadderStep([], NOW), SETTINGS), "skip");
+});
+
+test("ladder: a RECOVERED prior failure does not escalate the next decline to cancel", () => {
+  // The live defect: cycle_number counted recovered cycles, so a customer who fixed their card
+  // in August was cancelled within minutes of one ordinary decline in November.
+  const prior = [{ status: "recovered", created_at: daysAgo(40) }];
+  assert.equal(effectiveLadderStep(prior, NOW), 1);
+  assert.equal(resolveCycleAction(effectiveLadderStep(prior, NOW), SETTINGS), "skip");
+});
+
+test("ladder: the previous renewal also went unrecovered → rung 2 (cancel)", () => {
+  const prior = [{ status: "exhausted", created_at: daysAgo(35) }];
+  assert.equal(effectiveLadderStep(prior, NOW), 2);
+  assert.equal(resolveCycleAction(effectiveLadderStep(prior, NOW), SETTINGS), "cancel");
+});
+
+test("ladder: the run stops at the newest recovered cycle", () => {
+  const prior = [
+    { status: "exhausted", created_at: daysAgo(30) },
+    { status: "recovered", created_at: daysAgo(60) },
+    { status: "exhausted", created_at: daysAgo(90) },
+  ];
+  assert.equal(effectiveLadderStep(prior, NOW), 2);
+});
+
+test("ladder: an unrecovered cycle older than the lookback does not count", () => {
+  // Renewals that charged fine in between leave no dunning row, so age is the only signal.
+  const prior = [{ status: "exhausted", created_at: daysAgo(200) }];
+  assert.equal(effectiveLadderStep(prior, NOW), 1);
+});
+
+test("ladder: a missing created_at fails toward the gentle rung", () => {
+  assert.equal(effectiveLadderStep([{ status: "exhausted", created_at: null }], NOW), 1);
 });

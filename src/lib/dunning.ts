@@ -565,6 +565,60 @@ export function resolveCycleAction(
   return (cycleNumber ?? 1) >= 2 ? settings.dunning_cycle_2_action : settings.dunning_cycle_1_action;
 }
 
+/** How far back a prior unrecovered cycle still counts as "the previous renewal also failed". */
+export const LADDER_LOOKBACK_DAYS = 120;
+
+/**
+ * Which rung of the skip → cancel ladder this cycle is on, from the contract's PRIOR closed
+ * cycles (newest first, current cycle excluded).
+ *
+ * ⭐ Why not `cycle_number`. `createDunningCycle` numbers a cycle as max(prior recovered OR
+ * exhausted) + 1 over the contract's whole life, so a customer who failed once in August,
+ * updated their card and paid, then hit one insufficient-funds decline in November arrived as
+ * cycle 2 and was CANCELLED on the spot. The ladder is meant to cancel only after consecutive
+ * unrecovered renewals. So: count the run of `exhausted` cycles before this one, stopping at the
+ * first `recovered` cycle or the first one older than LADDER_LOOKBACK_DAYS (a renewal that
+ * charged fine in between creates no dunning row, so age is the only signal for that).
+ */
+export function effectiveLadderStep(
+  priorClosedNewestFirst: { status: string | null; created_at: string | null }[],
+  now: Date = new Date(),
+  lookbackDays: number = LADDER_LOOKBACK_DAYS,
+): number {
+  const cutoff = now.getTime() - lookbackDays * 24 * 60 * 60 * 1000;
+  let step = 1;
+  for (const c of priorClosedNewestFirst) {
+    if (c.status === "recovered") break;
+    const t = c.created_at ? Date.parse(c.created_at) : NaN;
+    if (!Number.isFinite(t) || t < cutoff) break;
+    if (c.status === "exhausted") step++;
+  }
+  return step;
+}
+
+/** DB wrapper for {@link effectiveLadderStep}. Falls back to step 1 (the gentle action) on a read error. */
+export async function getEffectiveLadderStep(
+  workspaceId: string,
+  shopifyContractId: string,
+  currentCycleId: string,
+): Promise<number> {
+  const admin = createAdminClient();
+  const { data, error } = await admin
+    .from("dunning_cycles")
+    .select("status, created_at")
+    .eq("workspace_id", workspaceId)
+    .eq("shopify_contract_id", shopifyContractId)
+    .neq("id", currentCycleId)
+    .in("status", ["recovered", "exhausted"])
+    .order("created_at", { ascending: false })
+    .limit(10);
+  if (error) {
+    console.error(`[Dunning] getEffectiveLadderStep read failed for ${shopifyContractId}: ${error.message} — using step 1`);
+    return 1;
+  }
+  return effectiveLadderStep(data || []);
+}
+
 /**
  * End dunning for a subscription because the SUB itself was paused or cancelled.
  *

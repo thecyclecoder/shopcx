@@ -24,6 +24,7 @@ import {
   rollForwardToFutureBillingDate,
   shouldExhaustForRetryCap,
   resolveCycleAction,
+  getEffectiveLadderStep,
 } from "@/lib/dunning";
 import {
   subscriptionAttemptBilling,
@@ -444,7 +445,14 @@ export const dunningPaymentFailed = inngest.createFunction(
 
     // Step 6: All cards exhausted (non-terminal) — skip/pause + send emails
     await step.run("all-cards-exhausted", async () => {
-      await handleAllCardsExhausted(workspace_id, shopify_contract_id, customer_id, cycle, settings);
+      // ⭐ deferHardAction: when payday retries are on, a cancel/pause rung is NOT applied here.
+      // It used to cancel the sub minutes after the first decline of a repeat failure, before
+      // step 7 ever scheduled a retry (and step 7 then flipped the cancelled sub's cycle to
+      // 'retrying', which the cron halted on). The hard action now lands in exhaustPaydayCycle
+      // once the payday retries are spent.
+      await handleAllCardsExhausted(workspace_id, shopify_contract_id, customer_id, cycle, settings, {
+        deferHardAction: !!settings.dunning_payday_retry_enabled,
+      });
     });
 
     // Step 7: Schedule payday retry (cron-driven, not sleep-driven)
@@ -826,9 +834,35 @@ async function handleAllCardsExhausted(
   customerId: string | null,
   cycle: { id: string; cycle_number: number },
   settings: { dunning_cycle_1_action: string; dunning_cycle_2_action: string },
+  opts: { deferHardAction?: boolean } = {},
 ) {
   const admin = createAdminClient();
-  const action = resolveCycleAction(cycle.cycle_number, settings);
+  // ⭐ Ladder rung from CONSECUTIVE unrecovered cycles, not the lifetime cycle_number — see
+  // effectiveLadderStep in src/lib/dunning.ts. One recovered failure months ago no longer
+  // turns the next ordinary decline into an instant cancel.
+  const ladderStep = await getEffectiveLadderStep(workspaceId, shopifyContractId, cycle.id);
+  const action = resolveCycleAction(ladderStep, settings);
+
+  // ⭐ Read BEFORE we stamp it. The old code wrote payment_update_sent=true and then read it
+  // back as the "already sent?" guard, so the guard was always true and the recovery email
+  // never went out on an ordinary (non-terminal) decline — only the terminal-code paths,
+  // which send directly, ever emailed the customer.
+  const { data: alreadySent } = await admin
+    .from("dunning_cycles").select("payment_update_sent").eq("id", cycle.id).maybeSingle();
+  const shouldSendRecoveryEmail = !!customerId && !alreadySent?.payment_update_sent;
+
+  if ((action === "pause" || action === "cancel") && opts.deferHardAction) {
+    // Hard rung, but payday retries are about to be scheduled (step 7 sets status='retrying').
+    // Don't cancel, don't roll the billing date (the open cycle must keep it held). Do send the
+    // card-update email now — this is the window where it can actually save the sub.
+    await updateDunningCycle(cycle.id, { payment_update_sent: true, payment_update_sent_at: new Date().toISOString() });
+    if (shouldSendRecoveryEmail) await sendPaymentRecoveryEmail(workspaceId, customerId!);
+    await postDunningNote(workspaceId, customerId, dunningInternalNote(
+      `All payment methods failed (consecutive failed renewal #${ladderStep}). Payday retries scheduled; the subscription will be ${action === "pause" ? "paused" : "cancelled"} only if they all fail. Payment update email ${shouldSendRecoveryEmail ? "sent" : "already sent"}.`
+    ));
+    await tagCustomerTickets(workspaceId, customerId, "dunning:active");
+    return;
+  }
 
   if (action === "skip") {
     // Appstle auto-skips on billing failure — don't skip again
@@ -872,7 +906,9 @@ async function handleAllCardsExhausted(
     await resetBillingDateAfterDunning(workspaceId, shopifyContractId, cycle.id, false);
   }
 
-  await updateDunningCycle(cycle.id, { payment_update_sent: true, payment_update_sent_at: new Date().toISOString() });
+  if (shouldSendRecoveryEmail) {
+    await updateDunningCycle(cycle.id, { payment_update_sent: true, payment_update_sent_at: new Date().toISOString() });
+  }
 
   // Magic-link recovery email + tagged closed ticket (replaces the static
   // portal URL for both the paused/cancelled and skip cases).
@@ -882,16 +918,16 @@ async function handleAllCardsExhausted(
   // from exhaustPaydayCycle — and it writes payment_update_sent without ever reading it. That
   // sent a second recovery email plus a duplicate ticket a month after the first. The
   // internal path already guards this way (internal-dunning.ts).
-  const { data: alreadySent } = await admin
-    .from("dunning_cycles").select("payment_update_sent").eq("id", cycle.id).maybeSingle();
-  if (customerId && !alreadySent?.payment_update_sent) {
-    await sendPaymentRecoveryEmail(workspaceId, customerId);
+  // (The read happens at the top of this function — see shouldSendRecoveryEmail.)
+  if (shouldSendRecoveryEmail) {
+    await sendPaymentRecoveryEmail(workspaceId, customerId!);
   }
 
   // Post internal note
-  const noteMsg = action === "pause"
-    ? `All payment methods failed for 2 consecutive cycles. Subscription paused. Payment update email sent.`
-    : `All payment methods failed. Order skipped. Payment update email sent.`;
+  const emailPart = shouldSendRecoveryEmail ? "Payment update email sent." : "Payment update email was already sent earlier in this cycle.";
+  const noteMsg = action === "pause" || action === "cancel"
+    ? `All payment methods failed for ${ladderStep} consecutive renewals. Subscription cancelled. ${emailPart}`
+    : `All payment methods failed. Order skipped. ${emailPart}`;
 
   await postDunningNote(workspaceId, customerId, dunningInternalNote(noteMsg));
   await tagCustomerTickets(workspaceId, customerId, "dunning:active");
