@@ -1,0 +1,1 @@
+- **Chat widget: verified identity pass, contact keyed to the merchant's store** · verified 2026-11-16 · → [[../libraries/widget-identity]]

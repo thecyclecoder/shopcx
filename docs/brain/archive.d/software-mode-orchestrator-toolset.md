@@ -1,0 +1,1 @@
+- **Software-mode orchestrator: KB + ShopGrowth store context + confirmed ShopGrowth actions** · verified 2026-11-16 · → [[../integrations/shopgrowth-support-api]]

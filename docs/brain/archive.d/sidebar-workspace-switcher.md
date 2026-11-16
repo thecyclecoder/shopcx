@@ -1,0 +1,1 @@
+- **Sidebar workspace switcher** · verified 2026-11-16 · → [[../dashboard/home]]
