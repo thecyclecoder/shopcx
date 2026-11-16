@@ -69,25 +69,37 @@ Mirrors the checkout route's money path, minus the cart:
    re-pointing a charge is not.
 2. **Resolve the items** — price / sku / title from `product_variants`. A
    variant with no price is rejected rather than charged at zero.
-3. **Tax** — Avalara `SalesInvoice` with `commit: true` when the workspace has
+3. **Shipping address** — the caller's `shippingAddress`, else the customer's
+   most recent order's. A reused address can carry blank name fields, and
+   Amplifier 400s on a nameless ship-to, so the pure `withShipToName(ship,
+   customer)` helper (exported for tests) fills `firstName`/`lastName` AND
+   `first_name`/`last_name` from `customers.first_name`/`last_name` when the
+   address's own name fields are blank/whitespace. The filled address is what's
+   stored on `orders.shipping_address`/`billing_address` and what's sent to
+   Amplifier. Ground truth: order SHOPCX583. See the gotcha below.
+4. **Tax** — Avalara `SalesInvoice` with `commit: true` when the workspace has
    `avalara_enabled`. Guarded: a failure warns and proceeds at zero tax rather
    than blocking a charge the customer is expecting.
-4. **Evidence before money** — a `pending` row in `transactions` BEFORE the
+5. **Evidence before money** — a `pending` row in `transactions` BEFORE the
    sale, so a crash mid-flight still records that we tried to charge. **This
    fails closed**: if the row cannot be written, the card is never touched.
    `transactions.type` is constrained to
    `initial_checkout | renewal | dunning_retry | manual | comp` — a one-off is
    `manual`, tagged `metadata.kind='one_time_charge'`.
-5. **The sale** — `gateway.transaction.sale({ paymentMethodToken, customerId,
+6. **The sale** — `gateway.transaction.sale({ paymentMethodToken, customerId,
    options: { submitForSettlement: true } })`.
-6. **Patch** the transaction row to `succeeded` / `failed`.
-7. **Insert the order** — `financial_status='paid'`, `source_name` separable in
+7. **Patch** the transaction row to `succeeded` / `failed`.
+8. **Insert the order** — `financial_status='paid'`, `source_name` separable in
    reporting. **If this insert fails we refund immediately**, the same way
    checkout does: a DB failure must never leave a customer billed for something
    no one can find.
-8. **Push to Amplifier** — `createAmplifierOrder`, then stamp
-   `amplifier_order_id` / `amplifier_received_at`, or `amplifier_last_error` on
-   failure.
+9. **Push to Amplifier** — `createAmplifierOrder`, then stamp
+   `amplifier_order_id` / `amplifier_received_at` on success. On failure it stamps
+   through `stampAmplifierImportFailure` (from [[../integrations/amplifier]]) so
+   `amplifier_import_attempts` increments and `amplifier_last_attempt_at` is set —
+   the state the reconcile sweep and the stale-errored CEO card read. A bare
+   `amplifier_last_error` update (the old behavior) left `attempts=0` and the
+   order invisible to both rails.
 
 ## Gotchas
 
@@ -97,7 +109,16 @@ Mirrors the checkout route's money path, minus the cart:
   the `createAmplifierOrder` call — that cast is what hid this the first time.
 - **A failed Amplifier push is reported, not swallowed.** `amplifier_error` on
   the result means the customer PAID and the warehouse has nothing. The caller
-  must not tell them it shipped.
+  must not tell them it shipped. The failure is also stamped through
+  `stampAmplifierImportFailure` (not a bare `amplifier_last_error` write) so the
+  attempt counter the reconcile sweep + CEO card read actually moves.
+- **A reused ship-to can be nameless — fill it before Amplifier.** Order
+  SHOPCX583 reused the customer's last order address, which had empty
+  `firstName`/`lastName`; Amplifier 400'd the nameless ship-to and the paid order
+  sat unshipped 28 days (ticket `bafe291b`). `withShipToName` fills the name from
+  the customer record (both camel + snake keys) before the order is stored or
+  pushed. Pinned in `one-time-charge.ship-name.test.ts`. The matching reconcile
+  retry for `shopcx-concierge` orders is [[../inngest/amplifier-import-reconcile]].
 - **The address mapper is lossy by design.** `orders.shipping_address` is
   Shopify-shaped; `toAvalaraAddress` returns `null` on a half-formed address so
   we quote no tax rather than commit a SalesInvoice against it. Pinned in
