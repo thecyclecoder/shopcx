@@ -1,0 +1,1 @@
+- **Hand-made (concierge) orders must never sit paid and unshipped without a retry or an alert** · verified 2026-11-16 · → [[../inngest/amplifier-import-reconcile]]

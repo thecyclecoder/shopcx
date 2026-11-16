@@ -1,0 +1,1 @@
+- **Drop foreign direct-REST spec_card_state.spec_id missing-column noise from the Supabase-logs feed** · verified 2026-11-12 · → [[../libraries/error-feed]]

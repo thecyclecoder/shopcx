@@ -29,6 +29,7 @@ Before the customer ever sees the email:
 ## Step
 
 1. **Pick a flavor** — single-choice from `crisis_events.available_flavor_swaps` (e.g. Strawberry Lemonade, Tropical Punch, Citrus, etc.) + a "Keep Strawberry Lemonade, that's fine" option.
+   The default swap is filtered out of that list. If nothing else remains (two-flavor product), the step states the swap as done (no question) with only Keep / reject, rather than showing "No active crisis found".
 
 ## On submit
 

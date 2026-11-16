@@ -1,0 +1,1 @@
+- **Drop foreign goal_milestones.status missing-column noise at capture** · verified 2026-11-13 · → [[../libraries/error-feed]]

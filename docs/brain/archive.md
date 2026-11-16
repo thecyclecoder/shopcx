@@ -12,6 +12,39 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Drop ad-hoc crisis_events.resolved_at missing-column noise from the error feed** · verified 2026-11-15 · → [[../libraries/error-feed]]
+- **Drop returns.free_label foreign REST noise from error feed** · verified 2026-11-15 · → [[../libraries/error-feed]]
+- **Drop foreign-app noise: returns.shopify_customer_id column-missing from stale direct-REST reads** · verified 2026-11-15 · → [[../libraries/error-feed]]
+- **Drop foreign ad-hoc `spec_phases.phase_num` column-missing reads from the error feed** · verified 2026-11-15 · → [[../libraries/error-feed]]
+- **apply_loyalty_coupon owner-mismatch guard over-refuses on internal subs within a link group** · verified 2026-11-15 · → [[../libraries/action-executor]]
+- **Drop foreign crisis_events.title column-missing noise from the error feed** · verified 2026-11-14 · → [[../libraries/error-feed]]
+- **Drop foreign ad-hoc orders.tracking_numbers/tracking_urls/tracking_company SELECT noise from the Supabase postgres feed** · verified 2026-11-14 · → [[../libraries/error-feed]]
+- **Drop foreign ad-hoc `director_activity.detail` column-missing query from the Control Tower error feed** · verified 2026-11-13 · → [[../libraries/error-feed]]
+- **Drop foreign goal_milestones.status missing-column noise at capture** · verified 2026-11-13 · → [[../libraries/error-feed]]
+- **Extend orders.name noise filter to catch the PostgREST CTE-wrapper form** · verified 2026-11-13 · → [[../libraries/error-feed]]
+- **Drop foreign-app noise: ad hoc SELECT of subscriptions.cancel_reason (not our column)** · verified 2026-11-13 · → [[../libraries/error-feed]]
+- **Scope out foreign malformed-uuid `subscriptions.id` REST/Studio probes from the postgres error feed** · verified 2026-11-13 · → [[../libraries/error-feed]]
+- **Scope out foreign ticket_messages.attachments column-missing noise in the supabase-logs feed** · verified 2026-11-13 · → [[../libraries/error-feed]]
+- **Extend spec_phases.idx noise-drop to also match the PostgREST WITH-pgrst_source CTE query shape** · verified 2026-11-13 · → [[../libraries/error-feed]]
+- **renewal-wedged-cycles must give a failed row one post-due renewal-cron run before flagging it wedged** · verified 2026-11-13 · → [[../libraries/control-tower]]
+- **Security dependency upgrades** · verified 2026-11-13 · → [[../libraries/security-agent]]
+- **Owner-dismissed self-verify-failed builds park auto_build instead of re-queuing** · verified 2026-11-13 · → [[../libraries/agent-jobs]] § Self-verify circuit breaker
+- **New-card dunning recovery must advance the next billing date on the live contract** · verified 2026-11-12 · → [[../inngest/dunning]] + [[../libraries/internal-subscription]]
+- **Drop the foreign ad-hoc REST read of the non-existent agent_jobs.heartbeat_at column from the Control Tower error feed** · verified 2026-11-12 · → [[../libraries/error-feed]] (§ foreign-noise drops § `isForeignSupabasePostgresMissingAgentJobsHeartbeatAtColumnAdhocNoise`)
+- **Drop foreign ad-hoc approval_decisions 'column category does not exist' noise at capture** · verified 2026-11-12 · → [[../libraries/error-feed]]
+- **Scope out foreign goal_milestones.slug missing-column noise from the supabase-logs feed** · verified 2026-11-12 · → [[../libraries/error-feed]]
+- **Scope out foreign invalid-UUID probe on migration_audits.subscription_id from the error feed** · verified 2026-11-12 · → [[../libraries/error-feed]] · [[../tables/migration_audits]]
+- **Drop foreign direct-REST spec_card_state.spec_id missing-column noise from the Supabase-logs feed** · verified 2026-11-12 · → [[../libraries/error-feed]]
+- **Drop foreign PostgREST noise: spec_test_runs.overall_verdict column-missing errors** · verified 2026-11-12 · → [[libraries/error-feed]]
+- **Drop foreign uuid-LIKE-on-returns.id Studio/REST noise at error-feed capture** · verified 2026-11-12 · → [[../libraries/error-feed]]
+- **M3 stall detector must drop owner-dismissed terminal builds** · verified 2026-11-12 · → [[../libraries/mario]]
+- **Extend serializer-aware legit-wait drop to queued-build sources** · verified 2026-11-12 · → [[../libraries/mario]] (§ drops (d3) "Serially-held goal member" + (d3b) "Serially-held goal member with a QUEUED build")
+- **Widen shouldDropSeriallyHeldGoalMember to cover stuck-queued goal members** · verified 2026-11-12 · → [[../libraries/mario]] (§ drops (d3b) "Serially-held goal member with a QUEUED build")
+- **Revert the software-mode live-hours handoff** · verified 2026-11-12 · → [[../inngest/triage-escalations]]
+- **ROAS margin calculator uses real cost rates from closed QuickBooks months** · verified 2026-11-12 · → [[../dashboard/analytics__roas]]
+- **Gate analytics/roas route on workspace membership before returning closed-book cost rates** · verified 2026-11-12 · → [[../dashboard/analytics__roas]]
+- **Filter foreign direct-REST 'specs.overall_status does not exist' noise out of the Control Tower feed** · verified 2026-11-12 · → [[../libraries/error-feed]]
+- **Widget past-chats lookup must not list a shopper's chats from an email alone** · verified 2026-11-12 · → [[../tables/widget_sessions]]
 - **Scope Control Tower capture to drop foreign customer_links.linked_customer_id missing-column REST noise** · verified 2026-11-11 · → [[../libraries/error-feed]]
 - **Drop director_activity.reasoning foreign-read noise from error feed** · verified 2026-11-11 · → [[../libraries/error-feed]]
 - **Drop foreign-app PostgREST noise: column director_activity.ticket_id does not exist** · verified 2026-11-11 · → [[../libraries/error-feed]]

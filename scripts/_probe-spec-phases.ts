@@ -1,32 +1,34 @@
-import { readFileSync } from "fs";
-import { resolve } from "path";
-
-async function main() {
-  const envPath = resolve(__dirname, "../.env.local");
-  for (const line of readFileSync(envPath, "utf8").split("\n")) {
-    const t = line.trim();
-    if (!t || t.startsWith("#")) continue;
-    const eq = t.indexOf("=");
-    if (eq < 0) continue;
-    const k = t.slice(0, eq);
-    if (!process.env[k]) process.env[k] = t.slice(eq + 1);
-  }
-
+async function probe() {
   const { createAdminClient } = await import("../src/lib/supabase/admin");
   const admin = createAdminClient();
 
-  const { data } = await admin
+  const { data: specs } = await admin
+    .from("specs")
+    .select("id, slug, status")
+    .eq("slug", "error-feed-drop-goal-milestones-status-column-adhoc-noise");
+
+  if (!specs || specs.length === 0) {
+    console.log("Spec not found");
+    process.exit(1);
+  }
+
+  const specId = specs[0].id;
+  console.log(`Spec ID: ${specId}, Status column: ${specs[0].status}`);
+
+  const { data: phases } = await admin
     .from("spec_phases")
-    .select("slug, phase, status")
-    .eq("slug", "db-health-request-volume-top-callers-use-delta")
-    .order("phase");
+    .select("phase_num, phase_name, status")
+    .eq("spec_id", specId)
+    .order("phase_num");
 
-  console.log("Spec phases for db-health-request-volume-top-callers-use-delta:");
-  console.log(JSON.stringify(data, null, 2));
-
-  // Check if all are shipped
-  const allShipped = data && data.length > 0 && data.every((row: any) => row.status === "shipped");
-  console.log("\nAll phases shipped:", allShipped);
+  console.log("Phase statuses:");
+  if (phases) {
+    for (const p of phases) {
+      console.log(`  Phase ${p.phase_num} (${p.phase_name}): ${p.status}`);
+    }
+    const allShipped = phases.every(p => p.status === "shipped");
+    console.log(`All phases shipped: ${allShipped}`);
+  }
 }
 
-main().catch(console.error);
+probe();
