@@ -2572,6 +2572,33 @@ test("evalOutputAssertion renewal-outcome-distribution: healthy 5-charged/4-dunn
   assert.equal(verdict, null);
 });
 
+test("evalOutputAssertion renewal-outcome-distribution: 4-charged/5-dunning/1-comp cycle (~40% still charging) is suppressed by the near-zero-charge floor", () => {
+  // Minimum-size cohort at 60% bad — above the hard-floor bad-rate — but 40% of charges still
+  // succeeded. That is ordinary small-cohort decline clustering, not a payment outage, so the
+  // lowered near-zero-charge floor (renewal-systemic-near-zero-charge-floor) must suppress the page;
+  // a moderate elevation like this is the baseline spike branch's job, not the systemic branch's.
+  const verdict = evalOutputAssertion(
+    "renewal-outcome-distribution",
+    RENEWAL_OUTCOME_LOOP,
+    null,
+    baselineAssertionInputs({
+      renewalCurrent: {
+        total: 10,
+        charged: 4,
+        skipped_no_payment_method: 0,
+        skipped_zero_total: 0,
+        declined_to_dunning: 5,
+        comp_shipped: 0,
+        comp_blocked: 1,
+        skipped_other: 0,
+        refused_wedged_cycle: 0,
+        refused_concurrent_renewal: 0,
+      },
+    }),
+  );
+  assert.equal(verdict, null);
+});
+
 test("evalOutputAssertion renewal-outcome-distribution: collapsed 0-charged/9-declined cycle still trips systemic", () => {
   // A genuine creds / no-payment-method outage — charges collapsed to zero. The guard must still let
   // this page: bad-rate ≥ hard floor AND charge-success rate collapsed below the max.
