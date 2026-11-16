@@ -48,6 +48,7 @@ import {
   isForeignSupabasePostgresMissingReturnsResolutionColumnAdhocNoise,
   isForeignSupabasePostgresMissingReturnsFreeLabelColumnAdhocNoise,
   isForeignSupabasePostgresMissingReturnsShopifyCustomerIdColumnAdhocNoise,
+  isForeignSupabasePostgresMissingReturnsRefundOnColumnAdhocNoise,
   isForeignSupabasePostgresMissingTicketsMergedIntoTicketIdColumnAdhocNoise,
   isForeignSupabasePostgresMissingFraudCasesUpdatedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingAgentActionRequestsUpdatedAtColumnAdhocNoise,
@@ -486,6 +487,15 @@ const LOG_QUERIES: LogQuery[] = [
       // `returns` column, the same message via a write/DDL, or a FATAL/PANIC/constraint violation
       // still surfaces / pages.
       if (isForeignSupabasePostgresMissingReturnsShopifyCustomerIdColumnAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: a foreign/stale direct-REST client reads
+      // `public.returns` with a schema that isn't ours (columns `refund_on`, `created_by`),
+      // producing `column returns.refund_on does not exist` — a query ShopCX does not own and
+      // has no lever to fix (signature `supabase-logs:92aa4d87583b035f`). Narrowly gated to
+      // require BOTH the exact `column returns.refund_on does not exist` message AND the
+      // SELECT-lookup shape on `returns` (bare or PostgREST CTE wrapper) — a real schema
+      // regression on any live `returns` column, the same message via a write/DDL, or a
+      // FATAL/PANIC/constraint violation still surfaces / pages.
+      if (isForeignSupabasePostgresMissingReturnsRefundOnColumnAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: a foreign/stale direct-REST client reads
       // `public.fraud_cases` expecting an `updated_at` column that lives only on the sibling
       // `fraud_rules` table. The resulting undefined_column ERROR is repair work for a query
