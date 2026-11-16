@@ -7819,6 +7819,27 @@ test("isForeignSupabasePostgresMissingBillingAttemptEventsCreatedAtAdhocNoise dr
   );
 });
 
+test("isForeignSupabasePostgresMissingBillingAttemptEventsCreatedAtAdhocNoise drops the unqualified bare `column \"created_at\" does not exist` count/min/max probe (signature 0e3379f172768a91)", () => {
+  // Unqualified `min(created_at)`/`max(created_at)` with no table prefix yields a bare
+  // double-quoted `column "created_at" does not exist` — the query-shape gate still pins it to
+  // this table, so it drops.
+  assert.equal(
+    isForeignSupabasePostgresMissingBillingAttemptEventsCreatedAtAdhocNoise(
+      'column "created_at" does not exist',
+      "select count(*), min(created_at), max(created_at) from shopify_billing_attempt_events",
+    ),
+    true,
+  );
+  // Same bare message but the SELECT is on a DIFFERENT table — the gate keeps paging.
+  assert.equal(
+    isForeignSupabasePostgresMissingBillingAttemptEventsCreatedAtAdhocNoise(
+      'column "created_at" does not exist',
+      "select count(*), min(created_at), max(created_at) from public.orders",
+    ),
+    false,
+  );
+});
+
 test("isForeignSupabasePostgresMissingBillingAttemptEventsCreatedAtAdhocNoise drops the PostgREST direct-REST WITH pgrst_source wrapper shape (signature 2a7914826d24d670)", () => {
   assert.equal(
     isForeignSupabasePostgresMissingBillingAttemptEventsCreatedAtAdhocNoise(
