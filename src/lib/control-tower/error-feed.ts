@@ -7312,7 +7312,11 @@ export function isForeignSupabasePostgresMissingBillingAttemptEventsCreatedAtAdh
   const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
   const messageMatches =
     stripped === "column shopify_billing_attempt_events.created_at does not exist" ||
-    stripped === "column public.shopify_billing_attempt_events.created_at does not exist";
+    stripped === "column public.shopify_billing_attempt_events.created_at does not exist" ||
+    // Unqualified probe — `min(created_at)`/`max(created_at)` with no table prefix yields a bare
+    // `column "created_at" does not exist` (double-quoted identifier, no table qualifier). Same
+    // foreign read; the query-shape gate below still restricts it to SELECTs on this table.
+    stripped === 'column "created_at" does not exist';
   if (!messageMatches) return false;
   const q = (query ?? "").trim().toLowerCase();
   if (!q) return false;
