@@ -1,0 +1,1 @@
+- **Scope out the ad-hoc SKU-sales analysis query's round(double precision,integer) error from the Supabase postgres log feed** · verified 2026-11-17 · → [[../libraries/error-feed]]
