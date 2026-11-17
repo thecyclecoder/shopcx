@@ -12,6 +12,20 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Security dependency upgrades** · verified 2026-11-17 · → [[../libraries/security-agent]]
+- **Hand-made (concierge) orders must never sit paid and unshipped without a retry or an alert** · verified 2026-11-16 · → [[../inngest/amplifier-import-reconcile]]
+- **Drop foreign returns.refund_on column-missing noise from the Control Tower error feed** · verified 2026-11-16 · → [[../libraries/error-feed]]
+- **Drop the PostgREST pgrst_source wrapper shape in the spec_status_history.created_at foreign-noise filter** · verified 2026-11-16 · → [[../libraries/control-tower]]
+- **Filter foreign ad-hoc 'column customers.display_name does not exist' noise from the error feed** · verified 2026-11-16 · → [[../libraries/error-feed]]
+- **Scope out foreign direct-REST malformed-UUID equality reads of returns.id from the error feed** · verified 2026-11-16 · → [[../libraries/error-feed]]
+- **Reject unrecognized exec_kind at spec-author chokepoint** · verified 2026-11-16 · → [[libraries/author-spec]]
+- **Tighten renewal outcome-distribution systemic guard to a true near-zero-charge collapse** · verified 2026-11-16 · → [[../libraries/control-tower]]
+- **Drop the unqualified `column "created_at" does not exist` foreign-read noise on shopify_billing_attempt_events** · verified 2026-11-16 · → [[../libraries/error-feed]] (§ Supabase Postgres missing-column noise § `isForeignSupabasePostgresMissingBillingAttemptEventsCreatedAtAdhocNoise`)
+- **Scope out foreign customer_payment_methods.card_type column noise** · verified 2026-11-16 · → [[../libraries/error-feed]]
+- **Sidebar workspace switcher** · verified 2026-11-16 · → [[../dashboard/home]]
+- **Software-mode orchestrator: KB + ShopGrowth store context + confirmed ShopGrowth actions** · verified 2026-11-16 · → [[../integrations/shopgrowth-support-api]]
+- **Software mode for a workspace: skip every CPG step for merchant (software) support** · verified 2026-11-16 · → [[../lifecycles/ticket-lifecycle]]
+- **Chat widget: verified identity pass, contact keyed to the merchant's store** · verified 2026-11-16 · → [[../libraries/widget-identity]]
 - **Drop ad-hoc crisis_events.resolved_at missing-column noise from the error feed** · verified 2026-11-15 · → [[../libraries/error-feed]]
 - **Drop returns.free_label foreign REST noise from error feed** · verified 2026-11-15 · → [[../libraries/error-feed]]
 - **Drop foreign-app noise: returns.shopify_customer_id column-missing from stale direct-REST reads** · verified 2026-11-15 · → [[../libraries/error-feed]]
@@ -1420,6 +1434,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 - **Ticket handling — guaranteed, observable, self-running** · folded 2026-07-07 · → [[lifecycles/ticket-lifecycle]]
 - **Mario — reactive pipeline-plumbing agent + spec timecards** · folded 2026-07-09 · → [[lifecycles/mario-pipeline-plumbing]]
 - **[TEST] Goal-path v2 — clean hands-off validation** · folded 2026-06-29 · → [[recipes/pipeline-validation-tests]]
+- **ShopGrowth merchant support on ShopCX (software mode)** · folded 2026-11-16 · → [[../lifecycles/ticket-lifecycle]]
 - **Sol: set the ticket's direction once (box session), then run it cheap (API) — re-session on drift** · folded 2026-07-08 · → [[lifecycles/ticket-lifecycle]]
 - **v3 Ad Creative Engine** · folded 2026-07-22 · → [[lifecycles/quant-desk-reweight-loop]]
 - **Cross-customer return: `create_return`'s order lookup never proved the order belonged to the ticket's customer** · superseded 2026-08-11 · fix shipped in #2454, not by this spec · → [[../operational-rules]]
