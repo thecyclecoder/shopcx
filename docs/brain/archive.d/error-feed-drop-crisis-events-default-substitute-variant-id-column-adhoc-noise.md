@@ -1,0 +1,1 @@
+- **Drop ad-hoc crisis_events.default_substitute_variant_id missing-column noise from the error feed** · verified 2026-11-17 · → [[../libraries/error-feed]]
