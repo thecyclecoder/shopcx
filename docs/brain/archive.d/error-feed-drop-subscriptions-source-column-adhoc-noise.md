@@ -1,0 +1,1 @@
+- **Stop paging on foreign ad-hoc SELECT of non-existent subscriptions.source column** · verified 2026-11-17 · → [[../libraries/error-feed]]
