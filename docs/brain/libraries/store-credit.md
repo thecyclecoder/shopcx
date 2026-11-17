@@ -34,9 +34,47 @@ async function getStoreCreditHistory(workspaceId: string, customerId: string,) :
 
 ### `StoreCreditParams` — interface
 
+```ts
+interface StoreCreditParams {
+  workspaceId: string;
+  customerId: string;
+  shopifyCustomerId: string;
+  amount: number;
+  reason: string;
+  issuedBy: string | null;    // workspace_member ID, or null for system/auto-issued credit
+  issuedByName: string;        // display_name snapshot
+  ticketId?: string;
+  subscriptionId?: string;
+}
+```
+
 ### `StoreCreditResult` — interface
 
+```ts
+interface StoreCreditResult {
+  ok: boolean;
+  balance: number;
+  transactionId: string | null;
+  error?: string;
+}
+```
+
 ### `StoreCreditLogEntry` — interface
+
+```ts
+interface StoreCreditLogEntry {
+  id: string;
+  type: string;
+  amount: number;
+  currency: string;
+  reason: string | null;
+  issued_by_name: string;
+  ticket_id: string | null;
+  subscription_id: string | null;
+  balance_after: number | null;
+  created_at: string;
+}
+```
 
 ## Callers
 
@@ -45,6 +83,7 @@ async function getStoreCreditHistory(workspaceId: string, customerId: string,) :
 - `src/app/api/store-credit/history/route.ts`
 - `src/app/api/store-credit/issue/route.ts`
 - `src/lib/ai-context.ts`
+- `src/lib/inngest/returns.ts` (issue-store-credit step for auto-issued return credits)
 
 ## Gotchas
 
