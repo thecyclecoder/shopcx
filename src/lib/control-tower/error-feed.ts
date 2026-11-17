@@ -15166,6 +15166,57 @@ export function isForeignSupabasePostgresAdhocSkuSalesRoundTypeNoise(
 }
 
 /**
+ * Foreign-app noise — Postgres raising `function to_char(text, unknown) does not exist` for a
+ * hand-authored exploratory monthly-revenue query run in the Supabase SQL Editor. The bug is
+ * the query's own: it calls `to_char(month, 'yyyy-mm')` where `month` is a `text` column, so
+ * the `to_char(text, unknown)` overload (which Postgres does not offer — `to_char` takes a
+ * `timestamp`/`numeric` first argument) fails to resolve. That query is NOT ShopCX source —
+ * it reads a `monthly_revenue_snapshots` relation that exists in no file under `src/` and in
+ * no migration (grep `monthly_revenue_snapshots` to confirm). There is no lever from ShopCX
+ * to fix a query we don't own, so paging Platform on it
+ * ([[../specs/error-feed-drop-adhoc-monthly-revenue-snapshots-to-char-text]], Control Tower
+ * signature `supabase-logs:b979de40e41e6ba2`) is repair work for foreign ad-hoc SQL — the
+ * exact twin of the other `isForeignSupabasePostgres*Adhoc*Noise` capture-time drops, scoped
+ * to this `to_char`-type-mismatch shape instead of a missing-column/relation shape.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the trimmed `event_message` — with an optional leading `ERROR: ` prefix stripped,
+ *      lowercased — EQUALS the exact to_char-overload-missing shape:
+ *      `function to_char(text, unknown) does not exist`, AND
+ *   2. the lowercased `parsed.query` attribute is non-empty and contains BOTH fingerprints of
+ *      this specific query — `to_char(month,'yyyy-mm')` and `from monthly_revenue_snapshots`.
+ *
+ * Narrowly gated so:
+ *   - the same `to_char(text, unknown)` type error from a DIFFERENT query (one of ours,
+ *     missing the fingerprints) still pages — it would be a real product-code bug,
+ *   - any OTHER error message on this same query still pages (the fingerprints alone never
+ *     drop a row),
+ *   - an empty query or empty message never drops.
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not record`,
+ * so returning null here fully suppresses the row (no error_event, no loop_alert, no
+ * signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresAdhocMonthlyRevenueSnapshotsToCharTextNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim().toLowerCase();
+  if (stripped !== "function to_char(text, unknown) does not exist") {
+    return false;
+  }
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  return (
+    q.includes("to_char(month,'yyyy-mm')") &&
+    q.includes("from monthly_revenue_snapshots")
+  );
+}
+
+/**
  * Expected-by-design noise — Postgres reporting `duplicate key value violates unique
  * constraint "dashboard_notifications_dedupe_key_open_uniq"` on an INSERT INTO
  * `public.dashboard_notifications`. That partial UNIQUE index (migration
