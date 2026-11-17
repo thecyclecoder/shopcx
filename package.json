@@ -212,6 +212,7 @@
     "test:mario-build-started-no-build-done": "tsx --test src/lib/mario.build-started-no-build-done.test.ts",
     "test:mario-failed-build-escalation-anchor": "tsx --test src/lib/mario.failed-build-escalation-anchor.test.ts",
     "test:mario-init-loop-guard-owned-slugs": "tsx --test src/lib/mario.init-loop-guard-owned-slugs.test.ts",
+    "test:mario-goal-escort-loop-guard-owned-slugs": "tsx --test src/lib/mario.goal-escort-loop-guard-owned-slugs.test.ts",
     "test:mario-intent-file-line": "tsx --test src/lib/mario.intent-file-line.test.ts",
     "test:mario-idle-spec-backstop": "tsx --test src/lib/mario.idle-spec-backstop.test.ts",
     "test:mario-serially-held-stuck-queued": "tsx --test src/lib/mario.serially-held-stuck-queued.test.ts",
