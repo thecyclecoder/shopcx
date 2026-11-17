@@ -35,6 +35,7 @@ import {
   isForeignGoTrueEdgeNoise,
   isForeignGoTrueAuthLogNoise,
   isForeignSupabasePostgresAdhocSkuSalesRoundTypeNoise,
+  isForeignSupabasePostgresAdhocMonthlyRevenueSnapshotsToCharTextNoise,
   isForeignSupabasePostgresMissingControlTowerEventsLookupNoise,
   isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise,
   isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise,
@@ -2842,6 +2843,15 @@ const LOG_QUERIES: LogQuery[] = [
       // pages ([[../specs/error-feed-drop-adhoc-sku-sales-round-type-noise]], signature
       // `supabase-logs:2bb9715f15cb72f4`).
       if (isForeignSupabasePostgresAdhocSkuSalesRoundTypeNoise(message, query)) return null;
+      // Foreign-app noise: a hand-authored monthly-revenue query in the Supabase SQL Editor
+      // calls `to_char(month, 'yyyy-mm')` on a `text` column, which fails to resolve against
+      // any `to_char` overload. Not ShopCX source — its `monthly_revenue_snapshots` relation
+      // appears in no file under `src/` and in no migration. Narrowly gated to the exact
+      // to_char-type message AND both query fingerprints, so a genuine to_char type bug in
+      // product code (or any other message on this query) still pages
+      // ([[../specs/error-feed-drop-adhoc-monthly-revenue-snapshots-to-char-text]], signature
+      // `supabase-logs:b979de40e41e6ba2`).
+      if (isForeignSupabasePostgresAdhocMonthlyRevenueSnapshotsToCharTextNoise(message, query)) return null;
       return {
         keyParts: ["postgres", severity, message],
         title: `postgres ${severity}: ${message}`,
