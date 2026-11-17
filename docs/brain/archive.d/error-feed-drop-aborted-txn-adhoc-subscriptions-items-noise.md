@@ -1,0 +1,1 @@
+- **Drop foreign-app noise: Postgres 'current transaction is aborted' cascade on an ad-hoc subscriptions-items SQL Editor query** · verified 2026-11-17 · → [[../libraries/error-feed]]
