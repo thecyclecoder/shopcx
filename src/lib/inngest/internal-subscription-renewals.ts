@@ -466,10 +466,14 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
     triggers: [{ event: "internal-subscription/renewal-attempt" }],
   },
   async ({ event, step, attempt }) => {
-    const { subscription_id, workspace_id, expected_next_billing_date, order_now } = event.data as {
+    const { subscription_id, workspace_id, expected_next_billing_date, order_now, recovery } = event.data as {
       subscription_id: string;
       workspace_id: string;
       expected_next_billing_date?: string | null;
+      /** True when fired by the failed-payment recovery flow (src/lib/payment-recovery.ts) after
+       *  the customer saved a new card. Re-anchors the next date to the charge and closes the
+       *  dunning cycle as recovered even if it had already closed as exhausted. */
+      recovery?: boolean;
       /** True when fired by a customer-pressed order-now (subscriptionOrderNow),
        *  not the nightly renewal cron. Drives the `nothing_due` marker on an
        *  already-billed-cycle skip so the async order-now verify can report a
@@ -1612,7 +1616,13 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
     await step.run("advance-next-billing-date", async () => {
       const interval = (ctx.sub.billing_interval || "day").toLowerCase();
       const count = ctx.sub.billing_interval_count || 1;
-      const current = ctx.sub.next_billing_date ? new Date(ctx.sub.next_billing_date) : new Date();
+      // ⭐ A RECOVERY charge collects the missed order, so the next one is one interval after
+      // the charge. Advancing from the stored date double-counted: by the time the customer fixes
+      // their card the date has ALREADY been moved forward (exhaustPaydayCycle's reset, or
+      // reactivateDunningCancelledSubs setting now + interval), so the customer skipped a whole
+      // cycle. Measured 2026-11-17: a 4-week sub charged 11-16 got a next date of 01-10, an
+      // 8-week sub charged 11-17 got 03-01.
+      const current = recovery ? new Date() : (ctx.sub.next_billing_date ? new Date(ctx.sub.next_billing_date) : new Date());
       const next = advanceToNextFutureBillingDate(current, interval, count, new Date());
       // Filter out one-time items — they shipped on this renewal and
       // shouldn't recur.
@@ -1743,6 +1753,7 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
         subscription_id,
         ctx.sub.shopify_contract_id as string,
         ctx.sub.customer_id as string | null,
+        { includeExhausted: !!recovery },
       );
     });
 

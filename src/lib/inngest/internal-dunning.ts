@@ -309,14 +309,29 @@ async function sendInternalRecoveryEmail(workspaceId: string, customerId: string
  * id) so a cycle opened on the old Appstle contract — before a recovery flip
  * to internal — still closes after the recovery charge succeeds.
  */
-export async function closeInternalDunningOnSuccess(workspaceId: string, subscriptionId: string, internalContractId: string, customerId: string | null): Promise<void> {
+export async function closeInternalDunningOnSuccess(
+  workspaceId: string,
+  subscriptionId: string,
+  internalContractId: string,
+  customerId: string | null,
+  opts: { includeExhausted?: boolean } = {},
+): Promise<void> {
   const admin = createAdminClient();
-  const { data: cycle } = await admin
+  // ⭐ includeExhausted: a RECOVERY charge (customer fixed their card after the cycle had
+  // already closed as exhausted) should still mark that cycle recovered, or recovery reporting
+  // misses money we actually collected. Only the newest cycle, only within 120 days, and never a
+  // cycle closed for a non-dunning reason (closed_reason set = customer paused/cancelled).
+  const statuses = opts.includeExhausted ? ["active", "retrying", "open", "exhausted"] : ["active", "retrying", "open"];
+  let q = admin
     .from("dunning_cycles")
     .select("id")
     .eq("workspace_id", workspaceId)
     .eq("subscription_id", subscriptionId)
-    .in("status", ["active", "retrying", "open"])
+    .in("status", statuses);
+  if (opts.includeExhausted) {
+    q = q.is("closed_reason", null).gte("created_at", new Date(Date.now() - 120 * 86400000).toISOString());
+  }
+  const { data: cycle } = await q
     .order("created_at", { ascending: false })
     .limit(1)
     .maybeSingle();

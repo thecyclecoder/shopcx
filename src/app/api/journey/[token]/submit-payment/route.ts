@@ -178,6 +178,31 @@ export async function POST(
   const brand = result.vaulted.cardBrand || "card";
   const last4 = result.vaulted.last4 || "????";
 
+  // ⭐ Run the SAME failed-payment recovery the portal's recover link runs
+  // (src/lib/payment-recovery.ts): reactivate dunning-cancelled subs, pin the new card, and
+  // charge only subs that were failing. Before 2026-11-17 this route stopped at vault+migrate,
+  // so a customer who fixed their card here stayed cancelled and was never charged. Runs AFTER
+  // the compare-and-set above, so a concurrent tab can't dispatch the recovery charge twice.
+  const { runPaymentRecovery } = await import("@/lib/payment-recovery");
+  const recovery = await runPaymentRecovery({
+    workspaceId: session.workspace_id,
+    customer: {
+      id: customer.id,
+      email: customer.email,
+      first_name: (customer.first_name as string | null) || null,
+      last_name: (customer.last_name as string | null) || null,
+    },
+    paymentMethodId: result.paymentMethodId,
+    cardBrand: result.vaulted.cardBrand,
+    last4: result.vaulted.last4,
+    migratedCount: result.migratedCount,
+    notify: "if_recovered",
+    logPrefix: "[journey/submit-payment]",
+  });
+  const recoveryNote =
+    (recovery.reactivatedCount ? ` Reactivated ${recovery.reactivatedCount} dunning-cancelled sub(s).` : "") +
+    (recovery.chargedCount ? ` Charging ${recovery.chargedCount} sub(s) now for the missed payment.` : "");
+
   // Emit an EXACTLY-ONE-COPY internal + external ticket message so the ticket
   // reads identically regardless of channel (mini-site vs live chat parity
   // per Phase 3 spec).
@@ -187,7 +212,7 @@ export async function POST(
       direction: "outbound",
       visibility: "internal",
       author_type: "system",
-      body: `[System] add_payment_method journey completed — ${brand} ending ${last4} on file${result.migratedCount ? ` (migrated ${result.migratedCount} sub(s) to internal)` : ""}. payment_method_id=${result.paymentMethodId}`,
+      body: `[System] add_payment_method journey completed — ${brand} ending ${last4} on file${result.migratedCount ? ` (migrated ${result.migratedCount} sub(s) to internal)` : ""}. payment_method_id=${result.paymentMethodId}.${recoveryNote}`,
     });
     await admin.from("ticket_messages").insert({
       ticket_id: session.ticket_id,

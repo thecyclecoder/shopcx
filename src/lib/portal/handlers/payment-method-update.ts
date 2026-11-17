@@ -111,104 +111,22 @@ export const updatePaymentMethod: RouteHandler = async ({ auth, route, req }) =>
   let reactivatedCount = 0;
   let chargedCount = 0;
   if (recover) {
-    try {
-      const { linkGroupIds } = await import("@/lib/customer-links");
-      const groupIds = await linkGroupIds(admin, auth.workspaceId, customer.id);
-      // Reactivate subs that DUNNING cancelled (keyed on an exhausted dunning cycle
-      // — never voluntary cancels). Done before the pin query so revived subs are
-      // active and get the new card pinned in the same pass.
-      let reactivatedIds: string[] = [];
-      try {
-        const { reactivateDunningCancelledSubs } = await import("@/lib/inngest/internal-dunning");
-        reactivatedIds = await reactivateDunningCancelledSubs(auth.workspaceId, groupIds);
-        reactivatedCount = reactivatedIds.length;
-      } catch (e) {
-        console.error("[portal/payment] dunning reactivate failed (non-fatal):", e instanceof Error ? e.message : e);
-      }
-      const { data: subs } = await admin
-        .from("subscriptions")
-        .select("id")
-        .eq("workspace_id", auth.workspaceId)
-        .in("customer_id", groupIds)
-        .eq("is_internal", true)
-        .in("status", ["active", "paused"]);
-      const subIds = (subs || []).map((s) => s.id as string);
-      if (subIds.length) {
-        await admin.from("subscriptions")
-          .update({ payment_method_id: saved.id, updated_at: new Date().toISOString() })
-          .in("id", subIds);
-        pinnedCount = subIds.length;
-      }
-
-      // Recover the missed payment NOW: charge the new card immediately for any
-      // sub that was failing (an open dunning cycle) or that we just reactivated,
-      // instead of waiting for the next scheduled renewal. The internal renewal
-      // pipeline charges → creates the order → closes the dunning cycle on success
-      // (closeInternalDunningOnSuccess). Healthy subs (no dunning cycle) are NOT
-      // charged — we only collect what was actually owed.
-      try {
-        const { data: openCycles } = await admin
-          .from("dunning_cycles")
-          .select("subscription_id")
-          .eq("workspace_id", auth.workspaceId)
-          .in("customer_id", groupIds)
-          .in("status", ["active", "retrying", "open"]);
-        const chargeSet = new Set<string>([
-          ...reactivatedIds,
-          ...(openCycles || []).map((c) => c.subscription_id as string).filter(Boolean),
-        ]);
-        // Only charge subs that are now internal + active (migrated + reactivated).
-        const chargeIds = subIds.filter((id) => chargeSet.has(id)).concat(
-          reactivatedIds.filter((id) => !subIds.includes(id)),
-        );
-        if (chargeIds.length) {
-          const dedupedChargeIds = [...new Set(chargeIds)];
-          // ⭐ Load each sub's pre-charge next_billing_date and stamp it onto the event so the
-          // per-cycle claim pins to the DISPATCHED cycle rather than a post-advance live read.
-          // Two attempts on the same sub with the OLD live-read key would compute different
-          // keys once the first advanced the sub, and both would charge — see
-          // docs/brain/specs/a-renewal-cycle-key-must-not-derive-from-a-field-the-charge-moves.md.
-          const { data: chargeSubs } = await admin
-            .from("subscriptions")
-            .select("id, next_billing_date")
-            .eq("workspace_id", auth.workspaceId)
-            .in("id", dedupedChargeIds);
-          const nextBillingById = new Map<string, string | null>(
-            (chargeSubs || []).map((s) => [s.id as string, (s.next_billing_date as string | null) ?? null]),
-          );
-          const { inngest } = await import("@/lib/inngest/client");
-          for (const subscription_id of dedupedChargeIds) {
-            await inngest.send({
-              name: "internal-subscription/renewal-attempt",
-              data: {
-                workspace_id: auth.workspaceId,
-                subscription_id,
-                expected_next_billing_date: nextBillingById.get(subscription_id) ?? null,
-              },
-            });
-          }
-          chargedCount = dedupedChargeIds.length;
-        }
-      } catch (e) {
-        console.error("[portal/payment] recover immediate-charge failed (non-fatal):", e instanceof Error ? e.message : e);
-      }
-    } catch (e) {
-      console.error("[portal/payment] recover pin failed (non-fatal):", e instanceof Error ? e.message : e);
-    }
-    try {
-      const { notifyPaymentRecovered } = await import("@/lib/notify-payment-recovered");
-      await notifyPaymentRecovered(auth.workspaceId, {
-        customerName: [customer.first_name, customer.last_name].filter(Boolean).join(" "),
-        email: customer.email || "",
-        brand: vaulted.cardBrand,
-        last4: vaulted.last4,
-        migratedCount,
-        pinnedCount,
-        reactivatedCount,
-      });
-    } catch (e) {
-      console.error("[portal/payment] recover Slack notify failed (non-fatal):", e instanceof Error ? e.message : e);
-    }
+    // Shared with the add_payment_method journey (src/lib/payment-recovery.ts) so a card fixed
+    // on either surface recovers the subscription the same way.
+    const { runPaymentRecovery } = await import("@/lib/payment-recovery");
+    const r = await runPaymentRecovery({
+      workspaceId: auth.workspaceId,
+      customer: { id: customer.id, email: customer.email || "", first_name: customer.first_name as string | null, last_name: customer.last_name as string | null },
+      paymentMethodId: saved.id,
+      cardBrand: vaulted.cardBrand,
+      last4: vaulted.last4,
+      migratedCount,
+      notify: "always",
+      logPrefix: "[portal/payment]",
+    });
+    pinnedCount = r.pinnedCount;
+    reactivatedCount = r.reactivatedCount;
+    chargedCount = r.chargedCount;
   }
 
   await logPortalAction({
