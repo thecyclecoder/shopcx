@@ -322,7 +322,7 @@ export const returnsIssueRefund = inngest.createFunction(
           shopifyCustomerId: cust.shopify_customer_id,
           amount: amountCents / 100,
           reason: `Return ${ret.order_number} delivered — store credit issued`,
-          issuedBy: "system",
+          issuedBy: null,
           issuedByName: "ShopCX (auto)",
         });
       });
