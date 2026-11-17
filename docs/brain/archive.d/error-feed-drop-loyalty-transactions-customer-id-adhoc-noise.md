@@ -1,0 +1,1 @@
+- **Drop foreign direct-REST loyalty_transactions.customer_id undefined-column noise from the error feed** · verified 2026-11-17 · → [[../libraries/error-feed]]

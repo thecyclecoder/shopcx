@@ -1,0 +1,1 @@
+- **Drop foreign direct-REST crisis_customer_actions.contract_id column-missing noise from the error feed** · verified 2026-11-17 · → [[../libraries/error-feed]]
