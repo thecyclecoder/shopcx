@@ -103,6 +103,7 @@ import {
   isForeignSupabasePostgresMissingSubscriptionsFreeShippingColumnAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsEngineColumnAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsBillingEngineColumnAdhocNoise,
+  isForeignSupabasePostgresMissingSubscriptionsSourceColumnAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsDiscountCodeColumnAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsCancellationReasonColumnAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsCancelReasonColumnAdhocNoise,
@@ -1087,6 +1088,13 @@ const LOG_QUERIES: LogQuery[] = [
       // subscriptions column (e.g. `items`) or a non-SELECT shape still pages (signature
       // supabase-logs:e17a9b5e9ac40aaf).
       if (isForeignSupabasePostgresMissingSubscriptionsBillingEngineColumnAdhocNoise(message, query)) return null;
+      // Same narrow gate for the foreign `subscriptions.source` lookup — where a
+      // subscription originated is tracked via is_internal + billing_source, there is no
+      // `source` column (it only exists in third-party subscription-app schemas), and no
+      // ShopCX code path selects it; a real regression on any other subscriptions column
+      // (e.g. `items`) or a non-SELECT shape still pages (signature
+      // supabase-logs:508252dfdf040087).
+      if (isForeignSupabasePostgresMissingSubscriptionsSourceColumnAdhocNoise(message, query)) return null;
       // Same narrow gate for the foreign `subscriptions.discount_code` lookup — the real
       // discount storage is the `applied_discounts` jsonb column, there is no
       // `discount_code` column, and no ShopCX code path selects it; a real regression on
