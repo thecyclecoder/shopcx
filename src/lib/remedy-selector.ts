@@ -35,6 +35,32 @@ interface CustomerContext {
   isGrandfathered?: boolean;
 }
 
+/**
+ * ⭐ Pitch ↔ action guard (2026-11-17). The AI writes its own pitch per remedy id, and nothing
+ * checked that the words matched the action. Ground truth: on 2026-10-20 a customer was shown
+ * "Skip your next order to clear that overstock…" on the "every 2 months" FREQUENCY remedy, clicked
+ * it, and got a frequency change instead of a skip. A pitch that names a DIFFERENT billing action
+ * (skip / pause / frequency / discount) than the remedy's own type is replaced with the remedy's
+ * DB description (or name), so the button always describes what it does. Both cancel surfaces
+ * (portal cancel-journey + mini-site journey) call `selectRemedies`, so both get the guard.
+ */
+const ACTION_PATTERNS: Record<string, RegExp> = {
+  skip: /\bskip(s|ped|ping)?\b/i,
+  pause: /\b(pause[sd]?|pausing)\b/i,
+  frequency_change: /\b(every\s+(\d+|two|three|four|six|eight|other)\b|less often|frequency|spread (it|them|your \w+) out)/i,
+  coupon: /(\d+\s*%|\$\s*\d+)\s*off\b|\bdiscount/i,
+};
+
+/** True when the pitch names a billing action other than `remedyType`. Exported for tests. */
+export function pitchContradictsRemedyType(pitch: string, remedyType: string): boolean {
+  if (!pitch) return false;
+  for (const [type, re] of Object.entries(ACTION_PATTERNS)) {
+    if (type === remedyType) continue;
+    if (re.test(pitch)) return true;
+  }
+  return false;
+}
+
 // Minimum number of "shown" events before we trust historical acceptance rates
 const STATS_THRESHOLD = 200;
 
@@ -246,6 +272,8 @@ Available remedies: ${JSON.stringify(remedyList)}
 Available coupons: ${JSON.stringify(couponList)}
 Product reviews: ${JSON.stringify(reviewList)}${suggestedRemedyId ? `\n\nIMPORTANT: The admin has suggested remedy ID "${suggestedRemedyId}" for this cancel reason. Prioritize including it in your top 3 picks if it's a good fit, but still choose the best overall combination.` : ""}${firstRenewalContext}${grandfatheredContext}
 
+IMPORTANT: Each pitch must describe ONLY the action of the remedy it is attached to. Never mention skipping on a pause or frequency remedy, a discount on a non-coupon remedy, and so on.
+
 IMPORTANT: Never select two remedies of the same type (e.g. don't show two coupons or two pause options). Each remedy must be a different type to give the customer distinct choices.
 
 Return a JSON array of exactly 3 remedies with:
@@ -292,8 +320,15 @@ Return ONLY the JSON array, no other text.`,
     const remedyMap = new Map(remedies.map(r => [r.id, r]));
     const enriched = selections.slice(0, 3).map(s => {
       const r = remedyMap.get(s.remedy_id);
+      const rType = r?.type || "";
+      let pitch = s.pitch;
+      if (pitchContradictsRemedyType(pitch, rType)) {
+        console.warn(`[remedy-selector] AI pitch contradicts remedy type ${rType} (${s.remedy_id}) — using DB text. Pitch was: ${pitch}`);
+        pitch = r?.description || r?.name || "";
+      }
       return {
         ...s,
+        pitch,
         name: r?.name || "",
         description: r?.description || null,
         type: r?.type || "",

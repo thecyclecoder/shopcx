@@ -25,6 +25,14 @@ function isConcreteReason(_reason: string) : boolean
 async function selectRemedies(workspaceId: string, cancelReason: string, customer: CustomerContext, shopifyProductIds: string[], suggestedRemedyId?: string | null,) : Promise<
 ```
 
+### `pitchContradictsRemedyType` — function
+
+```ts
+function pitchContradictsRemedyType(pitch: string, remedyType: string): boolean
+```
+
+True when an AI pitch names a billing action (skip / pause / frequency_change / coupon) other than the remedy's own type. `selectRemedies` uses it to swap a contradicting pitch for the remedy's DB `description` (or `name`), and logs a `[remedy-selector] AI pitch contradicts remedy type` warning. Tests: `src/lib/remedy-selector.pitch-guard.test.ts`.
+
 ### `generateOpenEndedResponse` — function
 
 ```ts
@@ -35,12 +43,14 @@ async function generateOpenEndedResponse(workspaceId: string, cancelReason: stri
 
 - `src/app/api/journey/[token]/chat/route.ts`
 - `src/app/api/journey/[token]/remedies/route.ts`
+- `src/lib/portal/handlers/cancel-journey.ts` (portal cancel flow — same selector, so both surfaces get the same offers + guard)
 
 ## Gotchas
 
 - Per-(reason, remedy) stats kick in at 200+ data points; otherwise global stats.
 - Open-ended chat is capped at 3 turns — never more.
 - First-renewal customers get aggressive save offers (25-40% discounts).
+- ⭐ **The button must say what it does (2026-11-17).** The AI writes a free-text pitch per remedy id and nothing used to check it against the remedy's type. On 2026-10-20 a customer was shown "Skip your next order to clear that overstock…" on the every-2-months frequency remedy, clicked it, and got a frequency change. A pitch that names a different billing action now falls back to the remedy's DB text (`pitchContradictsRemedyType`); the prompt also tells the model to describe only the attached remedy's action.
 
 ## Outage resilience (agent-outage-resilience Phase 3)
 
