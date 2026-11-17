@@ -1,0 +1,1 @@
+- **Drop ad-hoc `column s.source does not exist` subscriptions-alias noise at capture** · verified 2026-11-17 · → [[../libraries/error-feed]]
