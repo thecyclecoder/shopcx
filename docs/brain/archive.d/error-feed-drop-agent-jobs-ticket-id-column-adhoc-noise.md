@@ -1,0 +1,1 @@
+- **Scope out foreign agent_jobs.ticket_id undefined-column noise from the Control Tower error feed** · verified 2026-11-17 · → [[../libraries/error-feed]]
