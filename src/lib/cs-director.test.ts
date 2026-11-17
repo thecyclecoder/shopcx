@@ -44,6 +44,7 @@ import {
   findUnsatisfiedCustomerRequests,
   extractRemedyCustomerMessage,
   extractRemedyOrderRefFromStep,
+  isMergedAwayTicket,
   planAuthorSpec,
   planRemedyExecution,
   promoteRecommendedRemedyToExecutable,
@@ -3087,4 +3088,84 @@ test("a REAL customer change ask is still flagged (exemption is scoped, not blan
   };
   const out = findUnsatisfiedCustomerRequests([realAsk], []);
   assert.equal(out.length, 1, "a genuine customer ask must still block close_no_action");
+});
+
+// ── Merged-away guard (june's-verdict-is-a-no-op-on-a-ticket-merged-away) ─────────────────────────
+// Ground truth: ticket 6c8ff2e2 merged into 8c1a4d0b (status='archived', merged_into set) WHILE June
+// was reviewing it; her escalate_founder verdict applied to the archived copy anyway and parked a CEO
+// card + holding email that sat in the founder queue for a week. The guard re-reads the ticket before
+// branching on the verdict and short-circuits a merged-away copy to a no-op stale_merged result.
+
+test("isMergedAwayTicket: true when merged_into is set, true when status archived, false otherwise", () => {
+  assert.equal(isMergedAwayTicket({ status: "open", merged_into: "8c1a4d0b" }), true, "merged_into set ⇒ merged away");
+  assert.equal(isMergedAwayTicket({ status: "archived", merged_into: null }), true, "status archived ⇒ merged away");
+  assert.equal(isMergedAwayTicket({ status: "open", merged_into: null }), false, "live open ticket ⇒ not merged away");
+  assert.equal(isMergedAwayTicket({}), false, "empty shape ⇒ not merged away");
+});
+
+test("applyBoxCsDirectorCall returns stale_merged on a merged-away ticket WITHOUT running the escalate handler", async () => {
+  let escalateDelivered = false;
+  let notedBody: string | null = null;
+  const admin = {
+    from(table: string) {
+      return {
+        select(_cols: string) {
+          return {
+            eq(_col: string, _val: string) {
+              return {
+                async maybeSingle() {
+                  if (table === "agent_jobs") {
+                    return {
+                      data: {
+                        id: "job-merged",
+                        workspace_id: "ws-1",
+                        kind: "cs-director-call",
+                        instructions: JSON.stringify({ ticket_id: "6c8ff2e2", triage_run_id: "run-9" }),
+                      },
+                    };
+                  }
+                  if (table === "tickets") {
+                    // Archived copy: merged into the surviving ticket mid-review.
+                    return { data: { status: "archived", merged_into: "8c1a4d0b" } };
+                  }
+                  return { data: null };
+                },
+              };
+            },
+          };
+        },
+        insert(row: { body?: string }) {
+          if (table === "ticket_messages") notedBody = row.body ?? null;
+          return Promise.resolve({ data: null, error: null });
+        },
+      };
+    },
+  } as unknown as Admin;
+
+  // If the escalate handler ran it would try to deliver the holding ack via this dep — it must NOT.
+  const deps: ApproveRemedyDeps = {
+    loadTicketFacts: async () => ({ customer_id: "cust-1", channel: "email" }),
+    loadWorkspaceSandbox: async () => false,
+    runExecutor: async () => ({ messageSent: false, escalated: false, closed: false, statusManaged: false }),
+    deliverMessage: async () => {
+      escalateDelivered = true;
+    },
+  };
+
+  const verdict: CsDirectorVerdictInput = {
+    decision: "escalate_founder",
+    reasoning: "Out-of-leash overcharge — needs the CEO's ruling.",
+    recommended_remedy: { kind: "refund", summary: "Refund the overcharge" },
+  };
+
+  const result = await applyBoxCsDirectorCall(admin, "job-merged", verdict, deps);
+  assert.equal(result.ok, true, "stale_merged is a clean no-op, not an error");
+  assert.equal(result.handler, "stale_merged", "a merged-away ticket short-circuits to stale_merged");
+  assert.equal(result.linkage_ticket_id, undefined, "the escalate handler never ran — no linkage payload");
+  assert.equal(escalateDelivered, false, "NO customer message delivered — nothing is applied to the archived ghost");
+  assert.match(
+    notedBody ?? "",
+    /merged into 8c1a4d0b/,
+    "one internal note names the surviving ticket so the audit thread shows why the verdict was a no-op",
+  );
 });

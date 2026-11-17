@@ -141,7 +141,7 @@ export interface CsDirectorVerdictInput {
  */
 export interface ApplyBoxCsDirectorCallResult {
   ok: boolean;
-  handler?: "approve_remedy" | "author_spec" | "escalate_founder" | "close_no_action" | "message_only" | "noop";
+  handler?: "approve_remedy" | "author_spec" | "escalate_founder" | "close_no_action" | "message_only" | "noop" | "stale_merged";
   reason?: string;
   needs_attention?: boolean;
   error?: string;
@@ -221,6 +221,20 @@ export interface PartialRemedyOutcome {
   planned_action_types: string[];
   /** Machine-readable reason a refusal fired (e.g. `loyalty_ceiling_refused`), null on success. */
   refusal_reason?: string | null;
+}
+
+/**
+ * Pure guard: is this ticket one that was MERGED AWAY (folded into a surviving ticket) or otherwise
+ * archived while the director session ran? A merge sets `merged_into` (the surviving ticket's id)
+ * and flips `status` to `'archived'` on the losing copy. A director verdict applied to such a copy
+ * is a no-op on a dead record — the live ticket is handled on the survivor — yet still escalates,
+ * emails, and parks a CEO card against the archived ghost. Ground truth: ticket 6c8ff2e2 merged into
+ * 8c1a4d0b at 14:45:53; June's escalate_founder landed on the archived copy at 14:47:09 and sat in
+ * the founder queue for a week. `applyBoxCsDirectorCall` re-reads the ticket and short-circuits on
+ * this predicate before any handler runs. See [[../tables/tickets]] · [[ticket-merge]].
+ */
+export function isMergedAwayTicket(t: { status?: string | null; merged_into?: string | null }): boolean {
+  return Boolean(t.merged_into) || t.status === "archived";
 }
 
 // ── Pure planners (unit-tested) ────────────────────────────────────────────────────────────────
@@ -3094,12 +3108,53 @@ export async function applyBoxCsDirectorCall(
 
     const { data: jobRow } = await admin
       .from("agent_jobs")
-      .select("id, workspace_id, kind")
+      .select("id, workspace_id, kind, instructions")
       .eq("id", jobId)
       .maybeSingle();
     if (!jobRow) return { ok: false, reason: "job_not_found" };
-    const job = jobRow as { id: string; workspace_id: string; kind: string };
+    const job = jobRow as { id: string; workspace_id: string; kind: string; instructions: string | null };
     if (job.kind !== "cs-director-call") return { ok: false, reason: `wrong_kind:${job.kind}` };
+
+    // ── Merged-away guard (june's-verdict-is-a-no-op-on-a-ticket-merged-away) ──────────────────────
+    // A merge can land AFTER the director session started but BEFORE her verdict is applied. The
+    // losing copy gets `merged_into` set + `status='archived'`; the live ticket is handled on the
+    // survivor. Applying any verdict here (escalate, remedy, message) mutates a dead ghost — the
+    // 2026-11-10 incident parked a CEO card + holding email on ticket 6c8ff2e2 after it merged into
+    // 8c1a4d0b, and it sat escalated for a week. So re-read the ticket and, if it was merged away,
+    // apply NOTHING: write one internal note naming the survivor and return stale_merged.
+    let ticketId: string | null = null;
+    try {
+      const parsed = job.instructions ? (JSON.parse(job.instructions) as { ticket_id?: string }) : null;
+      if (parsed?.ticket_id) ticketId = String(parsed.ticket_id);
+    } catch {
+      /* unresolvable ticket id — fall through; handlers surface their own needs_attention guard */
+    }
+    if (ticketId) {
+      const { data: ticketRow } = await admin
+        .from("tickets")
+        .select("status, merged_into")
+        .eq("id", ticketId)
+        .maybeSingle();
+      const ticket = ticketRow as { status: string | null; merged_into: string | null } | null;
+      if (ticket && isMergedAwayTicket(ticket)) {
+        const survivor = ticket.merged_into ? String(ticket.merged_into) : "(archived)";
+        console.log(
+          `[cs-director:${jobId.slice(0, 8)}] ticket ${ticketId.slice(0, 8)} merged away → survivor ${survivor}; verdict '${String(verdict.decision)}' NOT applied (stale_merged).`,
+        );
+        try {
+          await admin.from("ticket_messages").insert({
+            ticket_id: ticketId,
+            direction: "outbound",
+            author_type: "system",
+            visibility: "internal",
+            body: `[cs-director] verdict ${String(verdict.decision)} not applied: ticket was merged into ${survivor}`,
+          });
+        } catch {
+          /* internal-note failure is best-effort — never blocks the short-circuit */
+        }
+        return { ok: true, handler: "stale_merged" };
+      }
+    }
 
     if (verdict.decision === "approve_remedy") {
       return handleApproveRemedy(admin, jobId, job.workspace_id, verdict, approveRemedyDeps);
