@@ -56,6 +56,7 @@ import {
   isForeignSupabasePostgresMissingAgentActionRequestsUpdatedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingFraudCasesCustomerIdColumnAdhocNoise,
   isForeignSupabasePostgresMissingLoyaltyRedemptionsCustomerIdColumnNoise,
+  isForeignSupabasePostgresMissingLoyaltyTransactionsCustomerIdColumnNoise,
   isForeignSupabasePostgresMissingCustomersDisplayNameAdhocNoise,
   isForeignSupabasePostgresMissingCustomerLinksLinkedCustomerIdColumnNoise,
   isForeignSupabasePostgresSubscriptionsLinkedCustomerIdEdgeListNoise,
@@ -540,6 +541,15 @@ const LOG_QUERIES: LogQuery[] = [
       // shape on `loyalty_redemptions` (bare or PostgREST CTE wrapper) — a different missing
       // column, `customer_id` on `loyalty_members`, a non-SELECT write, or a FATAL still pages.
       if (isForeignSupabasePostgresMissingLoyaltyRedemptionsCustomerIdColumnNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: a foreign/stale PostgREST client reads
+      // `loyalty_transactions` by `customer_id`, a column the ledger has never owned (it is keyed
+      // by `member_id`; `customer_id` lives on the sibling `loyalty_members` table). The resulting
+      // undefined_column ERROR is repair work for a query no ShopCX code owns (Control Tower
+      // signature `supabase-logs:3c76f3fab04b4b69`). Narrowly gated to require BOTH the exact
+      // `column loyalty_transactions.customer_id does not exist` message AND the SELECT-lookup
+      // shape on `loyalty_transactions` (bare or PostgREST CTE wrapper) — a different missing
+      // column, a non-SELECT write, or a FATAL still pages.
+      if (isForeignSupabasePostgresMissingLoyaltyTransactionsCustomerIdColumnNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an external-tool / Studio exploratory SELECT reads
       // `display_name` from `customers`, a column that table has never carried (user-facing names
       // come from `workspace_members.display_name`) and that no ShopCX code selects. The resulting

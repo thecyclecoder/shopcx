@@ -2472,6 +2472,68 @@ export function isForeignSupabasePostgresMissingLoyaltyRedemptionsCustomerIdColu
 }
 
 /**
+ * Foreign-app noise — Postgres reporting a missing `customer_id` column for an ad hoc
+ * direct-REST read of `public.loyalty_transactions`. A foreign/stale PostgREST client reads
+ * `loyalty_transactions` by `customer_id`, a column the table has never owned — the ledger is
+ * keyed by `member_id`; `customer_id` lives on `loyalty_members`. No in-tree code path selects
+ * `loyalty_transactions.customer_id`. The resulting undefined_column ERROR is repair work for a
+ * query no ShopCX code owns (Control Tower signature `supabase-logs:3c76f3fab04b4b69`).
+ *
+ * Sibling of `isForeignSupabasePostgresMissingLoyaltyRedemptionsCustomerIdColumnNoise` — same
+ * narrow-gating shape (exact `column <table>.<name> does not exist` message + SELECT-lookup
+ * shape that covers BOTH the bare SELECT and the PostgREST CTE wrapper), scoped to the
+ * `loyalty_transactions.customer_id` direct-REST shape.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical column-missing shape for `customer_id` on
+ *      `loyalty_transactions` — trimmed equal to `column loyalty_transactions.customer_id does
+ *      not exist` (or the `public.`-qualified variant, with any leading `ERROR: ` prefix
+ *      Postgres includes on the logs surface stripped), AND
+ *   2. the `parsed.query` attribute is a SELECT-lookup on `public.loyalty_transactions` —
+ *      either (a) the bare `select ... from (public.)?loyalty_transactions` shape, OR (b) the
+ *      PostgREST-generated `WITH pgrst_source AS ( SELECT ... FROM
+ *      "public"."loyalty_transactions" ... )` CTE wrapper form with double-quoted identifiers.
+ *
+ * Narrowly gated so:
+ *   - a column-missing error on ANY OTHER table (a real schema regression) still pages,
+ *   - a column-missing error on `loyalty_transactions` for a DIFFERENT column (a real column
+ *     rename that broke a live query) still pages — the pin names
+ *     `loyalty_transactions.customer_id` only,
+ *   - a `loyalty_transactions.customer_id` error attached to a DIFFERENT statement shape
+ *     (INSERT / UPDATE / DELETE / DDL, a JOIN across other tables) still pages — the pin is
+ *     the SELECT-lookup shape; the CTE branch likewise requires the wrapped op to be a SELECT,
+ *   - a FATAL / PANIC / constraint violation is untouched (different message),
+ *   - empty / nullish message OR query returns `false` — we need both markers.
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not record`,
+ * so returning null here fully suppresses the row (no error_event, no loop_alert, no
+ * signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresMissingLoyaltyTransactionsCustomerIdColumnNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column loyalty_transactions.customer_id does not exist" ||
+    stripped === "column public.loyalty_transactions.customer_id does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  // Bare SELECT-lookup on `loyalty_transactions` — any trailing WHERE/LIMIT/ORDER BY is fine;
+  // the pin is the SELECT-FROM shape only, so a non-SELECT / different-FROM statement (real
+  // code-bug shape) stays captured and pages.
+  if (/^select\b[\s\S]*\bfrom\s+(?:public\.)?loyalty_transactions\b/.test(q)) return true;
+  // PostgREST direct-REST wraps the same lookup as `WITH pgrst_source AS ( SELECT ... FROM
+  // "public"."loyalty_transactions" ... )` with double-quoted identifiers. Same foreign-owned
+  // read, different rendering. Guarded so the CTE branch requires the wrapped op to be a SELECT.
+  return /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"public"\."loyalty_transactions"/.test(q);
+}
+
+/**
  * Foreign-app noise — Postgres reporting a missing `display_name` column for an ad hoc
  * direct-REST read of `public.customers`. No file in `src/`, `scripts/`, or the portals
  * selects `display_name` from `customers`, and the `customers` table has no such column —
