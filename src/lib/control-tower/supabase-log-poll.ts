@@ -34,6 +34,7 @@ import {
   isTransientSupabaseLogNoise,
   isForeignGoTrueEdgeNoise,
   isForeignGoTrueAuthLogNoise,
+  isForeignSupabasePostgresAdhocSkuSalesRoundTypeNoise,
   isForeignSupabasePostgresMissingControlTowerEventsLookupNoise,
   isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise,
   isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise,
@@ -2831,6 +2832,16 @@ const LOG_QUERIES: LogQuery[] = [
       // on any other constraint (real schema regression), or on this constraint via a
       // non-INSERT shape (COPY replay, pg_dump load, an UPDATE... on conflict), still pages.
       if (isExpectedSubscriptionCycleChargesCycleUniqViolation(message, query)) return null;
+      // Foreign-app noise: a hand-authored SKU-sales analysis query in the Supabase SQL
+      // Editor calls `round(<double precision>, 2)`, which fails to resolve against the only
+      // two-arg overload `round(numeric, integer)`. Not ShopCX source — its unique aliases
+      // (`net_per_unit`, `med_price`) and median expression
+      // (`percentile_cont(0.5) within group (order by p)`) appear in no file under `src/`.
+      // Narrowly gated to the exact round-type message AND all three query fingerprints, so a
+      // genuine round()-type bug in product code (or any other message on this query) still
+      // pages ([[../specs/error-feed-drop-adhoc-sku-sales-round-type-noise]], signature
+      // `supabase-logs:2bb9715f15cb72f4`).
+      if (isForeignSupabasePostgresAdhocSkuSalesRoundTypeNoise(message, query)) return null;
       return {
         keyParts: ["postgres", severity, message],
         title: `postgres ${severity}: ${message}`,

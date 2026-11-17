@@ -15089,6 +15089,59 @@ export function isForeignSupabasePostgresMissingReturnsRefundOnColumnAdhocNoise(
 }
 
 /**
+ * Foreign-app noise — Postgres raising `function round(double precision, integer) does not
+ * exist` for a hand-authored exploratory SKU-sales analysis query run in the Supabase SQL
+ * Editor. The bug is the query's own: it calls `round(<double precision>, 2)` where the
+ * two-argument `round(numeric, integer)` is the only overload Postgres offers, so the double
+ * argument fails to resolve. That query is NOT ShopCX source — its unique aliases
+ * (`net_per_unit`, `med_price`) and its `percentile_cont(0.5) within group (order by p)`
+ * median expression appear in no file under `src/` (grep all three to confirm). There is no
+ * lever from ShopCX to fix a query we don't own, so paging Platform on it
+ * ([[../specs/error-feed-drop-adhoc-sku-sales-round-type-noise]], Control Tower signature
+ * `supabase-logs:2bb9715f15cb72f4`) is repair work for foreign ad-hoc SQL — the exact twin of
+ * the other `isForeignSupabasePostgres*Adhoc*Noise` capture-time drops, scoped to the
+ * round()-type-mismatch shape instead of a missing-column/relation shape.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the trimmed `event_message` — with an optional leading `ERROR: ` prefix stripped,
+ *      lowercased — EQUALS the exact round-overload-missing shape:
+ *      `function round(double precision, integer) does not exist`, AND
+ *   2. the lowercased `parsed.query` attribute is non-empty and contains ALL THREE
+ *      fingerprints of this specific query — `net_per_unit`, `med_price`, and
+ *      `percentile_cont(0.5) within group (order by p)`.
+ *
+ * Narrowly gated so:
+ *   - the same `round(double precision, integer)` type error from a DIFFERENT query (one of
+ *     ours, missing the fingerprints) still pages — it would be a real product-code bug,
+ *   - any OTHER error message on this same query still pages (the fingerprints alone never
+ *     drop a row),
+ *   - an empty query or empty message never drops.
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not record`,
+ * so returning null here fully suppresses the row (no error_event, no loop_alert, no
+ * signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresAdhocSkuSalesRoundTypeNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim().toLowerCase();
+  if (stripped !== "function round(double precision, integer) does not exist") {
+    return false;
+  }
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  return (
+    q.includes("net_per_unit") &&
+    q.includes("med_price") &&
+    q.includes("percentile_cont(0.5) within group (order by p)")
+  );
+}
+
+/**
  * Expected-by-design noise — Postgres reporting `duplicate key value violates unique
  * constraint "dashboard_notifications_dedupe_key_open_uniq"` on an INSERT INTO
  * `public.dashboard_notifications`. That partial UNIQUE index (migration
