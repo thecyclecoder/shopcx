@@ -2593,6 +2593,62 @@ export function isForeignSupabasePostgresMissingCustomerLinksLinkedCustomerIdCol
 }
 
 /**
+ * Foreign-app noise — Postgres reporting a missing `linked_customer_id` column for an ad hoc
+ * SQL read of `subscriptions` filtered by a `select linked_customer_id from customer_links`
+ * subquery. A foreign/stale client assumed an edge-list `customer_links.linked_customer_id`
+ * our `group_id`-based schema never supported, then joined it against `subscriptions`; the
+ * resulting unqualified `column "linked_customer_id" does not exist` undefined_column ERROR is
+ * repair work for a query no ShopCX code owns (Control Tower signature
+ * `supabase-logs:0e3379f172768a91`). It has paged Platform 40 times.
+ *
+ * Sibling of `isForeignSupabasePostgresMissingCustomerLinksLinkedCustomerIdColumnNoise` above,
+ * which covers the table-qualified message (`column customer_links.linked_customer_id does not
+ * exist`) and a top-level `customer_links` SELECT. This variant differs on both markers: the
+ * message is UNQUALIFIED and double-quoted (`column "linked_customer_id" does not exist`,
+ * because the column appears in a `subscriptions`-top-level query so Postgres can't attribute
+ * it to one relation), and the top-level FROM is `subscriptions`, with `customer_links` only
+ * reached through the subquery — so the qualified sibling's `from customer_links` top-level
+ * pin never matches and the noise leaks through.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the trimmed, `ERROR: `-stripped message equals `column "linked_customer_id" does not
+ *      exist` (the unqualified, double-quoted shape), AND
+ *   2. the lowercased query is a SELECT — either the bare `select ...` form or the PostgREST
+ *      `with pgrst_source as ( select ...` CTE wrapper — that contains BOTH the substrings
+ *      `from customer_links` (optionally `public.`-qualified) and `linked_customer_id`.
+ *
+ * Narrowly gated so:
+ *   - a QUALIFIED column-missing message (a real relation-attributable regression) still pages
+ *     — the pin is the unqualified double-quoted shape only,
+ *   - a DIFFERENT missing column still pages — the pin names `linked_customer_id` only,
+ *   - a non-SELECT write / DDL still pages — the pin is the SELECT shape,
+ *   - a query that never reaches `customer_links` still pages — we require the subquery marker,
+ *   - a FATAL / PANIC / constraint violation is untouched (different message),
+ *   - empty / nullish message OR query returns `false` — we need both markers.
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before `keyParts`
+ * is constructed — the mapRow contract treats `null` as `drop, do not record`, so returning
+ * null here fully suppresses the row (no error_event, no loop_alert, no signature). Not a
+ * `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresSubscriptionsLinkedCustomerIdEdgeListNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  if (stripped !== 'column "linked_customer_id" does not exist') return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  const isSelect =
+    /^select\b/.test(q) || /^with\s+pgrst_source\s+as\s*\(\s*select\b/.test(q);
+  if (!isSelect) return false;
+  if (!/\bfrom\s+(?:public\.)?customer_links\b/.test(q)) return false;
+  return q.includes("linked_customer_id");
+}
+
+/**
  * Foreign-app noise — Postgres reporting a missing lineage column (`parent_redemption_id` or
  * `source_redemption_id`) for an ad hoc direct-REST read of `public.loyalty_redemptions`. A
  * foreign/stale PostgREST client read `loyalty_redemptions` expecting redemption-lineage

@@ -150,6 +150,7 @@ import {
   isForeignSupabasePostgresMissingFraudCasesCustomerIdColumnAdhocNoise,
   isForeignSupabasePostgresMissingLoyaltyRedemptionsCustomerIdColumnNoise,
   isForeignSupabasePostgresMissingCustomerLinksLinkedCustomerIdColumnNoise,
+  isForeignSupabasePostgresSubscriptionsLinkedCustomerIdEdgeListNoise,
   isForeignSupabasePostgresMissingLoyaltyRedemptionsLineageColumnNoise,
   isForeignSupabasePostgresMissingDashboardNotificationsDismissedAtColumnNoise,
   isForeignSupabasePostgresMissingAgentJobsFinishedAtColumnAdhocNoise,
@@ -2948,6 +2949,113 @@ test("isForeignSupabasePostgresMissingCustomerLinksLinkedCustomerIdColumnNoise K
   assert.equal(
     isForeignSupabasePostgresMissingCustomerLinksLinkedCustomerIdColumnNoise(
       "column customer_links.linked_customer_id does not exist",
+      "",
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresSubscriptionsLinkedCustomerIdEdgeListNoise ──
+// A foreign / stale client reads `subscriptions` filtered by a `select linked_customer_id from
+// customer_links` edge-list subquery our `group_id` schema never supported; because the column
+// sits in a `subscriptions`-top-level query, Postgres emits the UNQUALIFIED, double-quoted
+// `column "linked_customer_id" does not exist`. Control Tower signature
+// `supabase-logs:0e3379f172768a91`; it has paged Platform 40 times. The qualified
+// customer_links sibling misses it (unqualified message + subscriptions top-level FROM). Drop AT
+// CAPTURE only when BOTH the exact unqualified message AND a SELECT that reaches customer_links
+// + linked_customer_id are present. A different column, a different table, or a non-SELECT pages.
+
+test("isForeignSupabasePostgresSubscriptionsLinkedCustomerIdEdgeListNoise drops the subscriptions edge-list query (bare SELECT + PostgREST CTE wrapper)", () => {
+  // The captured incident shape: top-level read of `subscriptions`, filtered by a
+  // `linked_customer_id` drawn from a `customer_links` subquery; Postgres rejects with the
+  // unqualified, double-quoted column-missing.
+  assert.equal(
+    isForeignSupabasePostgresSubscriptionsLinkedCustomerIdEdgeListNoise(
+      'column "linked_customer_id" does not exist',
+      "select * from subscriptions where customer_id in (select linked_customer_id from customer_links where customer_id = $1)",
+    ),
+    true,
+  );
+  // The `public.`-qualified subquery FROM is the same class.
+  assert.equal(
+    isForeignSupabasePostgresSubscriptionsLinkedCustomerIdEdgeListNoise(
+      'column "linked_customer_id" does not exist',
+      "select id from subscriptions where customer_id in (select linked_customer_id from public.customer_links)",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresSubscriptionsLinkedCustomerIdEdgeListNoise(
+      'ERROR: column "linked_customer_id" does not exist',
+      "select * from subscriptions where customer_id in (select linked_customer_id from customer_links)",
+    ),
+    true,
+  );
+  // The PostgREST CTE wrapper form drops too.
+  assert.equal(
+    isForeignSupabasePostgresSubscriptionsLinkedCustomerIdEdgeListNoise(
+      'column "linked_customer_id" does not exist',
+      'WITH pgrst_source AS ( SELECT "public"."subscriptions".* FROM "public"."subscriptions" WHERE customer_id IN (SELECT linked_customer_id FROM customer_links) )',
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresSubscriptionsLinkedCustomerIdEdgeListNoise KEEPS real errors (non-SELECT, different table, different column, qualified message, FATAL, empty)", () => {
+  // A non-SELECT write that still references both markers is a real code-bug shape and pages.
+  assert.equal(
+    isForeignSupabasePostgresSubscriptionsLinkedCustomerIdEdgeListNoise(
+      'column "linked_customer_id" does not exist',
+      "update subscriptions set status = 'active' where customer_id in (select linked_customer_id from customer_links)",
+    ),
+    false,
+  );
+  // A SELECT that never reaches `customer_links` (a real missing-column on some other query)
+  // still pages — we require the customer_links subquery marker.
+  assert.equal(
+    isForeignSupabasePostgresSubscriptionsLinkedCustomerIdEdgeListNoise(
+      'column "linked_customer_id" does not exist',
+      "select linked_customer_id from subscriptions",
+    ),
+    false,
+  );
+  // A DIFFERENT missing column (a real schema regression) still pages — the pin names
+  // linked_customer_id only.
+  assert.equal(
+    isForeignSupabasePostgresSubscriptionsLinkedCustomerIdEdgeListNoise(
+      'column "group_id" does not exist',
+      "select * from subscriptions where customer_id in (select linked_customer_id from customer_links)",
+    ),
+    false,
+  );
+  // The QUALIFIED message variant is owned by the sibling predicate, not this one.
+  assert.equal(
+    isForeignSupabasePostgresSubscriptionsLinkedCustomerIdEdgeListNoise(
+      "column customer_links.linked_customer_id does not exist",
+      "select * from subscriptions where customer_id in (select linked_customer_id from customer_links)",
+    ),
+    false,
+  );
+  // A FATAL / constraint-class error is untouched (different message).
+  assert.equal(
+    isForeignSupabasePostgresSubscriptionsLinkedCustomerIdEdgeListNoise(
+      "FATAL: terminating connection due to administrator command",
+      "select * from subscriptions where customer_id in (select linked_customer_id from customer_links)",
+    ),
+    false,
+  );
+  // Empty / nullish message or query returns false — we need both markers.
+  assert.equal(
+    isForeignSupabasePostgresSubscriptionsLinkedCustomerIdEdgeListNoise(
+      "",
+      "select * from subscriptions where customer_id in (select linked_customer_id from customer_links)",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresSubscriptionsLinkedCustomerIdEdgeListNoise(
+      'column "linked_customer_id" does not exist',
       "",
     ),
     false,

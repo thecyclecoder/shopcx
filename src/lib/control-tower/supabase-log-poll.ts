@@ -56,6 +56,7 @@ import {
   isForeignSupabasePostgresMissingLoyaltyRedemptionsCustomerIdColumnNoise,
   isForeignSupabasePostgresMissingCustomersDisplayNameAdhocNoise,
   isForeignSupabasePostgresMissingCustomerLinksLinkedCustomerIdColumnNoise,
+  isForeignSupabasePostgresSubscriptionsLinkedCustomerIdEdgeListNoise,
   isForeignSupabasePostgresMissingLoyaltyRedemptionsLineageColumnNoise,
   isForeignSupabasePostgresMissingCustomerPaymentMethodsCardTypeColumnNoise,
   isForeignSupabasePostgresMissingDashboardNotificationsDismissedAtColumnNoise,
@@ -553,6 +554,12 @@ const LOG_QUERIES: LogQuery[] = [
       // SELECT-lookup shape on `customer_links` (bare or PostgREST CTE wrapper) — a different
       // missing column, a non-SELECT write, or a FATAL still pages.
       if (isForeignSupabasePostgresMissingCustomerLinksLinkedCustomerIdColumnNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: a stale external/REST client reads `subscriptions`
+      // filtered by a `select linked_customer_id from customer_links` edge-list subquery our
+      // `group_id` schema never supported, producing the UNQUALIFIED `column "linked_customer_id"
+      // does not exist` ERROR. The qualified sibling above misses it (unqualified message,
+      // `subscriptions` top-level). Narrowly gated so a real column regression still pages.
+      if (isForeignSupabasePostgresSubscriptionsLinkedCustomerIdEdgeListNoise(message, query)) return null;
       // Drop foreign-app noise at capture: a stale external/REST client SELECTs redemption-lineage
       // columns (`parent_redemption_id` / `source_redemption_id`) from `loyalty_redemptions` that
       // our schema has never carried. The resulting undefined_column ERROR is repair work for a
