@@ -11955,32 +11955,35 @@ export function isForeignSupabasePostgresMissingProductVariantsShopifyProductIdA
 
 /**
  * Foreign-app noise — Postgres reporting `column crisis_customer_actions.<crisis_event_id|
- * status|tier> does not exist` for an ad hoc / stale PostgREST direct-REST SELECT against
- * `public.crisis_customer_actions`. The `crisis_customer_actions` table exists (see
- * [[../tables/crisis_customer_actions]]) but has NEVER carried a `crisis_event_id`
- * column (the FK to [[../tables/crisis_events]] is named `crisis_id`), has NEVER carried
- * a `status` column (lifecycle state is spread across `current_tier`, `cancelled`,
- * `paused_at`, `exhausted_at`, `removed_item_at`, `restored_at`), and has NEVER carried
- * a bare `tier` column (the current escalation level lives on `current_tier`). Every
- * ShopCX reader goes through the crisis SDK / joined queries which select the real
- * column names. The column-missing ERROR only reaches this feed when a foreign app /
- * stale PostgREST session / deprecated integration queries
+ * status|tier|contract_id> does not exist` for an ad hoc / stale PostgREST direct-REST
+ * SELECT against `public.crisis_customer_actions`. The `crisis_customer_actions` table
+ * exists (see [[../tables/crisis_customer_actions]]) but has NEVER carried a
+ * `crisis_event_id` column (the FK to [[../tables/crisis_events]] is named `crisis_id`),
+ * has NEVER carried a `status` column (lifecycle state is spread across `current_tier`,
+ * `cancelled`, `paused_at`, `exhausted_at`, `removed_item_at`, `restored_at`), has NEVER
+ * carried a bare `tier` column (the current escalation level lives on `current_tier`),
+ * and has NEVER carried a `contract_id` column (no ShopCX code path filters this table by
+ * any `contract_id`). Every ShopCX reader goes through the crisis SDK / joined queries
+ * which select the real column names. The column-missing ERROR only reaches this feed
+ * when a foreign app / stale PostgREST session / deprecated integration queries
  * `/rest/v1/crisis_customer_actions?crisis_event_id=eq.<id>` (or `?status=eq.<x>`, or
- * `?tier=eq.<n>`). There is no lever from ShopCX to make that query resolve — paging
- * Platform on it (Control Tower signature `supabase-logs:95b1b2ab1d777150`,
+ * `?tier=eq.<n>`, or `?contract_id=eq.<id>`). There is no lever from ShopCX to make that
+ * query resolve — paging Platform on it (Control Tower signatures
+ * `supabase-logs:95b1b2ab1d777150` and `supabase-logs:988b381bb718bd21` for the
+ * `contract_id` read,
  * [[../specs/error-feed-drop-crisis-customer-actions-column-direct-rest-n]]) is repair
  * work for a query we don't own.
  *
  * Sibling of `isForeignSupabasePostgresMissingProductVariantsShopifyProductIdAdhocNoise`
  * — the same narrow-gating shape (exact `column <table>.<name> does not exist` +
  * SELECT-lookup shape covering BOTH bare and PostgREST CTE wrapper forms), aimed at a
- * different foreign caller on a different table but covering the three off-schema column
+ * different foreign caller on a different table but covering the four off-schema column
  * names observed on this signature.
  *
  * `true` ONLY when BOTH markers are present:
  *   1. the message is Postgres's canonical column-missing shape for THIS table+column
  *      set — trimmed equal to one of
- *      `column crisis_customer_actions.<crisis_event_id|status|tier> does not exist`
+ *      `column crisis_customer_actions.<crisis_event_id|status|tier|contract_id> does not exist`
  *      (or the `public.` qualified variant, with any leading `ERROR: ` prefix Postgres
  *      includes on the logs surface stripped), AND
  *   2. the `parsed.query` attribute is a SELECT-lookup on `public.crisis_customer_actions`
@@ -11995,7 +11998,7 @@ export function isForeignSupabasePostgresMissingProductVariantsShopifyProductIdA
  *     pages — the pin is `crisis_customer_actions.` only,
  *   - a column-missing error on `crisis_customer_actions` for a DIFFERENT column (e.g.
  *     a real column that got renamed — `current_tier`, `cancelled`, `paused_at`) still
- *     pages — the pin covers the three off-schema names only,
+ *     pages — the pin covers the four off-schema names only,
  *   - a `crisis_customer_actions.<col>` error attached to a DIFFERENT statement shape
  *     (INSERT / UPDATE / DELETE / DDL) still pages — the pin is the SELECT-lookup shape,
  *     matching the ad hoc direct-REST read we've observed; the CTE branch likewise
@@ -12028,7 +12031,9 @@ export function isForeignSupabasePostgresMissingCrisisCustomerActionsColumnDirec
     stripped === "column crisis_customer_actions.status does not exist" ||
     stripped === "column public.crisis_customer_actions.status does not exist" ||
     stripped === "column crisis_customer_actions.tier does not exist" ||
-    stripped === "column public.crisis_customer_actions.tier does not exist";
+    stripped === "column public.crisis_customer_actions.tier does not exist" ||
+    stripped === "column crisis_customer_actions.contract_id does not exist" ||
+    stripped === "column public.crisis_customer_actions.contract_id does not exist";
   if (!messageMatches) return false;
   const q = (query ?? "").trim().toLowerCase();
   if (!q) return false;
