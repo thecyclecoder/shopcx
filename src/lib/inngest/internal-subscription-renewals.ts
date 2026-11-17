@@ -1436,6 +1436,10 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
         paymentMethodToken: ctx.pm.braintree_payment_method_token,
         customerId: ctx.pm.braintree_customer_id,
         orderId: orderNumber,
+        // ⭐ Merchant-initiated recurring charge on a stored card. Without this flag the issuer
+        // sees an unexplained card-not-present sale, which declines more often and can't use
+        // the network's stored-credential / recurring handling.
+        transactionSource: "recurring",
         options: { submitForSettlement: true },
       });
       return {

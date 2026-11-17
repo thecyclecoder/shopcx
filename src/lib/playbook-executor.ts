@@ -718,7 +718,7 @@ async function executeStep(
       return handleInitiateReturn(admin, wsId, tid, customer, orders, ctx, step, dataContext, pers, msg, policyRules);
 
     case "cancel_subscription":
-      return handleCancelSubscription(admin, wsId, subs, ctx, step, dataContext, pers, policyRules);
+      return handleCancelSubscription(admin, wsId, subs, ctx, step, dataContext, pers, policyRules, playbook?.name ?? null);
 
     case "pause_subscription":
     case "pause":
@@ -2949,6 +2949,7 @@ async function handleInitiateReturn(
 async function handleCancelSubscription(
   admin: Admin, wsId: string, subs: SubscriptionData[], ctx: Record<string, unknown>,
   step: PlaybookStep, dataCtx: string, pers: { name?: string; tone?: string } | null, policyRules: string,
+  playbookName: string | null = null,
 ): Promise<PlaybookExecResult> {
   const identifiedSub = ctx.identified_subscription as string | undefined;
   const otherActive = (ctx.other_active_subs as string[]) || [];
@@ -2964,7 +2965,10 @@ async function handleCancelSubscription(
   const failed: string[] = [];
 
   for (const contractId of allToCancel) {
-    const result = await subscriptionAction(wsId, contractId, "cancel", "Customer requested via playbook", "AI Playbook");
+    // Name the playbook in the reason (e.g. a refund playbook cancels every active sub by design,
+    // CEO 2026-11-16) so these read as explained cancels in churn analytics, not unexplained ones.
+    const reason = playbookName ? `playbook: ${playbookName}` : "Customer requested via playbook";
+    const result = await subscriptionAction(wsId, contractId, "cancel", reason, "AI Playbook");
     if (result.success) cancelled.push(contractId);
     else failed.push(contractId);
   }

@@ -186,15 +186,25 @@ export async function handleInternalDunningFailure(input: InternalDunningInput):
     ? existing.id
     : (await createDunningCycle(workspace_id, internal_contract_id, subscription_id, customer_id, null)).id;
 
-  // Count prior FAILED attempts on this cycle to decide retry vs exhaust
+  // Count prior FAILED attempts on THIS cycle to decide retry vs exhaust
   // (result='failed' — exclude pending/submitted + succeeded).
+  //
+  // ⭐ Scoped to the cycle's start, not a rolling 90 days. The 90-day window counted failures
+  // from an EARLIER cycle the customer already recovered from, so a customer who failed and
+  // fixed their card last month could hit MAX_PAYDAY_RETRIES on this cycle's first decline and
+  // be cancelled with no retry at all (2026-11-16 leakage review). A new cycle starts at 0.
+  const cycleStartIso = await (async () => {
+    if (isNew) return new Date().toISOString();
+    const { data: cyc } = await admin.from("dunning_cycles").select("created_at").eq("id", cycleId).maybeSingle();
+    return (cyc?.created_at as string | undefined) || new Date(Date.now() - 90 * 86400000).toISOString();
+  })();
   const { count: priorFails } = await admin
     .from("payment_failures")
     .select("id", { count: "exact", head: true })
     .eq("workspace_id", workspace_id)
     .eq("subscription_id", subscription_id)
     .eq("result", "failed")
-    .gte("created_at", new Date(Date.now() - 90 * 86400000).toISOString());
+    .gte("created_at", cycleStartIso);
   const attemptNumber = (priorFails || 0) + 1;
 
   await logPaymentFailure({
@@ -244,11 +254,12 @@ export async function handleInternalDunningFailure(input: InternalDunningInput):
     .eq("id", subscription_id);
   await updateDunningCycle(cycleId, { status: "retrying", next_retry_at: nextPayday.toISOString() });
 
-  // Email on the first TERMINAL error (the card will never work — don't make the
-  // customer wait through silent retries). Soft declines wait until exhaustion.
-  if (terminal) {
-    await sendInternalRecoveryEmail(workspace_id, customer_id, cycleId);
-  }
+  // ⭐ Email on the FIRST failure of the cycle, soft or terminal (send-once via
+  // payment_update_sent). Soft declines used to wait silently until exhaustion — so the
+  // customer's first word from us was "your subscription was cancelled". The card-update
+  // email is most useful while retries are still running; this matches the ShopCX-contract
+  // path (src/lib/inngest/dunning.ts), which emails when the cards first exhaust.
+  await sendInternalRecoveryEmail(workspace_id, customer_id, cycleId);
 
   return { status: terminal ? "terminal_emailed" : "retrying", cycle_id: cycleId };
 }

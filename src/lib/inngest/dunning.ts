@@ -1293,23 +1293,44 @@ export const dunningPaydayRetryCron = inngest.createFunction(
           .eq("id", cycle.customer_id!)
           .single();
 
+        // ⭐ No card / no Shopify customer → close THROUGH exhaustPaydayCycle, never a bare
+        // status write. The bare `status: "exhausted"` write skipped everything a closing cycle
+        // owes: no recovery email (the ONLY thing that can save a customer with no card on
+        // file), no cycle ladder, and no billing-date release, so the sub was left "active"
+        // with a frozen past-due date. Measured 2026-11-16: 22 of 23 such cycles since the
+        // Appstle cutover closed with 0 payday attempts, 15 of 18 customers had no card.
         if (!customer?.shopify_customer_id) {
-          await updateDunningCycle(cycle.id, { status: "exhausted", next_retry_at: null });
-          return { contractId: cycle.shopify_contract_id, outcome: "no_shopify_customer" };
+          const r = await exhaustPaydayCycle(cycle, settings);
+          return { ...r, outcome: "no_shopify_customer" };
         }
 
         // Get all payment methods
         let paymentMethods: Awaited<ReturnType<typeof getCustomerPaymentMethods>> = [];
+        let paymentMethodsLookupFailed = false;
         try {
           const methods = await getCustomerPaymentMethods(cycle.workspace_id, customer.shopify_customer_id);
           paymentMethods = deduplicatePaymentMethods(methods);
         } catch (e) {
+          paymentMethodsLookupFailed = true;
           console.error(`[Dunning Payday] Failed to get payment methods for ${cycle.shopify_contract_id}:`, e);
         }
 
+        if (paymentMethodsLookupFailed) {
+          // A failed LOOKUP is not "no card" — don't close the cycle on a Shopify blip. Count
+          // the pass (so the retry cap still bounds a permanently broken lookup) and try again
+          // on the next payday.
+          await updateDunningCycle(cycle.id, { payday_retry_count: paydayRetriesSoFar + 1 });
+          const next = getNextPaydayDates(new Date(), 3).filter(d => d.getTime() > Date.now() + 60 * 60 * 1000)[0];
+          if (next) {
+            await updateDunningCycle(cycle.id, { next_retry_at: getRetryTime(next).toISOString() });
+            return { contractId: cycle.shopify_contract_id, outcome: "payment_methods_lookup_failed" };
+          }
+          return await exhaustPaydayCycle(cycle, settings);
+        }
+
         if (paymentMethods.length === 0) {
-          await updateDunningCycle(cycle.id, { status: "exhausted", next_retry_at: null });
-          return { contractId: cycle.shopify_contract_id, outcome: "no_payment_methods" };
+          const r = await exhaustPaydayCycle(cycle, settings);
+          return { ...r, outcome: "no_payment_methods" };
         }
 
         // ⭐ Count the PASS, not the submission. This lived inside the card loop, after
