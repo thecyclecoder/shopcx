@@ -16,7 +16,7 @@ Per-customer store credit ledger — issued, used, expired. Backed by Shopify st
 | `amount` | `numeric` | — |  |
 | `currency` | `text` | — | default: `'USD'` |
 | `reason` | `text` | ✓ |  |
-| `issued_by` | `uuid` | — | → [[workspace_members]].id |
+| `issued_by` | `uuid` | ✓ | → [[workspace_members]].id · null for system/auto-issued credit (e.g. auto return credit, issued_by_name `'ShopCX (auto)'`) |
 | `issued_by_name` | `text` | — |  |
 | `ticket_id` | `uuid` | ✓ | → [[tickets]].id |
 | `subscription_id` | `text` | ✓ |  |

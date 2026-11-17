@@ -106,7 +106,7 @@ export interface StoreCreditParams {
   shopifyCustomerId: string;
   amount: number;
   reason: string;
-  issuedBy: string;       // workspace_member ID
+  issuedBy: string | null; // workspace_member ID, or null for system/auto-issued credit
   issuedByName: string;   // display_name snapshot
   ticketId?: string;
   subscriptionId?: string;
