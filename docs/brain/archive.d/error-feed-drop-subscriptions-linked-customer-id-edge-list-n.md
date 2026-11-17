@@ -1,0 +1,1 @@
+- **Drop foreign ad-hoc subscriptions-by-linked_customer_id edge-list query from the error feed** · verified 2026-11-17 · → [[../libraries/error-feed]]
