@@ -102,3 +102,75 @@ test("isForeignSupabasePostgresMissingSubscriptionsSourceColumnAdhocNoise KEEPS 
     false,
   );
 });
+
+test("isForeignSupabasePostgresMissingSubscriptionsSourceColumnAdhocNoise drops the table-ALIASED `s.source` form when the query binds `from subscriptions s`", () => {
+  // The captured production sample (signature supabase-logs:183a2bdcdb473015): an orders row
+  // joined to a `from subscriptions s` correlated subquery. Postgres names the column via the
+  // alias `s.source`, which is the only reason this slipped past the full-table forms.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsSourceColumnAdhocNoise(
+      "column s.source does not exist",
+      "select o.id, (select s.source from subscriptions s where s.customer_id = o.customer_id limit 1) from orders o",
+    ),
+    true,
+  );
+  // public.-qualified FROM in the binding.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsSourceColumnAdhocNoise(
+      "column s.source does not exist",
+      "select s.source from public.subscriptions s where s.id = 1",
+    ),
+    true,
+  );
+  // public.-qualified aliased message variant.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsSourceColumnAdhocNoise(
+      "column public.s.source does not exist",
+      "select s.source from subscriptions s",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsSourceColumnAdhocNoise(
+      "ERROR: column s.source does not exist",
+      "select s.source from subscriptions s limit 10",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSubscriptionsSourceColumnAdhocNoise KEEPS the `s.source` form with no `subscriptions s` binding / non-SELECT / unrelated table (real regressions still page)", () => {
+  // `s` alias bound to a DIFFERENT table — the pin is `subscriptions s` only.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsSourceColumnAdhocNoise(
+      "column s.source does not exist",
+      "select s.source from shipments s where s.id = 1",
+    ),
+    false,
+  );
+  // No `s` alias binding on subscriptions at all — cannot confirm the shape, still pages.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsSourceColumnAdhocNoise(
+      "column s.source does not exist",
+      "select source from subscriptions",
+    ),
+    false,
+  );
+  // A NON-SELECT statement that aliases `subscriptions s` — real code-bug shape, still pages.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsSourceColumnAdhocNoise(
+      "column s.source does not exist",
+      "update subscriptions s set source = 'x' where s.id = 1",
+    ),
+    false,
+  );
+  // Empty query — cannot confirm the binding, still pages.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsSourceColumnAdhocNoise(
+      "column s.source does not exist",
+      "",
+    ),
+    false,
+  );
+});

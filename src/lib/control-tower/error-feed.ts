@@ -5781,6 +5781,15 @@ export function isForeignSupabasePostgresMissingSubscriptionsBillingEngineColumn
  * `subscriptions.items`), for `source` on ANY OTHER table, or on a DIFFERENT statement shape
  * (INSERT / UPDATE / DELETE / DDL) still pages.
  *
+ * Also matches the table-ALIASED message form `column s.source does not exist` (and the
+ * `public.`-qualified variant) that Postgres emits when a foreign / manual ad hoc query
+ * aliases `subscriptions s` — e.g. an orders row joined to a `from subscriptions s`
+ * correlated subquery (Control Tower signature `supabase-logs:183a2bdcdb473015`). Because the
+ * bare `s` alias is ambiguous, the aliased message is dropped ONLY when the query is a
+ * SELECT/CTE that actually binds `from (public.)?subscriptions s` — a `column s.source` error
+ * with no `subscriptions s` binding, on a non-SELECT, or against an unrelated table still
+ * pages. The full-table-name messages keep their original bare-SELECT / PostgREST-CTE guard.
+ *
  * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
  * `keyParts` is constructed — returning `null` fully suppresses the row (no error_event,
  * no loop_alert, no signature). A capture-time drop, not a `transient` flag.
@@ -5792,12 +5801,27 @@ export function isForeignSupabasePostgresMissingSubscriptionsSourceColumnAdhocNo
   const msg = (message ?? "").trim();
   if (!msg) return false;
   const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
-  const messageMatches =
+  // Full-table-name forms — Postgres names the column as `subscriptions.source` when the
+  // query references the column via the full table name.
+  const fullTableMatches =
     stripped === "column subscriptions.source does not exist" ||
     stripped === "column public.subscriptions.source does not exist";
-  if (!messageMatches) return false;
+  // Aliased form — Postgres names the column as `s.source` when the ad hoc query binds the
+  // `s` alias to subscriptions (e.g. an orders→`from subscriptions s` correlated subquery).
+  // Same foreign-app noise; the only reason it slipped past the full-table forms is the alias.
+  const aliasMatches =
+    stripped === "column s.source does not exist" ||
+    stripped === "column public.s.source does not exist";
+  if (!fullTableMatches && !aliasMatches) return false;
   const q = (query ?? "").trim().toLowerCase();
   if (!q) return false;
+  if (aliasMatches) {
+    // The aliased message is ambiguous on its own (any `s` alias) — only drop when the query
+    // is a SELECT that actually binds the `s` alias to subscriptions. Otherwise keep paging.
+    const selectShape = /^(?:select|with)\b/.test(q);
+    const bindsSubscriptionsS = /\bfrom\s+(?:public\.)?subscriptions\s+s\b/.test(q);
+    return selectShape && bindsSubscriptionsS;
+  }
   const bareSelect = /^select\b[\s\S]*\bfrom\s+(?:public\.)?subscriptions\b/.test(q);
   const pgrstCte =
     /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"?(?:public"?\.)?"?subscriptions\b/.test(q);
