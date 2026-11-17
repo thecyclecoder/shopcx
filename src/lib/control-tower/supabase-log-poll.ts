@@ -157,6 +157,7 @@ import {
   isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise,
   isForeignSupabasePostgresApprovalDecisionsMissingCategoryColumnAdhocNoise,
   isForeignSupabasePostgresAdhocMrrCohortQuerySyntaxNoise,
+  isForeignSupabasePostgresAbortedTxnOnAdhocSubscriptionsItemsNoise,
   isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise,
   isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise,
   isForeignSupabasePostgresMissingSpecPhasesPhaseIndexAdhocNoise,
@@ -1630,6 +1631,18 @@ const LOG_QUERIES: LogQuery[] = [
       // noise. Narrowly gated to require the exact `day` syntax message AND all three
       // fingerprints, so every real syntax error and every other query shape stays captured.
       if (isForeignSupabasePostgresAdhocMrrCohortQuerySyntaxNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: a Postgres `current transaction is aborted,
+      // commands ignored until end of transaction block` (25P02) cascade raised inside a
+      // manually-opened transaction whose distinctive statement is a hand-written ad-hoc read
+      // against `subscriptions` expanding `jsonb_array_elements(items)` + `string_agg(` with
+      // an `order by status`. 25P02 is always a downstream symptom of an earlier failed
+      // statement in a foreign SQL Editor / BI-tool session, and no ShopCX product query
+      // matches these four fingerprints (grep-verified) — there is no lever from ShopCX to
+      // roll back a session we don't own, so paging Platform on it (Control Tower signature
+      // `supabase-logs:987eaf372a39162e`) is pure noise. Narrowly gated to require the exact
+      // 25P02 message AND all four fingerprints, so a REAL 25P02 on product code (any other
+      // query shape) still surfaces and pages on first sighting.
+      if (isForeignSupabasePostgresAbortedTxnOnAdhocSubscriptionsItemsNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
       // against `public.specs.<archived_at|folded_at|deferred_at>`. The `specs` card table
       // exists but records lifecycle state via `status text` (with a `folded` value) plus

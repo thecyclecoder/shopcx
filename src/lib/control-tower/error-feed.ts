@@ -8082,6 +8082,59 @@ export function isForeignSupabasePostgresAdhocMrrCohortQuerySyntaxNoise(
 }
 
 /**
+ * Foreign-app noise — Postgres `current transaction is aborted, commands ignored until end
+ * of transaction block` (SQLSTATE 25P02) raised inside a manually-opened transaction whose
+ * distinctive statement is a hand-written ad-hoc read against `subscriptions` that expands
+ * `jsonb_array_elements(items)` and `string_agg(`-aggregates ordered `order by status`.
+ *
+ * 25P02 is never a root cause: it is always a downstream symptom of an EARLIER failed
+ * statement in a manually-opened transaction block (SQL Editor / BI tool), so Postgres
+ * rejects every subsequent command until the session rolls back. The captured query here is
+ * a hand-typed exploratory read that no ShopCX product code path issues (grep-verified: no
+ * caller does `string_agg(` over `jsonb_array_elements(items)` on `subscriptions` with an
+ * `order by status`). There is no lever from ShopCX to fix a foreign session's aborted
+ * transaction — paging Platform on it (Control Tower signature
+ * `supabase-logs:987eaf372a39162e`) is repair work for a query we don't own.
+ *
+ * Sibling of `isForeignSupabasePostgresAdhocMrrCohortQuerySyntaxNoise` — the same narrow
+ * shape (exact canonical message + all distinctive query fingerprints). `true` ONLY when the
+ * 25P02 message matches exactly AND all four query fingerprints are present, so a REAL 25P02
+ * caused by product code failing to roll back (any other query shape) still surfaces and
+ * pages on first sighting.
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not record`,
+ * so returning null fully suppresses the row (no error_event, no loop_alert, no signature).
+ */
+export function isForeignSupabasePostgresAbortedTxnOnAdhocSubscriptionsItemsNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  // Strip an optional leading Postgres `ERROR: ` / `ERROR:  ` prefix — Supabase's logs
+  // surface sometimes carries it, sometimes doesn't. The 25P02 message itself is a fixed,
+  // canonical string Postgres emits verbatim.
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  if (
+    stripped.toLowerCase() !==
+    "current transaction is aborted, commands ignored until end of transaction block"
+  ) {
+    return false;
+  }
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  // Require all four fingerprints of the ad-hoc subscriptions-items read no ShopCX product
+  // query contains. A real 25P02 on product code (missing any fingerprint) stays captured
+  // and paging, so this never blinds the feed to a genuine transaction-abort bug.
+  if (!q.includes("from subscriptions")) return false;
+  if (!q.includes("jsonb_array_elements(items)")) return false;
+  if (!q.includes("string_agg(")) return false;
+  if (!q.includes("order by status")) return false;
+  return true;
+}
+
+/**
  * Foreign-app noise — Postgres reporting `column
  * specs.<archived_at|folded_at|deferred_at|fold_status|verified_at> does not exist` for
  * an ad hoc / stale PostgREST direct-REST SELECT against `public.specs`. The `specs`

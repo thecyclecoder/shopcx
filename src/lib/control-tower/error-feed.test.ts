@@ -43,6 +43,7 @@ import {
   isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise,
   isForeignSupabasePostgresApprovalDecisionsMissingCategoryColumnAdhocNoise,
   isForeignSupabasePostgresAdhocMrrCohortQuerySyntaxNoise,
+  isForeignSupabasePostgresAbortedTxnOnAdhocSubscriptionsItemsNoise,
   isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise,
   isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise,
   isForeignSupabasePostgresMissingSpecPhasesPhaseIndexAdhocNoise,
@@ -9137,6 +9138,89 @@ test("isForeignSupabasePostgresAdhocMrrCohortQuerySyntaxNoise KEEPS a real produ
   assert.equal(
     isForeignSupabasePostgresAdhocMrrCohortQuerySyntaxNoise(
       'syntax error at or near "day"',
+      "",
+    ),
+    false,
+  );
+});
+
+// -- isForeignSupabasePostgresAbortedTxnOnAdhocSubscriptionsItemsNoise --
+// A Postgres `current transaction is aborted` (25P02) cascade raised inside a foreign SQL
+// Editor / BI-tool session whose distinctive statement is a hand-written ad-hoc read against
+// `subscriptions` expanding `jsonb_array_elements(items)` + `string_agg(` with an
+// `order by status`. 25P02 is always a downstream symptom of an earlier failed statement in
+// a manually-opened transaction — no lever from us — drop AT CAPTURE only when ALL of the
+// exact 25P02 message AND the four fingerprints (`from subscriptions`,
+// `jsonb_array_elements(items)`, `string_agg(`, `order by status`) are present. A real 25P02
+// on product code (any other query shape) stays captured and paging. Control Tower signature
+// `supabase-logs:987eaf372a39162e`.
+
+const ABORTED_TXN_SUBS_ITEMS_QUERY =
+  "SELECT status, string_agg(i->>'variant_id', ',' ORDER BY i->>'variant_id') AS variants " +
+  "FROM subscriptions s, jsonb_array_elements(items) i " +
+  "GROUP BY status ORDER BY status";
+
+test("isForeignSupabasePostgresAbortedTxnOnAdhocSubscriptionsItemsNoise drops the captured 25P02 ad-hoc subscriptions-items sample", () => {
+  assert.equal(
+    isForeignSupabasePostgresAbortedTxnOnAdhocSubscriptionsItemsNoise(
+      "current transaction is aborted, commands ignored until end of transaction block",
+      ABORTED_TXN_SUBS_ITEMS_QUERY,
+    ),
+    true,
+  );
+  // Tolerates the leading `ERROR: ` prefix, surrounding whitespace, and message casing.
+  assert.equal(
+    isForeignSupabasePostgresAbortedTxnOnAdhocSubscriptionsItemsNoise(
+      "  ERROR: CURRENT TRANSACTION IS ABORTED, COMMANDS IGNORED UNTIL END OF TRANSACTION BLOCK  ",
+      "   " + ABORTED_TXN_SUBS_ITEMS_QUERY + "   ",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresAbortedTxnOnAdhocSubscriptionsItemsNoise KEEPS a real 25P02 on a DIFFERENT query shape", () => {
+  // A genuine product-code 25P02 (failed to roll back) on any other query still pages.
+  assert.equal(
+    isForeignSupabasePostgresAbortedTxnOnAdhocSubscriptionsItemsNoise(
+      "current transaction is aborted, commands ignored until end of transaction block",
+      "update public.subscriptions set status = 'active' where id = $1",
+    ),
+    false,
+  );
+  // A query that touches SOME but not all four fingerprints stays paged.
+  assert.equal(
+    isForeignSupabasePostgresAbortedTxnOnAdhocSubscriptionsItemsNoise(
+      "current transaction is aborted, commands ignored until end of transaction block",
+      "select string_agg(id, ',') from subscriptions order by status",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresAbortedTxnOnAdhocSubscriptionsItemsNoise KEEPS the same query under a DIFFERENT message", () => {
+  assert.equal(
+    isForeignSupabasePostgresAbortedTxnOnAdhocSubscriptionsItemsNoise(
+      "deadlock detected",
+      ABORTED_TXN_SUBS_ITEMS_QUERY,
+    ),
+    false,
+  );
+  // Nullish / empty input never matches.
+  assert.equal(
+    isForeignSupabasePostgresAbortedTxnOnAdhocSubscriptionsItemsNoise(null, null),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresAbortedTxnOnAdhocSubscriptionsItemsNoise(undefined, undefined),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresAbortedTxnOnAdhocSubscriptionsItemsNoise("", ""),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresAbortedTxnOnAdhocSubscriptionsItemsNoise(
+      "current transaction is aborted, commands ignored until end of transaction block",
       "",
     ),
     false,
