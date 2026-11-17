@@ -2992,6 +2992,184 @@ test("Phase 3 pin — a DIFFERENT job_id on the same ticket (Phase-2 recheck) IS
   assert.equal(deliveries[0], second, "recheck delivers the second variant");
 });
 
+// ── Phase 1 (founder-escalation-ack-skips-after-resolution) ───────────────
+//
+// Ground truth: ticket 8c1a4d0b. While June ran, the orchestrator refunded Lori
+// and emailed her it was done at 14:51:32; June's escalate_founder holding ack
+// ("I'm taking a proper look…") then landed at 14:52:26 and contradicted the
+// last thing the customer heard. `customerAnsweredSinceJob` must detect the
+// mid-session customer-visible reply and SKIP the ack (recording an internal
+// skip note), while the escalation itself still lands.
+
+/**
+ * Fake admin for the ack-skip path. Supports the two query shapes the skip gate uses:
+ *   - `agent_jobs` select().eq().maybeSingle() → returns the seeded job row (instructions + created_at)
+ *   - `ticket_messages` select().eq()..neq()..in()..gt().limit() → returns the seeded answering message
+ * and captures `ticket_messages` inserts so the test can assert the skip marker note.
+ */
+function stubAdminForAckSkip(opts: {
+  jobRow: Record<string, unknown>;
+  answeringMessages: Array<Record<string, unknown>>;
+  tableRows?: Record<string, { data: unknown }>;
+}): { admin: Admin; insertedTicketMessages: Array<{ body: string; visibility?: string }> } {
+  const insertedTicketMessages: Array<{ body: string; visibility?: string }> = [];
+  const admin = {
+    from(table: string) {
+      return {
+        select(_cols: string) {
+          const filters: Array<{ col: string; val: unknown; op: "eq" | "neq" | "in" | "gt" }> = [];
+          const chain: Record<string, unknown> = {
+            eq(col: string, val: unknown) {
+              filters.push({ col, val, op: "eq" });
+              return chain;
+            },
+            neq(col: string, val: unknown) {
+              filters.push({ col, val, op: "neq" });
+              return chain;
+            },
+            in(col: string, val: unknown) {
+              filters.push({ col, val, op: "in" });
+              return chain;
+            },
+            gt(col: string, val: unknown) {
+              filters.push({ col, val, op: "gt" });
+              return chain;
+            },
+            async limit(_n: number) {
+              if (table !== "ticket_messages") return { data: [] };
+              const matches = opts.answeringMessages.filter((row) => {
+                for (const f of filters) {
+                  const rowVal = row[f.col];
+                  if (f.op === "eq" && rowVal !== f.val) return false;
+                  if (f.op === "neq" && rowVal === f.val) return false;
+                  if (f.op === "in" && !(Array.isArray(f.val) && (f.val as unknown[]).includes(rowVal))) return false;
+                  if (f.op === "gt" && !(typeof rowVal === "string" && typeof f.val === "string" && rowVal > f.val)) return false;
+                }
+                return true;
+              });
+              return { data: matches };
+            },
+            async maybeSingle() {
+              if (table === "agent_jobs") return { data: opts.jobRow };
+              return opts.tableRows?.[table] ?? { data: null };
+            },
+          };
+          return chain;
+        },
+        insert(row: unknown) {
+          if (table === "ticket_messages" && row && typeof row === "object") {
+            insertedTicketMessages.push(row as { body: string; visibility?: string });
+          }
+          return Promise.resolve({ data: null, error: null });
+        },
+      };
+    },
+  } as unknown as Admin;
+  return { admin, insertedTicketMessages };
+}
+
+test("Phase 1 — holding ack is SKIPPED when the customer was answered mid-session (ticket 8c1a4d0b)", async () => {
+  const jobCreatedAt = "2026-11-10T14:50:11.000Z";
+  const { admin, insertedTicketMessages } = stubAdminForAckSkip({
+    jobRow: {
+      ...CS_JOB_ROW,
+      created_at: jobCreatedAt,
+      instructions: JSON.stringify({ ticket_id: "ticket-8c1a4d0b", triage_run_id: "run-1" }),
+    },
+    // An outbound AI reply ("refund done") posted AFTER the job was created — the race the spec names.
+    answeringMessages: [
+      {
+        id: "msg-refund-done",
+        ticket_id: "ticket-8c1a4d0b",
+        direction: "outbound",
+        visibility: "public",
+        author_type: "ai",
+        created_at: "2026-11-10T14:51:32.000Z",
+      },
+    ],
+    // Ticket + workspace facts resolve, so WITHOUT the skip gate the ack WOULD compose + deliver —
+    // which is what makes `deliveries.length === 0` a real regression guard, not a vacuous pass.
+    tableRows: {
+      tickets: { data: { subject: "Cancel Oct 19 order", customer_id: "cust-1", channel: "email" } },
+      workspaces: { data: { sandbox_mode: true } },
+    },
+  });
+  const deliveries: string[] = [];
+  const deps: CsDirectorApplyDeps = {
+    approveRemedy: {
+      loadTicketFacts: async () => ({ customer_id: "cust-1", channel: "email" }),
+      loadWorkspaceSandbox: async () => true,
+      runExecutor: async () => ({ messageSent: false, escalated: false, closed: false, statusManaged: false }),
+      deliverMessage: async (_admin, _ws, _t, _c, body) => {
+        deliveries.push(body);
+      },
+    },
+  };
+  // No recommended_remedy → the only customer-facing path is the holding ack.
+  const verdict: CsDirectorVerdictInput = {
+    decision: "escalate_founder",
+    reasoning: "Judgment call the CEO owns.",
+  };
+
+  const result = await applyBoxCsDirectorCall(admin, "job-mid-session", verdict, deps);
+
+  // The escalation still lands…
+  assert.equal(result.ok, true);
+  assert.equal((result as { linkage_ticket_id?: string | null }).linkage_ticket_id, "ticket-8c1a4d0b");
+  // …but the contradicting holding ack must NOT be delivered.
+  assert.equal(deliveries.length, 0, "no holding ack after the customer was already answered mid-session");
+  // …and we record WHY we skipped.
+  const skipNotes = insertedTicketMessages.filter((r) =>
+    r.body.startsWith("[cs-director/escalate_founder/ack-skipped]"),
+  );
+  assert.equal(skipNotes.length, 1, "an ack-skipped internal note is recorded");
+  assert.equal(skipNotes[0].visibility, "internal", "the skip note is internal-only");
+});
+
+test("Phase 1 — holding ack STILL fires when the only outbound reply predates the job", async () => {
+  const jobCreatedAt = "2026-11-10T14:50:11.000Z";
+  const { admin, insertedTicketMessages } = stubAdminForAckSkip({
+    jobRow: {
+      ...CS_JOB_ROW,
+      created_at: jobCreatedAt,
+      instructions: JSON.stringify({ ticket_id: "ticket-stale-reply" }),
+    },
+    // The reply is BEFORE the job was created → the `.gt(created_at)` filter excludes it.
+    answeringMessages: [
+      {
+        id: "msg-old",
+        ticket_id: "ticket-stale-reply",
+        direction: "outbound",
+        visibility: "public",
+        author_type: "ai",
+        created_at: "2026-11-10T14:00:00.000Z",
+      },
+    ],
+  });
+  const deliveries: string[] = [];
+  const deps: CsDirectorApplyDeps = {
+    approveRemedy: {
+      loadTicketFacts: async () => ({ customer_id: "cust-1", channel: "email" }),
+      loadWorkspaceSandbox: async () => true,
+      runExecutor: async () => ({ messageSent: false, escalated: false, closed: false, statusManaged: false }),
+      deliverMessage: async (_admin, _ws, _t, _c, body) => {
+        deliveries.push(body);
+      },
+    },
+  };
+  const verdict: CsDirectorVerdictInput = {
+    decision: "escalate_founder",
+    reasoning: "Judgment call the CEO owns.",
+  };
+  const result = await applyBoxCsDirectorCall(admin, "job-stale-reply", verdict, deps);
+  assert.equal(result.ok, true);
+  // The customer-answered gate must NOT have tripped — the reply predates the job, so no skip note.
+  const skipNotes = insertedTicketMessages.filter((r) =>
+    r.body.startsWith("[cs-director/escalate_founder/ack-skipped]"),
+  );
+  assert.equal(skipNotes.length, 0, "a pre-job reply must not trigger the ack-skip gate");
+});
+
 // ── The ack topic must never be a truncated sentence ──────────────────────
 //
 // The variants splice the subject into "taking a proper look at {topic} before

@@ -2660,6 +2660,93 @@ async function ackAlreadyDeliveredForJob(admin: Admin, ticketId: string, jobId: 
   }
 }
 
+/**
+ * Marker prefix for the "ack deliberately skipped because the ticket already moved on" internal
+ * note (spec: founder-escalation-ack-skips-after-resolution Phase 1). Ground truth: ticket
+ * 8c1a4d0b — the orchestrator refunded Lori and emailed her it was done at 14:51:32, THEN June's
+ * escalate_founder ack ("I'm taking a proper look…") landed at 14:52:26 and read as if the refund
+ * had never happened. The ack idempotency guard (`ackAlreadyDeliveredForJob`) only checks whether
+ * THIS job already acked — it is blind to a customer-visible message another writer posted while
+ * June was running. This marker records that we skipped on purpose.
+ */
+const ESCALATE_FOUNDER_ACK_SKIPPED_MARKER_PREFIX = "[cs-director/escalate_founder/ack-skipped]";
+
+/**
+ * True when a customer-visible AI/agent reply landed on the ticket AFTER the director job was
+ * created (spec: founder-escalation-ack-skips-after-resolution Phase 1). This is the "the ticket
+ * moved on while June was running" check the holding-ack path was missing: the orchestrator (or
+ * another automated send) answered the customer mid-session, so June's "I'm taking a proper look"
+ * acknowledgement would now contradict the last thing the customer heard.
+ *
+ * Qualifying row: `direction='outbound'`, `visibility` NOT 'internal' (a customer-visible send),
+ * `author_type` in ('ai','agent'), `created_at > sinceIso`. A human agent's own reply is excluded
+ * deliberately — a teammate who stepped in has their own judgement; this guard is about the
+ * AUTOMATED pipeline racing itself. Fail-closed to false on a DB blip (keep the ack rather than
+ * silently drop it on a read error).
+ */
+async function customerAnsweredSinceJob(
+  admin: Admin,
+  ticketId: string,
+  sinceIso: string,
+): Promise<boolean> {
+  try {
+    const { data } = await admin
+      .from("ticket_messages")
+      .select("id")
+      .eq("ticket_id", ticketId)
+      .eq("direction", "outbound")
+      .neq("visibility", "internal")
+      .in("author_type", ["ai", "agent"])
+      .gt("created_at", sinceIso)
+      .limit(1);
+    return Array.isArray(data) && data.length > 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Load `agent_jobs.created_at` for the director job so the customer-answered-since check has a
+ * cutoff. Returns null on a miss / blip — the caller then leaves the ack path unchanged (a read
+ * failure must never be why the customer hears nothing).
+ */
+async function loadJobCreatedAt(admin: Admin, jobId: string): Promise<string | null> {
+  try {
+    const { data } = await admin
+      .from("agent_jobs")
+      .select("created_at")
+      .eq("id", jobId)
+      .maybeSingle();
+    const ts = (data as { created_at?: string | null } | null)?.created_at;
+    return typeof ts === "string" && ts.length > 0 ? ts : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Record the "ack skipped because the ticket already moved on" internal note. Best-effort — an
+ * insert blip is not worth failing the whole escalation over; the escalation itself still lands.
+ */
+async function recordAckSkippedMarker(
+  admin: Admin,
+  ticketId: string,
+  jobId: string,
+  answeredSinceIso: string,
+): Promise<void> {
+  try {
+    await admin.from("ticket_messages").insert({
+      ticket_id: ticketId,
+      direction: "outbound",
+      visibility: "internal",
+      author_type: "system",
+      body: `${ESCALATE_FOUNDER_ACK_SKIPPED_MARKER_PREFIX} customer answered at ${answeredSinceIso} job=${jobId}`,
+    });
+  } catch {
+    /* best-effort */
+  }
+}
+
 async function recordAckDeliveredMarker(
   admin: Admin,
   ticketId: string,
@@ -2761,17 +2848,29 @@ async function handleEscalateFounder(
     let ackText: string | null = null;
     let ackFacts: Awaited<ReturnType<typeof loadAckFacts>> = null;
     let ackAlreadySent = false;
+    // Phase 1 (founder-escalation-ack-skips-after-resolution): the holding ack must NOT land when
+    // the ticket already moved on while June was running — the orchestrator (or another automated
+    // send) may have answered the customer mid-session, so "I'm taking a proper look…" would now
+    // contradict the last message the customer received (ground truth: ticket 8c1a4d0b, refund-done
+    // email at 14:51:32 then this ack at 14:52:26). We gate on `agent_jobs.created_at` as the
+    // session start. The escalation write itself is untouched — only the customer ack is skipped.
     if (linkageEarly.ticketId) {
-      ackAlreadySent = await ackAlreadyDeliveredForJob(admin, linkageEarly.ticketId, jobId);
-      if (!ackAlreadySent) {
-        ackFacts = await loadAckFacts(admin, workspaceId, linkageEarly.ticketId);
-        if (ackFacts) {
-          ackText = composeFounderEscalationAck({ subject: ackFacts.subject, recheckIndex });
-        } else {
-          console.warn(`${tag} escalate_founder: cannot resolve ack facts for ticket ${linkageEarly.ticketId.slice(0, 8)} — skipping acknowledgement`);
-        }
+      const jobCreatedAt = await loadJobCreatedAt(admin, jobId);
+      if (jobCreatedAt && (await customerAnsweredSinceJob(admin, linkageEarly.ticketId, jobCreatedAt))) {
+        await recordAckSkippedMarker(admin, linkageEarly.ticketId, jobId, jobCreatedAt);
+        console.log(`${tag} escalate_founder: customer answered since job created (${jobCreatedAt}) · skipping holding ack`);
       } else {
-        console.log(`${tag} escalate_founder: ack marker present for ticket ${linkageEarly.ticketId.slice(0, 8)} · skipping duplicate send`);
+        ackAlreadySent = await ackAlreadyDeliveredForJob(admin, linkageEarly.ticketId, jobId);
+        if (!ackAlreadySent) {
+          ackFacts = await loadAckFacts(admin, workspaceId, linkageEarly.ticketId);
+          if (ackFacts) {
+            ackText = composeFounderEscalationAck({ subject: ackFacts.subject, recheckIndex });
+          } else {
+            console.warn(`${tag} escalate_founder: cannot resolve ack facts for ticket ${linkageEarly.ticketId.slice(0, 8)} — skipping acknowledgement`);
+          }
+        } else {
+          console.log(`${tag} escalate_founder: ack marker present for ticket ${linkageEarly.ticketId.slice(0, 8)} · skipping duplicate send`);
+        }
       }
     }
 
