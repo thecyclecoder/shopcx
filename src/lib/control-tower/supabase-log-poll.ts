@@ -62,6 +62,7 @@ import {
   isForeignSupabasePostgresMissingAgentJobsFinishedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingAgentJobsAttemptsColumnAdhocNoise,
   isForeignSupabasePostgresMissingAgentJobsHeartbeatAtColumnAdhocNoise,
+  isForeignSupabasePostgresMissingAgentJobsTicketIdColumnAdhocNoise,
   isForeignSupabasePostgresMissingGoalMilestonesSlugColumnAdhocNoise,
   isForeignSupabasePostgresMissingGoalMilestonesStatusColumnAdhocNoise,
   isForeignSupabasePostgresMissingSpecCardStateSpecIdColumnNoise,
@@ -601,6 +602,13 @@ const LOG_QUERIES: LogQuery[] = [
       // the SELECT-lookup shape on `agent_jobs` (bare or PostgREST CTE wrapper) — a different
       // missing column on the table, or the same message via a non-SELECT statement, still pages.
       if (isForeignSupabasePostgresMissingAgentJobsHeartbeatAtColumnAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: a foreign/stale external/REST client SELECTed the
+      // non-existent `ticket_id` column from `agent_jobs` — jobs reference their ticket through the
+      // payload, not a top-level column (Control Tower signature `supabase-logs:0cb4814c57302d32`).
+      // Narrowly gated to require BOTH the exact `column agent_jobs.ticket_id does not exist` message
+      // AND the SELECT-lookup shape on `agent_jobs` (bare or PostgREST CTE wrapper) — a different
+      // missing column on the table, or the same message via a non-SELECT statement, still pages.
+      if (isForeignSupabasePostgresMissingAgentJobsTicketIdColumnAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: a foreign/stale external/REST client SELECTed the
       // non-existent `slug` column from `goal_milestones` — goal milestones are keyed by UUID and
       // no `slug`/`sort_order` columns have ever existed (Control Tower signature

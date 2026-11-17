@@ -320,6 +320,7 @@
     "test:error-feed-customers-display-name-noise": "tsx --test src/lib/control-tower/error-feed.customers-display-name-noise.test.ts",
     "test:error-feed-returns-id-invalid-uuid-noise": "tsx --test src/lib/control-tower/error-feed.returns-id-invalid-uuid-noise.test.ts",
     "test:error-feed-spec-phases-phase-num-noise": "tsx --test src/lib/control-tower/error-feed.spec-phases-phase-num-noise.test.ts",
+    "test:error-feed-agent-jobs-ticket-id-noise": "tsx --test src/lib/control-tower/error-feed.agent-jobs-ticket-id-noise.test.ts",
     "test:portal-remediation": "tsx --test src/lib/portal/remediation.test.ts",
     "test:experiment-delivery-audit": "tsx --test src/lib/storefront/experiment-delivery-audit.test.ts",
     "test:ready-to-test": "tsx --test src/lib/ads/ready-to-test.test.ts",
