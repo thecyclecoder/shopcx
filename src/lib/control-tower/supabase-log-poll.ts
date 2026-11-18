@@ -99,6 +99,7 @@ import {
   isForeignSupabasePostgresMissingOrdersNoteColumnAdhocNoise,
   isForeignSupabasePostgresMissingOrdersShippingNameColumnAdhocNoise,
   isForeignSupabasePostgresMissingOrdersShopifyOrderNameAdhocNoise,
+  isForeignSupabasePostgresMissingOrdersAvalaraDocCodeColumnAdhocNoise,
   isForeignSupabasePostgresMissingOrdersEasypostTrackerAdhocNoise,
   isForeignSupabasePostgresMissingOrdersTrackingNumberAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsPausedAtColumnAdhocNoise,
@@ -988,6 +989,18 @@ const LOG_QUERIES: LogQuery[] = [
       // non-SELECT statement (real code-bug shape), still surfaces / pages on first
       // sighting.
       if (isForeignSupabasePostgresMissingOrdersShopifyOrderNameAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc `select ... avalara_doc_code ... from
+      // public.orders` lookup by an external tool / stale exploratory query — or the
+      // PostgREST `WITH pgrst_source AS ( SELECT ... FROM "public"."orders" ... )` CTE
+      // wrapper the same client emits over the REST endpoint. Our `orders` table has NO
+      // `avalara_doc_code` column (the Avalara AvaTax document code lives on the
+      // tax-transaction ledger, not on our internal `orders` row) and no ShopCX code path
+      // selects it — there is no lever to make the query resolve. A column-missing error on
+      // any other column of `orders` (including the live `order_number`), on a different
+      // Avalara column (`avalara_transaction_code`), on `avalara_doc_code` from any other
+      // table, or on `orders` via a non-SELECT statement (real code-bug shape), still
+      // surfaces / pages on first sighting.
+      if (isForeignSupabasePostgresMissingOrdersAvalaraDocCodeColumnAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc `select ... easypost_tracker_id
       // ... from public.orders` lookup (or its `easypost_tracking_code` / `easypost_carrier`
       // twins) by an external tool / stale exploratory query — or the PostgREST
