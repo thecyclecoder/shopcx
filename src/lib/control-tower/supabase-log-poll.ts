@@ -219,6 +219,7 @@ import {
   isForeignSupabasePostgresMissingLoyaltyMembersLifetimePointsAdhocNoise,
   isForeignSupabasePostgresMissingLoyaltyRedemptionsCouponCodeAdhocNoise,
   isForeignSupabasePostgresMissingLoyaltyRedemptionsCodeColumnNoise,
+  isForeignSupabasePostgresMissingCouponRedemptionsCodeColumnNoise,
   isForeignSupabasePostgresMissingLoyaltyRedemptionsRedeemedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingTicketsAssignedAgentColumnAdhocNoise,
   isForeignSupabasePostgresMissingTicketsPlaybookIdDirectRestColumnNoise,
@@ -2750,6 +2751,13 @@ const LOG_QUERIES: LogQuery[] = [
       // shape, bare OR PostgREST CTE wrapper); any other column / table / non-SELECT still
       // pages on first sighting.
       if (isForeignSupabasePostgresMissingLoyaltyRedemptionsCodeColumnNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
+      // against `public.coupon_redemptions.code`. The `coupon_redemptions` table exists but
+      // has NO `code` column — the real column is `derived_code`. Same narrow gating (exact
+      // column-missing message AND a SELECT-on-coupon_redemptions shape, bare OR PostgREST
+      // CTE wrapper); any other column / table / non-SELECT / JOIN still pages on first
+      // sighting.
+      if (isForeignSupabasePostgresMissingCouponRedemptionsCodeColumnNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
       // against `public.loyalty_redemptions.redeemed_at`. Same table as the `code` /
       // `coupon_code` siblings above, another foreign-owned column name — the real

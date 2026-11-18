@@ -13516,6 +13516,81 @@ export function isForeignSupabasePostgresMissingLoyaltyRedemptionsCodeColumnNois
 }
 
 /**
+ * Foreign-app noise — Postgres reporting `column coupon_redemptions.code does not exist`
+ * for an ad hoc / stale PostgREST direct-REST SELECT against
+ * `public.coupon_redemptions.code`. The `coupon_redemptions` table exists but has NO `code`
+ * column — the real column is `derived_code`. The column-missing ERROR only reaches this
+ * feed when a foreign app / stale SQL Editor session / deprecated integration queries
+ * `/rest/v1/coupon_redemptions?select=code&...` (or the equivalent SELECT-lookup shape) —
+ * a natural mistake because callers reach for a bare `code` where the table exposes the
+ * derived variant. There is no lever from ShopCX to make that query resolve — paging
+ * Platform on it is repair work for a query we don't own.
+ *
+ * Sibling of `isForeignSupabasePostgresMissingLoyaltyRedemptionsCodeColumnNoise`
+ * (error-feed.ts) — the same narrow-gating shape (exact
+ * `column <table>.<name> does not exist` + SELECT-lookup shape covering BOTH bare and
+ * PostgREST CTE wrapper forms), aimed at the same foreign-caller class on a different table.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical column-missing shape for THIS column —
+ *      trimmed equal to `column coupon_redemptions.code does not exist` (or the `public.`
+ *      qualified variant, with any leading `ERROR: ` prefix Postgres includes on the logs
+ *      surface stripped), AND
+ *   2. the `parsed.query` attribute is a SELECT-lookup on `public.coupon_redemptions` —
+ *      either (a) the bare `select ... from public.coupon_redemptions` shape (with no
+ *      JOIN — a JOIN across other tables is a real code path we own), OR (b) the
+ *      PostgREST-generated
+ *      `WITH pgrst_source AS ( SELECT ... FROM "public"."coupon_redemptions" ... )`
+ *      CTE wrapper form with double-quoted identifiers. Both forms are the same
+ *      foreign-owned read.
+ *
+ * Narrowly gated so:
+ *   - a column-missing error for ANY OTHER table still pages — the pin is
+ *     `coupon_redemptions.` only,
+ *   - a column-missing error on `coupon_redemptions` for a DIFFERENT column (e.g. the real
+ *     `derived_code`, `customer_id`, `workspace_id`) still pages — the pin covers `code`
+ *     only,
+ *   - a `coupon_redemptions.code` error attached to a DIFFERENT statement shape
+ *     (INSERT / UPDATE / DELETE / DDL, JOIN across other tables) still pages — the pin is
+ *     the SELECT-lookup shape; the CTE branch likewise requires the wrapped op to be a
+ *     SELECT (a PostgREST INSERT/UPDATE inside the same wrapper stays paged),
+ *   - empty / nullish message OR query returns `false` — we need both markers.
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not record`,
+ * so returning null here fully suppresses the row (no error_event, no loop_alert, no
+ * signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresMissingCouponRedemptionsCodeColumnNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column coupon_redemptions.code does not exist" ||
+    stripped === "column public.coupon_redemptions.code does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  // Bare SELECT-lookup on the table — allow any trailing WHERE/LIMIT/ORDER BY, but the
+  // statement MUST start with `select`, its FROM clause MUST name `coupon_redemptions`
+  // (with or without the `public.` schema qualifier), AND the statement MUST NOT carry a
+  // `join` clause.
+  if (
+    /^select\b[\s\S]*\bfrom\s+(?:public\.)?coupon_redemptions\b/.test(q) &&
+    !/\bjoin\b/.test(q)
+  ) {
+    return true;
+  }
+  // PostgREST direct-REST wraps the same lookup as `WITH pgrst_source AS ( SELECT ... FROM
+  // "public"."coupon_redemptions" ... )` with double-quoted identifiers. Guarded so the CTE
+  // branch requires the wrapped op to be a SELECT.
+  return /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"?(?:public"?\.)?"?coupon_redemptions\b/.test(q);
+}
+
+/**
  * Foreign-app noise — Postgres reporting `column loyalty_redemptions.redeemed_at does not
  * exist` for an ad hoc / stale PostgREST direct-REST SELECT against
  * `public.loyalty_redemptions.redeemed_at`. The `loyalty_redemptions` table exists but by
