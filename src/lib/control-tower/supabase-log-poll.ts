@@ -43,6 +43,7 @@ import {
   isForeignSupabasePostgresMissingWorkerHeartbeatsCreatedAtAdhocNoise,
   isForeignSupabasePostgresMissingSpecsOverallStatusColumnAdhocNoise,
   isForeignSupabasePostgresMissingCouponsStatusColumnAdhocNoise,
+  isForeignSupabasePostgresMissingCouponsValueCentsColumnAdhocNoise,
   isForeignSupabasePostgresMissingDirectorActivityDetailColumnAdhocNoise,
   isForeignSupabasePostgresMissingTicketDirectionsCreatedAtAdhocNoise,
   isForeignSupabasePostgresMissingSpecTestRunsVerdictColumnAdhocNoise,
@@ -443,6 +444,15 @@ const LOG_QUERIES: LogQuery[] = [
       // wrapper) — a real `status`-missing on another table, a different `coupons` column, or a
       // non-SELECT write still surfaces / pages.
       if (isForeignSupabasePostgresMissingCouponsStatusColumnAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: a foreign/stale direct-REST client reads
+      // `public.coupons` expecting cents-shaped columns (`value_cents`, `amount_cents`) that our
+      // schema has never carried — a ShopCX coupon's amount lives on the single `value` column
+      // ([[../tables/coupons]]), never a `value_cents`. There is no lever from ShopCX to make the
+      // query resolve (Control Tower signature `supabase-logs:6c1c30a9b575115d`). Gated on the
+      // exact `column coupons.value_cents does not exist` message AND the SELECT-lookup shape on
+      // `coupons` (bare or PostgREST CTE wrapper) — a real `value_cents`-missing on another table,
+      // a different `coupons` column, or a non-SELECT write still surfaces / pages.
+      if (isForeignSupabasePostgresMissingCouponsValueCentsColumnAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: a foreign/stale direct-REST client reads
       // `public.director_activity` expecting a `detail` column that the table never carried —
       // there is no lever from ShopCX to make the query resolve ([[../tables/director_activity]],
