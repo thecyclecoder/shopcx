@@ -42,6 +42,7 @@ import {
   isForeignSupabasePostgresMissingPlaybooksStepsDirectRestColumnNoise,
   isForeignSupabasePostgresMissingWorkerHeartbeatsCreatedAtAdhocNoise,
   isForeignSupabasePostgresMissingSpecsOverallStatusColumnAdhocNoise,
+  isForeignSupabasePostgresMissingCouponsStatusColumnAdhocNoise,
   isForeignSupabasePostgresMissingDirectorActivityDetailColumnAdhocNoise,
   isForeignSupabasePostgresMissingTicketDirectionsCreatedAtAdhocNoise,
   isForeignSupabasePostgresMissingSpecTestRunsVerdictColumnAdhocNoise,
@@ -431,6 +432,15 @@ const LOG_QUERIES: LogQuery[] = [
       // `specs` (bare or PostgREST CTE wrapper) — a real `overall_status`-missing on another
       // table, a `specs` column rename, or a non-SELECT write still surfaces / pages.
       if (isForeignSupabasePostgresMissingSpecsOverallStatusColumnAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: a foreign/stale direct-REST client reads
+      // `public.coupons` expecting a generic `status` column that our schema has never had —
+      // a ShopCX coupon's lifecycle lives on other columns ([[../tables/coupons]]), never a
+      // scalar `status`. There is no lever from ShopCX to make the query resolve (Control Tower
+      // signature `supabase-logs:b02068974ae0efb2`). Gated on the exact `column coupons.status
+      // does not exist` message AND the SELECT-lookup shape on `coupons` (bare or PostgREST CTE
+      // wrapper) — a real `status`-missing on another table, a different `coupons` column, or a
+      // non-SELECT write still surfaces / pages.
+      if (isForeignSupabasePostgresMissingCouponsStatusColumnAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: a foreign/stale direct-REST client reads
       // `public.director_activity` expecting a `detail` column that the table never carried —
       // there is no lever from ShopCX to make the query resolve ([[../tables/director_activity]],
