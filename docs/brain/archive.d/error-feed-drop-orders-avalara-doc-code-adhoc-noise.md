@@ -1,0 +1,1 @@
+- **Drop ad-hoc 'orders.avalara_doc_code does not exist' PostgREST noise at capture** · verified 2026-11-18 · → [[../libraries/error-feed]]
