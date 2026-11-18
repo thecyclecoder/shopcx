@@ -12,7 +12,21 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **CS Director verdict skips merged-away tickets** · verified 2026-11-17 · → [[../libraries/cs-director]]
+- **Drop foreign-app noise: Postgres 'current transaction is aborted' cascade on an ad-hoc subscriptions-items SQL Editor query** · verified 2026-11-17 · → [[../libraries/error-feed]]
+- **Drop foreign ad-hoc monthly_revenue_snapshots to_char(text) SQL-editor error from the postgres feed** · verified 2026-11-17 · → [[../libraries/error-feed]]
+- **Scope out the ad-hoc SKU-sales analysis query's round(double precision,integer) error from the Supabase postgres log feed** · verified 2026-11-17 · → [[../libraries/error-feed]]
+- **Scope out foreign agent_jobs.ticket_id undefined-column noise from the Control Tower error feed** · verified 2026-11-17 · → [[../libraries/error-feed]]
+- **Drop foreign direct-REST crisis_customer_actions.contract_id column-missing noise from the error feed** · verified 2026-11-17 · → [[../libraries/error-feed]]
+- **Drop ad-hoc crisis_events.default_substitute_variant_id missing-column noise from the error feed** · verified 2026-11-17 · → [[../libraries/error-feed]]
+- **Drop foreign direct-REST loyalty_transactions.customer_id undefined-column noise from the error feed** · verified 2026-11-17 · → [[../libraries/error-feed]]
+- **Drop foreign ad-hoc subscriptions-by-linked_customer_id edge-list query from the error feed** · verified 2026-11-17 · → [[../libraries/error-feed]]
+- **Drop ad-hoc `column s.source does not exist` subscriptions-alias noise at capture** · verified 2026-11-17 · → [[../libraries/error-feed]]
+- **Stop paging on foreign ad-hoc SELECT of non-existent subscriptions.source column** · verified 2026-11-17 · → [[../libraries/error-feed]]
+- **Founder escalation ack skips after resolution** · verified 2026-11-17 · → [[../libraries/cs-director]]
+- **Mario's failed-build ownership drop must also cover goal-escort loop_guard escalations, not only init_loop_guard** · verified 2026-11-17 · → [[lifecycles/mario-pipeline-plumbing]]
 - **Security dependency upgrades** · verified 2026-11-17 · → [[../libraries/security-agent]]
+- **Fix auto-issued return store credit failing to log (issued_by='system' not a uuid)** · verified 2026-11-17 · → [[../lifecycles/return-pipeline]]
 - **Hand-made (concierge) orders must never sit paid and unshipped without a retry or an alert** · verified 2026-11-16 · → [[../inngest/amplifier-import-reconcile]]
 - **Drop foreign returns.refund_on column-missing noise from the Control Tower error feed** · verified 2026-11-16 · → [[../libraries/error-feed]]
 - **Drop the PostgREST pgrst_source wrapper shape in the spec_status_history.created_at foreign-noise filter** · verified 2026-11-16 · → [[../libraries/control-tower]]
