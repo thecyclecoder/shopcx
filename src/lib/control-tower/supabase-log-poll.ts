@@ -104,6 +104,7 @@ import {
   isForeignSupabasePostgresMissingOrdersEasypostTrackerAdhocNoise,
   isForeignSupabasePostgresMissingOrdersTrackingNumberAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsPausedAtColumnAdhocNoise,
+  isForeignSupabasePostgresMissingSubscriptionsTaxExemptColumnAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsDeliveryAddressColumnAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsLineItemsColumnAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsRenewalSubtotalCentsColumnAdhocNoise,
@@ -1074,6 +1075,22 @@ const LOG_QUERIES: LogQuery[] = [
       // `subscriptions` via a non-SELECT statement (real code-bug shape), still
       // surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingSubscriptionsPausedAtColumnAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc `select ... tax_exempt ... from
+      // public.subscriptions` lookup by an external tool (Supabase Studio Table Editor /
+      // API Docs, foreign SQL client, stale exploratory session, third-party integration)
+      // or the PostgREST `WITH pgrst_source AS ( SELECT ... FROM "public"."subscriptions"
+      // ... )` CTE wrapper the same client emits over the REST endpoint. Our
+      // `subscriptions` table has NO `tax_exempt` column — tax-exempt state lives in the
+      // separate `customer_tax_exemptions` table. No ShopCX code path issues a SELECT on
+      // `subscriptions.tax_exempt`, so the resulting column-missing ERROR is repair work
+      // for a query we don't own
+      // ([[../specs/error-feed-drop-subscriptions-tax-exempt-column-adhoc-noise]], Control
+      // Tower signature `supabase-logs:b37d78bd56a6f274`). Narrowly gated to require BOTH
+      // the exact column-missing message AND the SELECT-lookup shape — a column-missing
+      // error on any other column of `subscriptions` (including the real `pause_resume_at`),
+      // or on `tax_exempt` from any other table, or on `subscriptions` via a non-SELECT
+      // statement (real code-bug shape), still surfaces / pages on first sighting.
+      if (isForeignSupabasePostgresMissingSubscriptionsTaxExemptColumnAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc `select ... delivery_address ...
       // from public.subscriptions` lookup by an external tool (Supabase Studio Table
       // Editor / API Docs, foreign SQL client, stale exploratory session, third-party
