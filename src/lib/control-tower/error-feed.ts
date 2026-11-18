@@ -4933,6 +4933,69 @@ export function isForeignSupabasePostgresMissingOrdersShopifyOrderNameAdhocNoise
 
 /**
  * Foreign-app noise — Postgres reporting a missing column for an ad hoc SELECT lookup of
+ * `orders.avalara_doc_code`. Our `orders` table has NO `avalara_doc_code` column — the
+ * Avalara AvaTax document code lives on the tax-transaction ledger, not on our internal
+ * `orders` row, and no ShopCX code path (src/, scripts/, shopify-extension/,
+ * supabase/migrations/, docs/brain/) issues a SELECT that names `avalara_doc_code` against
+ * `orders`. The message appears on Supabase's `postgres_logs` feed only when an external /
+ * manual tool (Supabase Studio's Table Editor / API Docs, a foreign SQL client, a stale
+ * exploratory query, a third-party integration expecting an Avalara-shaped `orders` table)
+ * does a raw `select ... avalara_doc_code ... from public.orders` lookup — or the PostgREST
+ * `WITH pgrst_source AS ( SELECT ... FROM "public"."orders" ... )` CTE wrapper the same
+ * client emits over the REST endpoint. There is no lever from ShopCX to make that query
+ * resolve — paging Platform on it
+ * ([[../specs/error-feed-drop-orders-avalara-doc-code-adhoc-noise]], Control Tower
+ * signature `supabase-logs:cca0bfbf9e4c2521`) is repair work for a query we don't own.
+ *
+ * Sibling of `isForeignSupabasePostgresMissingOrdersShopifyOrderNameAdhocNoise` — same
+ * narrow-gating shape on the same `public.orders` table, scoped to the `avalara_doc_code`
+ * confusion instead of the `shopify_order_name` / `order_number` one.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical column-missing shape for THIS column —
+ *      trimmed equal to `column orders.avalara_doc_code does not exist` (with or
+ *      without the `public.` qualifier and any leading `ERROR: ` prefix Postgres
+ *      includes on the logs surface), AND
+ *   2. the `parsed.query` attribute is a SELECT-lookup on `public.orders` — either
+ *      (a) the bare `select ... from public.orders` shape, OR (b) the PostgREST-
+ *      generated `WITH pgrst_source AS ( SELECT ... FROM "public"."orders" ... )`
+ *      CTE wrapper form with double-quoted identifiers.
+ *
+ * Narrowly gated so:
+ *   - a column-missing error for ANY OTHER column on `orders` (a real product-schema
+ *     regression on a live column like `order_number` / `total_cents`) still pages,
+ *   - a column-missing error for a DIFFERENT Avalara column (`avalara_transaction_code`)
+ *     or `avalara_doc_code` on ANY OTHER table still pages,
+ *   - the same message attached to a DIFFERENT statement shape (INSERT / UPDATE / DELETE
+ *     / DDL on `orders`) still pages — the pin is the SELECT-lookup shape,
+ *   - a FATAL / PANIC / constraint violation is untouched (different message).
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not record`,
+ * so returning null here fully suppresses the row (no error_event, no loop_alert, no
+ * signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresMissingOrdersAvalaraDocCodeColumnAdhocNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column orders.avalara_doc_code does not exist" ||
+    stripped === "column public.orders.avalara_doc_code does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  const bareSelect = /^select\b[\s\S]*\bfrom\s+(?:public\.)?orders\b/.test(q);
+  const pgrstCte =
+    /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"?(?:public"?\.)?"?orders\b/.test(q);
+  return bareSelect || pgrstCte;
+}
+
+/**
+ * Foreign-app noise — Postgres reporting a missing column for an ad hoc SELECT lookup of
  * `orders.easypost_tracker_id` or its `orders.easypost_tracking_code` /
  * `orders.easypost_carrier` twins. Our `orders` table does NOT carry any EasyPost
  * tracker-id / tracking-code / carrier top-level columns — EasyPost tracker state lives
