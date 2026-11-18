@@ -1,0 +1,1 @@
+- **Drop foreign PostgREST noise: column coupons.value_cents does not exist** · verified 2026-11-18 · → [[../libraries/error-feed]]
