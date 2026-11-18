@@ -1,0 +1,1 @@
+- **Drop foreign-app noise: PostgREST SELECT on coupon_redemptions.code** · verified 2026-11-18 · → [[../libraries/error-feed]]
