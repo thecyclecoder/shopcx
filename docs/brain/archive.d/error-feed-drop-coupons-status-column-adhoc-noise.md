@@ -1,0 +1,1 @@
+- **Drop foreign-app 'column coupons.status does not exist' adhoc-REST noise** · verified 2026-11-18 · → [[../libraries/error-feed]]

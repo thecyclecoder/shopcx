@@ -1,0 +1,1 @@
+- **Scope out foreign PostgREST probe selecting non-existent subscriptions.internal_contract_id** · verified 2026-11-18 · → [[../libraries/error-feed]]
