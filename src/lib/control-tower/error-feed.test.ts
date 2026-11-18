@@ -126,6 +126,7 @@ import {
   isForeignSupabasePostgresMissingAppstleContractSnapshotsUpdatedAtAdhocNoise,
   isForeignSupabasePostgresMissingAppstleContractSnapshotsContractIdAdhocNoise,
   isForeignSupabasePostgresMissingMigrationAuditsContractIdAdhocNoise,
+  isForeignSupabasePostgresMissingSubscriptionsInternalContractIdAdhocNoise,
   isForeignSupabasePostgresMissingQbAmazonSalesSkuAdhocNoise,
   isForeignSupabasePostgresMissingLoyaltyMembersLifetimePointsAdhocNoise,
   isForeignSupabasePostgresMissingLoyaltyRedemptionsCouponCodeAdhocNoise,
@@ -22457,6 +22458,138 @@ test("isForeignSupabasePostgresMissingMigrationAuditsContractIdAdhocNoise return
   assert.equal(
     isForeignSupabasePostgresMissingMigrationAuditsContractIdAdhocNoise(
       "column migration_audits.contract_id does not exist",
+      "",
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingSubscriptionsInternalContractIdAdhocNoise ──
+// Sibling of the migration_audits.contract_id drop — the same migration-pointer column
+// (`internal_contract_id`) conflated onto `public.subscriptions`. A foreign / stale PostgREST
+// client / hand-typed URL / Supabase Studio filter reads
+// `/rest/v1/subscriptions?select=internal_contract_id,...`. The `subscriptions` table exists
+// (core ShopCX table) but by design carries NO `internal_contract_id` column — that column
+// lives on `migration_audits`. Foreign-owned surface, no lever from us — drop AT CAPTURE only
+// when BOTH the exact column-missing message on `subscriptions.internal_contract_id` AND a
+// SELECT-lookup shape on `subscriptions` (bare OR PostgREST CTE wrapper) are present. A
+// column-missing on any other table, a different column on `subscriptions`, or a non-SELECT
+// statement still pages.
+
+test("isForeignSupabasePostgresMissingSubscriptionsInternalContractIdAdhocNoise drops the exact failing sample (positive drop — bare SELECT + PostgREST CTE shapes with the exact message)", () => {
+  // Bare SELECT-lookup, unqualified and public.-qualified message variants.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsInternalContractIdAdhocNoise(
+      "column subscriptions.internal_contract_id does not exist",
+      "select internal_contract_id, status from public.subscriptions where workspace_id = $1",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsInternalContractIdAdhocNoise(
+      "column public.subscriptions.internal_contract_id does not exist",
+      "select internal_contract_id from public.subscriptions",
+    ),
+    true,
+  );
+  // Unqualified FROM (no `public.`) is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsInternalContractIdAdhocNoise(
+      "column subscriptions.internal_contract_id does not exist",
+      "select internal_contract_id from subscriptions order by created_at desc limit 10",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsInternalContractIdAdhocNoise(
+      "ERROR: column subscriptions.internal_contract_id does not exist",
+      "select internal_contract_id from public.subscriptions",
+    ),
+    true,
+  );
+  // The PostgREST CTE wrapper form (direct-REST wire shape) is dropped too.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsInternalContractIdAdhocNoise(
+      "column subscriptions.internal_contract_id does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."subscriptions"."internal_contract_id", "public"."subscriptions"."status" FROM "public"."subscriptions" )',
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSubscriptionsInternalContractIdAdhocNoise KEEPS a column-missing on subscriptions for a DIFFERENT column (a real schema regression on a live subscriptions column)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsInternalContractIdAdhocNoise(
+      "column subscriptions.status does not exist",
+      "select status from public.subscriptions",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsInternalContractIdAdhocNoise(
+      "column subscriptions.next_billing_date does not exist",
+      "select next_billing_date from public.subscriptions",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSubscriptionsInternalContractIdAdhocNoise KEEPS a column-missing on internal_contract_id for a DIFFERENT table (the pin is subscriptions only)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsInternalContractIdAdhocNoise(
+      "column migration_audits.internal_contract_id does not exist",
+      "select internal_contract_id from public.migration_audits",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSubscriptionsInternalContractIdAdhocNoise KEEPS a non-SELECT statement shape on subscriptions (an INSERT/UPDATE/JOIN with the same message is a real code-bug and still pages)", () => {
+  // A write against subscriptions referencing a bogus `internal_contract_id` column is real
+  // code — a bug we WANT to see, not the ad hoc read.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsInternalContractIdAdhocNoise(
+      "column subscriptions.internal_contract_id does not exist",
+      "insert into public.subscriptions (workspace_id, internal_contract_id) values ($1, $2)",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsInternalContractIdAdhocNoise(
+      "column subscriptions.internal_contract_id does not exist",
+      "update public.subscriptions set internal_contract_id = $1 where workspace_id = $2",
+    ),
+    false,
+  );
+  // A JOIN across other tables is a real code path we own.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsInternalContractIdAdhocNoise(
+      "column subscriptions.internal_contract_id does not exist",
+      "select s.internal_contract_id from public.subscriptions s join public.migration_audits m on m.subscription_id = s.id",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSubscriptionsInternalContractIdAdhocNoise returns false on empty / nullish input", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsInternalContractIdAdhocNoise(null, null),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsInternalContractIdAdhocNoise(undefined, undefined),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsInternalContractIdAdhocNoise("", ""),
+    false,
+  );
+  // Empty query — even with the exact message we cannot confirm the shape, so the row stays
+  // captured.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsInternalContractIdAdhocNoise(
+      "column subscriptions.internal_contract_id does not exist",
       "",
     ),
     false,
