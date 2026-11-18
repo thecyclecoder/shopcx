@@ -13150,6 +13150,77 @@ export function isForeignSupabasePostgresMissingMigrationAuditsContractIdAdhocNo
 }
 
 /**
+ * Foreign-app noise — Postgres reporting `column subscriptions.internal_contract_id does
+ * not exist` for an ad hoc / stale PostgREST direct-REST SELECT against
+ * `public.subscriptions.internal_contract_id`. The `subscriptions` table exists and is a
+ * core ShopCX table, but by design carries NO `internal_contract_id` column — that column
+ * lives on `migration_audits` (one row per Appstle→internal migration). The conflation is
+ * a natural foreign mistake: a stale SQL Editor / Supabase Studio session / deprecated
+ * integration / hand-typed URL reads `/rest/v1/subscriptions?select=internal_contract_id,...`
+ * expecting the migration pointer to hang off the subscription row. There is no lever from
+ * ShopCX to make that query resolve — paging Platform on it is repair work for a query we
+ * don't own (Control Tower signature `supabase-logs:1144e2a05392a667`).
+ *
+ * Sibling of `isForeignSupabasePostgresMissingMigrationAuditsContractIdAdhocNoise` — the
+ * same narrow-gating shape (exact `column <table>.<name> does not exist` + SELECT-lookup
+ * shape covering BOTH bare and PostgREST CTE wrapper forms), aimed at a different foreign
+ * caller conflating the same migration column onto a different table.
+ *
+ * Narrowly gated so:
+ *   - a column-missing error for ANY OTHER table still pages — the pin is
+ *     `subscriptions.` only,
+ *   - a column-missing error on `subscriptions` for a DIFFERENT column (a real schema
+ *     regression on a live subscriptions column) still pages — the pin covers
+ *     `internal_contract_id` only,
+ *   - a `subscriptions.internal_contract_id` error attached to a DIFFERENT statement shape
+ *     (INSERT / UPDATE / DELETE / DDL, JOIN across other tables) still pages — the pin is
+ *     the SELECT-lookup shape; the CTE branch likewise requires the wrapped op to be a
+ *     SELECT,
+ *   - empty / nullish message OR query returns `false` — we need both markers.
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not record`,
+ * so returning null here fully suppresses the row (no error_event, no loop_alert, no
+ * signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresMissingSubscriptionsInternalContractIdAdhocNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  // Strip an optional leading Postgres `ERROR: ` / `ERROR:  ` prefix — Supabase's logs
+  // surface sometimes carries it, sometimes doesn't. The column-missing message itself has
+  // a stable shape: `column <table>.<name> does not exist`, pinned here to
+  // `subscriptions.internal_contract_id` (with or without the `public.` qualifier).
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column subscriptions.internal_contract_id does not exist" ||
+    stripped === "column public.subscriptions.internal_contract_id does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  // Bare SELECT-lookup on the table — allow any trailing WHERE/LIMIT/ORDER BY, but the
+  // statement MUST start with `select`, its FROM clause MUST name `subscriptions` (with or
+  // without the `public.` schema qualifier), AND the statement MUST NOT carry a `join`
+  // clause. A JOIN across other tables is a real code path we own; a caller that actually
+  // writes to subscriptions with a bogus `internal_contract_id` column is a code bug we DO
+  // want to page on.
+  if (
+    /^select\b[\s\S]*\bfrom\s+(?:public\.)?subscriptions\b/.test(q) &&
+    !/\bjoin\b/.test(q)
+  ) {
+    return true;
+  }
+  // PostgREST direct-REST wraps the same lookup as `WITH pgrst_source AS ( SELECT ... FROM
+  // "public"."subscriptions" ... )` with double-quoted identifiers. Same foreign-owned
+  // read, different rendering — the plain SELECT regex above misses it because the
+  // statement starts with `with`. Guarded so the CTE branch requires the wrapped op to be a
+  // SELECT (a PostgREST INSERT/UPDATE inside the same wrapper stays captured/paged).
+  return /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"?(?:public"?\.)?"?subscriptions\b/.test(q);
+}
+
+/**
  * Foreign-app noise — Postgres reporting `column qb_amazon_sales_snapshots.sku does not
  * exist` for an ad hoc / stale PostgREST direct-REST SELECT against
  * `public.qb_amazon_sales_snapshots.sku`. The `qb_amazon_sales_snapshots` table exists
