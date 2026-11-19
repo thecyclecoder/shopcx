@@ -24,15 +24,22 @@ export async function POST(
   }
 
   const body = await request.json();
-  const { outcome, responses } = body as {
+  const { outcome, responses, cancel_flow } = body as {
     outcome: string;
     responses?: Record<string, { value: string; label: string }>;
+    cancel_flow?: boolean;
   };
 
   if (!outcome) return NextResponse.json({ error: "outcome required" }, { status: 400 });
 
   const config = session.config_snapshot as Record<string, unknown> || {};
   const journeyType = config.journeyType as string || null;
+
+  // In-journey cancel from the next-order editor routes through the SAME shared cancel
+  // handler below (remedy-selector offers + remedy-actions executors) — not a second cancel
+  // copy. The client flags cancel_flow because a next-order session's config_snapshot carries
+  // nextOrderJourney, not cancelJourney.
+  const cancelFlow = config.cancelJourney === true || cancel_flow === true;
 
   // ── Code-driven journey completion (step-builder based) ──
   if (config.codeDriven && journeyType) {
@@ -853,14 +860,16 @@ export async function POST(
       });
     }
 
-    // Don't return early for cancel journeys — let them fall through to the cancel handler
-    if (!config.cancelJourney) {
+    // Don't return early for cancel journeys (or an in-journey next-order cancel) —
+    // let them fall through to the shared cancel handler.
+    if (!cancelFlow) {
       return NextResponse.json({ success: true, message: actionLog.length > 0 ? "All done! We've updated your account." : "Thanks for letting us know!" });
     }
   }
 
-  // Process cancel journey completion
-  if (config.cancelJourney) {
+  // Process cancel journey completion (shared by the cancel journey AND the next-order
+  // editor's in-journey cancel — one executor path for both surfaces).
+  if (cancelFlow) {
     const metadata = (config.metadata || {}) as Record<string, unknown>;
     const wsId = session.workspace_id;
     const actionLog: string[] = [];
@@ -1262,6 +1271,21 @@ export async function POST(
           });
         }
       }
+    }
+
+    // Lifecycle event for the next-order journey's in-journey cancel — cancelled vs saved,
+    // keyed by the journey_sessions row so M3/M4 can attribute the outcome to the arm. A save
+    // that failed to apply is NOT reported as saved (verify-before-report).
+    if (cancel_flow === true || config.nextOrderJourney === true) {
+      const lifecycle = outcome === "cancelled" ? "cancelled" : (saveFailed ? "save_failed" : "saved");
+      await admin.from("journey_step_events").insert({
+        session_id: session.id,
+        workspace_id: wsId,
+        step_index: 99,
+        step_key: "lifecycle",
+        response_value: lifecycle,
+        response_label: savedAction || cancelReasonLabel || outcome,
+      });
     }
 
     // Mark session completed

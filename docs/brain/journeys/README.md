@@ -52,6 +52,7 @@ Every journey defines `jo:positive` / `jo:negative` / `jo:neutral` outcome tags.
 | [[add-payment-method]] | `add_payment_method` | email, chat, sms | Card vaulted + book migrated to internal |
 | [[discount-signup]] | `discount_signup` | email, chat, help_center, meta_dm, sms | Marketing signup + coupon delivered |
 | [[cancel]] | `cancel_subscription` | email, chat, sms, meta_dm | Customer saved (accepted remedy) |
+| [[next-order]] | `next_order` | email, sms | Customer edited / saved in-journey (vs cancelled) |
 | [[crisis-tier1-flavor-swap]] | `crisis_tier1` | email | Customer accepted swap |
 | [[crisis-tier2-product-swap]] | `crisis_tier2` | email | Customer accepted swap |
 | [[crisis-tier3-pause-remove]] | `crisis_tier3` | email | Customer paused / removed (vs cancelled) |
