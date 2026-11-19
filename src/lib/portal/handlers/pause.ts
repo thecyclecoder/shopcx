@@ -6,12 +6,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 // hit Appstle for a contract it no longer holds — failing there and returning BEFORE the local
 // write, leaving the customer's change silently unapplied.
 import { subscriptionAction } from "@/lib/commerce/subscription";
-
-function addDays(days: number): string {
-  const d = new Date();
-  d.setDate(d.getDate() + days);
-  return d.toISOString();
-}
+import { computePausedRenewalDate } from "@/lib/portal/pause-renewal-date";
 
 function formatDateShort(iso: string): string {
   try {
@@ -37,8 +32,9 @@ export const pause: RouteHandler = async ({ auth, route, req }) => {
   if (!contractId) return jsonErr({ error: "missing_contractId" }, 400);
   if (![30, 60].includes(pauseDays)) return jsonErr({ error: "invalid_pauseDays" }, 400);
 
-  // Resume date is X days from TODAY, not from next billing date
-  const resumeAt = addDays(pauseDays);
+  // Pause counts from the next renewal, not from today: the new renewal is the old
+  // next_billing_date + pauseDays (falling back to today when there's no future date).
+  const resumeAt = computePausedRenewalDate(resolved?.next_billing_date ?? null, pauseDays, new Date());
   const resumeLabel = formatDateShort(resumeAt);
 
   // Route through the internal-aware wrapper (handles is_internal vs Appstle).
@@ -51,6 +47,9 @@ export const pause: RouteHandler = async ({ auth, route, req }) => {
     .update({
       status: "paused",
       pause_resume_at: resumeAt,
+      // The chosen renewal IS the next billing date now — auto-resume honors this future date
+      // instead of re-deriving one off the cycle grid.
+      next_billing_date: resumeAt,
       updated_at: new Date().toISOString(),
     })
     .eq("workspace_id", auth.workspaceId)
@@ -66,7 +65,7 @@ export const pause: RouteHandler = async ({ auth, route, req }) => {
       workspaceId: auth.workspaceId,
       customerId: customer.id,
       eventType: "portal.subscription.paused",
-      summary: `Subscription #${contractId} paused until ${resumeLabel}`,
+      summary: `Subscription #${contractId} paused — your next order is now ${resumeLabel}`,
       properties: { shopify_contract_id: String(contractId), pauseDays, resumeAt },
       createNote: false,
     });

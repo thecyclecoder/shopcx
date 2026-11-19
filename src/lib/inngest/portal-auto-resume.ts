@@ -54,17 +54,27 @@ async function retimeAfterResume(
   contractId: string,
   sub: { next_billing_date: string | null; billing_interval: string | null; billing_interval_count: number | null },
 ): Promise<string | null> {
-  const from = sub.next_billing_date ? new Date(sub.next_billing_date) : new Date();
+  const stored = sub.next_billing_date ? new Date(sub.next_billing_date) : null;
+  const storedIsFuture = !!stored && !Number.isNaN(stored.getTime()) && stored.getTime() > Date.now();
+
   let next: Date;
-  try {
-    next = rollForwardToFutureBillingDate(
-      Number.isNaN(from.getTime()) ? new Date() : from,
-      sub.billing_interval ?? "month",
-      sub.billing_interval_count ?? 1,
-    );
-  } catch {
-    // rollForward refuses to return a past date; if it cannot, tomorrow is the safe floor.
-    next = new Date(Date.now() + 86_400_000);
+  if (storedIsFuture) {
+    // ⭐ The portal pause now sets next_billing_date = old renewal + pauseDays, so a date still in
+    // the future IS the renewal the customer was promised — honor it instead of rolling to a
+    // cycle-grid date. (A past date still rolls forward: resuming must never bill a stale cycle.)
+    next = stored as Date;
+  } else {
+    const from = stored ?? new Date();
+    try {
+      next = rollForwardToFutureBillingDate(
+        Number.isNaN(from.getTime()) ? new Date() : from,
+        sub.billing_interval ?? "month",
+        sub.billing_interval_count ?? 1,
+      );
+    } catch {
+      // rollForward refuses to return a past date; if it cannot, tomorrow is the safe floor.
+      next = new Date(Date.now() + 86_400_000);
+    }
   }
 
   const { resolveBillingSource } = await import("@/lib/internal-subscription");
