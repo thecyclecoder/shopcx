@@ -964,6 +964,9 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
       .filter((l) => l.kind === "product")
       .map((l) => ({
         variant_id: l.variant_id,
+        // product_id carries the product's avalara_tax_code into the tax commit — without it
+        // every renewal was taxed as P0000000 (see buildAvalaraLines in avalara-cart.ts).
+        product_id: l.product_id || undefined,
         sku: l.sku || undefined,
         title: l.title,
         variant_title: l.variant_title || undefined,
