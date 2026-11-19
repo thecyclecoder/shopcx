@@ -2173,6 +2173,27 @@ export function evalOutputAssertion(
 const ACTIVE_DUNNING_STATUSES = ["active", "rotating", "retrying", "skipped", "paused"] as const;
 
 /**
+ * Designed-hold customer_event types the internal renewal cron emits when it DELIBERATELY leaves
+ * a due sub's `next_billing_date` in the past for a known, already-surfaced customer-action reason
+ * (see `src/lib/inngest/internal-subscription-renewals.ts`). An overdue sub carrying a fresh event
+ * of one of these types is a customer-action item the cron handled correctly — NOT a cron miss —
+ * so it is subtracted from the renewal-integrity count. Keep in sync with the cron's `eventType`s.
+ */
+const RENEWAL_DESIGNED_HOLD_EVENT_TYPES = [
+  "subscription.renewal_blocked_no_payment_method",
+  "subscription.renewal_blocked_no_recipient_name",
+  "subscription.renewal_held_overcharge_guard",
+  "subscription.renewal_held_coupon_unavailable",
+] as const;
+
+/**
+ * Fallback look-back window for designed-hold events when no renewal-cron beat is known. The cron
+ * runs daily (09:00 UTC); ~26h covers one full cycle plus jitter so a hold emitted on the last run
+ * is still in scope when the beat timestamp is unavailable.
+ */
+const RENEWAL_DESIGNED_HOLD_LOOKBACK_MS = 26 * 60 * 60 * 1000;
+
+/**
  * READ-ONLY: overdue active internal subscriptions that AREN'T already owned by an active
  * dunning cycle (build-control-tower-renewal-integrity-exclude-active-dunning Phase 1) AND
  * that were eligible for the LAST renewal-cron run (control-tower-renewal-integrity-post-cron-activation-grace
@@ -2184,6 +2205,11 @@ const ACTIVE_DUNNING_STATUSES = ["active", "rotating", "retrying", "skipped", "p
  * non-terminal `dunning_cycles` row. Uncovered overdue subs still flag as renewal_integrity;
  * dunning-owned subs remain visible through the stuck-dunning assertion if their retry
  * schedule is missed.
+ *
+ * Also subtract overdue subs the cron DELIBERATELY held for a known, already-surfaced reason
+ * (no payment method / no recipient name / overcharge guard / coupon lookup unavailable — the
+ * {@link RENEWAL_DESIGNED_HOLD_EVENT_TYPES} customer_events). Those are customer-action items the
+ * cron handled correctly, not cron misses, so they must not red-page the platform owner.
  *
  * `latestRenewalCronBeatIso` is the ran_at of the most recent internal-subscription-renewal-cron
  * heartbeat. Subs whose `updated_at` is strictly LATER than that timestamp changed AFTER the
@@ -2237,6 +2263,33 @@ export async function countRenewalIntegrityOverdueSubs(
   for (const row of coveredRows ?? []) {
     const subId = (row as { subscription_id: string | null }).subscription_id;
     if (subId) coveredIds.add(subId);
+  }
+
+  // Designed-hold exclusion: the renewal cron deliberately leaves some due subs' next_billing_date
+  // in the past for a known, already-surfaced customer-action reason (no payment method, no
+  // recipient name, overcharge guard, coupon lookup unavailable) and logs a customer_event for
+  // each. Those are customer-action items the cron handled correctly, NOT cron misses — so subtract
+  // any overdue sub carrying a fresh hold event. "Fresh" = since the last renewal-cron beat (the
+  // most recent run that could have emitted it); fall back to a ~26h look-back when no beat is
+  // known, so a hold from the last daily run is still in scope. The sandbox is excluded on both
+  // sides per the same convention as the dunning subtraction above.
+  const holdWindowStartIso =
+    beatMs != null && Number.isFinite(beatMs)
+      ? latestRenewalCronBeatIso!
+      : new Date(Date.now() - RENEWAL_DESIGNED_HOLD_LOOKBACK_MS).toISOString();
+  const { data: holdRows, error: holdErr } = await admin
+    .from("customer_events")
+    .select("properties")
+    .in("event_type", [...RENEWAL_DESIGNED_HOLD_EVENT_TYPES])
+    .gte("created_at", holdWindowStartIso)
+    .neq("workspace_id", SPEC_TEST_SANDBOX_WORKSPACE_ID);
+  if (!holdErr) {
+    const overdueIdSet = new Set(overdueIds);
+    for (const row of holdRows ?? []) {
+      const props = (row as { properties: { subscription_id?: string | null } | null }).properties;
+      const subId = props?.subscription_id ?? null;
+      if (subId && overdueIdSet.has(subId)) coveredIds.add(subId);
+    }
   }
 
   let uncovered = 0;
