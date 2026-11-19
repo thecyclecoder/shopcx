@@ -570,11 +570,13 @@ export function validateGrepPatternIsNotMisreadLiteral(pattern: string): Executa
  * then held its goal's promotion. Rejected at authoring with the fix: set `grep.mode: 'regex'`.
  */
 export function validateLiteralGrepIsNotRegex(pattern: string): ExecutableCheckValidation {
-  if (/\\[.*+?()[\]{}|^$]/.test(pattern) || /\.[*+]/.test(pattern)) {
+  // A bare `a|b` (no spaces, not `||`) reads as alternation; as a fixed string it never matches code.
+  const alternation = /(^|[^|\s])\|([^|\s]|$)/.test(pattern);
+  if (/\\[.*+?()[\]{}|^$]/.test(pattern) || /\.[*+]/.test(pattern) || alternation) {
     return {
       valid: false,
       reason:
-        `grep.pattern "${pattern}" is written as a regex (escaped metacharacters or a .* wildcard) but ` +
+        `grep.pattern "${pattern}" is written as a regex (escaped metacharacters, a .* wildcard, or a|b alternation) but ` +
         `grep.mode is 'literal' (the default), so it is matched as a fixed string and can never pass. ` +
         `Set grep.mode:'regex', or write the plain code snippet without escapes.`,
     };
@@ -849,15 +851,17 @@ export function validateExecutableCheck(
               reason: `${misread.reason} Or set grep.mode:'literal' to match the snippet verbatim.`,
             };
           }
-        } else {
-          // The mirror lint, author-time only for the same reason: a regex-shaped pattern left in the
-          // literal default is a check that can never pass.
-          const regexInLiteral = validateLiteralGrepIsNotRegex(pattern);
-          if (!regexInLiteral.valid) return regexInLiteral;
         }
         const guess = detectBuilderChosenNameInGrep(pattern, ctx.specText);
         if (guess) {
           return { valid: false, reason: `${guess.reason}. Try grep.pattern: ${guess.suggested}` };
+        }
+        // The mirror lint, author-time only for the same reason: a regex-shaped pattern left in the
+        // literal default is a check that can never pass. Runs after the guess guard so that guard's
+        // more specific reason (and suggested pattern) wins when both apply.
+        if (resolvedMode === "literal") {
+          const regexInLiteral = validateLiteralGrepIsNotRegex(pattern);
+          if (!regexInLiteral.valid) return regexInLiteral;
         }
       }
       return { valid: true };
