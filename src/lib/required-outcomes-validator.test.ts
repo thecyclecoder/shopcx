@@ -243,6 +243,64 @@ test("Judy positive: apply_coupon on the ticket's OWN contract → validator pas
   assert.equal(verdict.ok, true);
 });
 
+// ── PREVENT: an apply_loyalty_coupon required outcome against a PAUSED sub is never authored ──
+// (ticket aaf00047 — the un-completable policy-forbidden row that loops the completion gate).
+
+test("apply_loyalty_coupon on a PAUSED sub (own customer) → subscription_not_active blocked", async () => {
+  const subs = new Map<string, Row>();
+  subs.set("gid://paused", { workspace_id: "w1", customer_id: "c1", status: "paused" });
+  const items: ValidatorItem[] = [
+    {
+      kind: "apply_loyalty_coupon",
+      description: "apply LOYALTY-15 to the sub",
+      target_ids: { contract_id: "gid://paused", code: "LOYALTY-15" },
+    },
+  ];
+  const verdict = await validateRequiredOutcomes({
+    admin: fakeAdmin({ subscriptions: subs }),
+    ...TICKET,
+    items,
+  });
+  assert.equal(verdict.ok, false, "a coupon apply onto a paused sub MUST be rejected upfront");
+  if (verdict.ok === false) {
+    assert.equal(verdict.blocked.length, 1);
+    assert.equal(verdict.blocked[0].reason, "subscription_not_active");
+    assert.match(verdict.blocked[0].detail, /paused/);
+  }
+});
+
+test("apply_loyalty_coupon on an ACTIVE sub (own customer) → passes (policy allows it)", async () => {
+  const subs = new Map<string, Row>();
+  subs.set("gid://active", { workspace_id: "w1", customer_id: "c1", status: "active" });
+  const items: ValidatorItem[] = [
+    {
+      kind: "apply_loyalty_coupon",
+      description: "apply LOYALTY-15 to the active sub",
+      target_ids: { contract_id: "gid://active", code: "LOYALTY-15" },
+    },
+  ];
+  const verdict = await validateRequiredOutcomes({
+    admin: fakeAdmin({ subscriptions: subs }),
+    ...TICKET,
+    items,
+  });
+  assert.equal(verdict.ok, true);
+});
+
+test("non-coupon kind (cancel) on a paused sub is NOT gated by the active-sub rule", async () => {
+  const subs = new Map<string, Row>();
+  subs.set("gid://paused", { workspace_id: "w1", customer_id: "c1", status: "paused" });
+  const items: ValidatorItem[] = [
+    { kind: "cancel", description: "cancel the paused sub", target_ids: { contract_id: "gid://paused" } },
+  ];
+  const verdict = await validateRequiredOutcomes({
+    admin: fakeAdmin({ subscriptions: subs }),
+    ...TICKET,
+    items,
+  });
+  assert.equal(verdict.ok, true, "the active-sub rule only applies to coupon/loyalty applies");
+});
+
 test("customer-scoped kinds (unsubscribe_all_marketing) pass without target_ids", async () => {
   const items: ValidatorItem[] = [
     { kind: "unsubscribe_all_marketing", description: "opt out of all marketing" },

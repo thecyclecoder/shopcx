@@ -17,6 +17,14 @@
  *   pending → verified   (rare — the predicate already held at Direction-authoring time)
  *   pending → failed     (Phase 2 escalated on a guardrail or the action errored)
  *   done    → failed     (Phase 2 DB verify couldn't back the claim)
+ *   failed  → waived     (completing the outcome is policy-forbidden against live state — e.g.
+ *                         a coupon apply onto a paused sub — so the row is closed as
+ *                         correctly-NOT-done instead of re-firing; see [[required-outcome-policy]])
+ *   pending → waived     (same, caught before the executor ever fired)
+ *
+ * `verified` and `waived` are the two TERMINAL-CLOSED statuses — the completion gate opens on
+ * either (a verified outcome happened; a waived outcome correctly did not). Only pending/done/
+ * failed keep the ticket open.
  *
  * Every mutating call is a compare-and-set on the current status (learning #5 — re-assert the
  * read-time predicate in the write, never trust a proxy) so a racing writer can't overwrite
@@ -26,7 +34,13 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 type Admin = SupabaseClient;
 
-export type RequiredOutcomeStatus = "pending" | "done" | "verified" | "failed";
+export type RequiredOutcomeStatus = "pending" | "done" | "verified" | "failed" | "waived";
+
+/** The two terminal-closed statuses — the completion gate opens on either. */
+export const CLOSED_OUTCOME_STATUSES: ReadonlySet<RequiredOutcomeStatus> = new Set<RequiredOutcomeStatus>([
+  "verified",
+  "waived",
+]);
 
 /**
  * The DB predicate that would prove a required outcome done. Free-form jsonb — Phase 2 defines
@@ -237,14 +251,48 @@ export function markOutcomeFailed(
 }
 
 /**
+ * Mark a required outcome as WAIVED — completing it is policy-forbidden against live DB state, so
+ * the row is closed as correctly-NOT-done rather than left in `failed` to re-escalate forever.
+ * The ground-truth case: an `apply_loyalty_coupon` outcome authored against a paused subscription
+ * (ticket aaf00047) — the active loyalty rule forbids it and the handler fails it upstream with
+ * `subscription_not_active`, so no rescue action can ever clear the failed row. The waive path
+ * (driven by the completion gate's `waivePolicyForbiddenOutcomes`, gated on the shared
+ * `assessPolicyForbidden` predicate in [[required-outcome-policy]]) stops the loop.
+ *
+ * The `reason` is stored on `failed_reason` (the row's generic reason field) so dashboards can
+ * render why it was waived. CAS from `from` (default 'failed' — the common stuck state); pass
+ * `from: 'pending'` for a row caught before the executor fired. NEVER waives a 'done'/'verified'
+ * row — those outcomes actually happened. Returns null when the CAS lost (a racing writer already
+ * progressed the row).
+ */
+export function markOutcomeWaived(
+  admin: Admin,
+  input: {
+    id: string;
+    workspace_id: string;
+    from?: "pending" | "failed";
+    reason: string;
+  },
+): Promise<TicketRequiredOutcome | null> {
+  return transitionStatus(admin, {
+    id: input.id,
+    workspace_id: input.workspace_id,
+    from: input.from ?? "failed",
+    to: "waived",
+    failed_reason: input.reason,
+  });
+}
+
+/**
  * "Are any required outcomes still open?" — the Phase-4 completion gate's core predicate.
  * Returns `true` when at least one row has status in {pending, done, failed}: pending means the
  * executor hasn't fired the action yet, done means it fired but the DB verify hasn't confirmed,
- * failed means an action or verify blew up and escalates to June. Only 'verified' counts as
- * closed.
+ * failed means an action or verify blew up and escalates to June. Both 'verified' and 'waived'
+ * count as closed — a waived row is a correctly-NOT-done outcome (policy-forbidden; see
+ * [[required-outcome-policy]]) and must NOT keep the ticket open.
  *
- * Backed by the partial index `WHERE status <> 'verified'` — the gate check stays cheap even
- * when the ticket has dozens of already-verified rows.
+ * Backed by the partial index `WHERE status NOT IN ('verified','waived')` — the gate check stays
+ * cheap even when the ticket has dozens of already-closed rows.
  */
 export async function hasUnverifiedOutcomes(
   admin: Admin,
@@ -257,6 +305,7 @@ export async function hasUnverifiedOutcomes(
     .eq("workspace_id", workspace_id)
     .eq("ticket_id", ticket_id)
     .neq("status", "verified")
+    .neq("status", "waived")
     .limit(1);
   if (error) throw error;
   return (data ?? []).length > 0;
@@ -282,6 +331,7 @@ export async function countOutcomesByStatus(
     done: 0,
     verified: 0,
     failed: 0,
+    waived: 0,
   };
   for (const row of (data ?? []) as Array<{ status: RequiredOutcomeStatus }>) {
     counts[row.status] += 1;
