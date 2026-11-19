@@ -1,0 +1,1 @@
+- **Renewal-integrity tile: stop red-paging on designed renewal holds (no-payment-method etc.)** · verified 2026-11-19 · → [[../libraries/control-tower]]
