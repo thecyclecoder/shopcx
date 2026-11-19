@@ -2647,7 +2647,24 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: ws
             // this — bag/credit both failed to run yet the ticket auto-resolved because auto-close
             // keyed off "reply sent" instead of "DB items done". Escalate instead of close when
             // there are unfinished items, naming them verbatim in escalation_reason.
-            const { assertOutcomesCompleteBeforeClose, escalateTicketOnIncompleteOutcomes } = await import("@/lib/outcome-completion-gate");
+            const { assertOutcomesCompleteBeforeClose, escalateTicketOnIncompleteOutcomes, waivePolicyForbiddenOutcomes } = await import("@/lib/outcome-completion-gate");
+            // WAIVE first: close any OPEN required-outcome row whose completion is policy-forbidden
+            // against live state (e.g. an apply_loyalty_coupon authored against a now-paused sub —
+            // ticket aaf00047). Left as 'failed' it would re-escalate this fully-resolved ticket on
+            // every reopen, because no rescue action can ever clear a policy-forbidden row. Waiving
+            // it (bounded + fail-closed in waivePolicyForbiddenOutcomes) lets the gate below open.
+            const { waived } = await waivePolicyForbiddenOutcomes({
+              admin,
+              workspace_id: wsId,
+              ticket_id: tid,
+            });
+            if (waived.length > 0) {
+              await sysNote(
+                admin,
+                tid,
+                `[System] Waived ${waived.length} policy-forbidden required outcome(s) (${waived.map((w) => `${w.kind}`).join(", ")}) — completing them is forbidden by policy, so they are closed as correctly-not-done instead of re-escalating.`,
+              );
+            }
             const completion = await assertOutcomesCompleteBeforeClose({
               admin,
               workspace_id: wsId,

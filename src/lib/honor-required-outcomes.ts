@@ -158,6 +158,9 @@ export function replyGateBlocked(outcomes: TicketRequiredOutcome[]): ReplyGateVe
   let verified_count = 0;
   for (const o of outcomes) {
     if (o.status === "verified") { verified_count += 1; continue; }
+    // A waived outcome is a correctly-NOT-done, policy-forbidden row (see
+    // [[required-outcome-policy]]) — it neither backs a claim nor blocks the reply. Skip it.
+    if (o.status === "waived") continue;
     if (o.status === "failed") { failed.push(o.description); continue; }
     // status is 'pending' or 'done' — executor may have fired but DB verify hasn't confirmed
     pending.push(o.description);
@@ -212,6 +215,9 @@ export async function honorRequiredOutcomes(ctx: HonorContext): Promise<HonorSum
       summary.skipped_already_verified += 1;
       continue;
     }
+    // A waived outcome is terminally closed (policy-forbidden, correctly-not-done) — the honor
+    // step never retries it and never carries it forward as failed. Skip it.
+    if (o.status === "waived") continue;
     if (o.status === "failed") {
       summary.all_verified = false;
       summary.carried_forward_failed.push({
@@ -436,7 +442,8 @@ export function classifyOutcomeForReconcile(
   row: TicketRequiredOutcome,
   firedActions: readonly FiredActionRef[],
 ): ReconcileClassification {
-  if (row.status === "verified") return { verdict: "skip_verified" };
+  // verified AND waived are both terminal-closed — the reconciler never re-opens a closed row.
+  if (row.status === "verified" || row.status === "waived") return { verdict: "skip_verified" };
   if (row.status === "done") return { verdict: "skip_done" };
   const matched = findMatchingFiredAction(row, firedActions);
   if (matched == null) return { verdict: "skip_kind_mismatch" };

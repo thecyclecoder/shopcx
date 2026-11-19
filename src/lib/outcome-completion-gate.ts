@@ -24,17 +24,20 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import {
   listRequiredOutcomes,
+  markOutcomeWaived,
+  CLOSED_OUTCOME_STATUSES,
   type TicketRequiredOutcome,
   type RequiredOutcomeStatus,
 } from "./ticket-required-outcomes";
+import { COUPON_APPLY_KINDS, assessPolicyForbidden } from "./required-outcome-policy";
 
 /** One outcome the gate flagged as unfinished. */
 export interface UnfinishedOutcome {
   outcome_id: string;
   kind: string;
   description: string;
-  /** The status the row was in — pending / done / failed. Never 'verified'. */
-  status: Exclude<RequiredOutcomeStatus, "verified">;
+  /** The status the row was in — pending / done / failed. Never a terminal-closed status. */
+  status: Exclude<RequiredOutcomeStatus, "verified" | "waived">;
   /** Populated only for `status='failed'` rows — surfaces to the escalation reason verbatim. */
   failed_reason?: string;
 }
@@ -56,18 +59,22 @@ export type OutcomeCompletionVerdict =
  * Fail-open on an empty list: a ticket with NO required outcomes (customer said "thanks",
  * naked reply-only turn, legacy tickets predating Phase 1) is not held up by this gate.
  * The gate only enforces the invariant when there's something to enforce.
+ *
+ * `verified` AND `waived` are both terminal-closed: a verified outcome happened; a waived outcome
+ * correctly did NOT happen (completing it was policy-forbidden — see [[required-outcome-policy]]).
+ * Either opens the gate. Only pending/done/failed are unfinished.
  */
 export function assessOutcomeCompletion(
   outcomes: TicketRequiredOutcome[],
 ): OutcomeCompletionVerdict {
   const unfinished: UnfinishedOutcome[] = [];
   for (const o of outcomes) {
-    if (o.status === "verified") continue;
+    if (CLOSED_OUTCOME_STATUSES.has(o.status)) continue;
     unfinished.push({
       outcome_id: o.id,
       kind: o.kind,
       description: o.description,
-      status: o.status,
+      status: o.status as UnfinishedOutcome["status"],
       failed_reason: o.failed_reason ?? undefined,
     });
   }
@@ -175,4 +182,80 @@ export async function escalateTicketOnIncompleteOutcomes(input: {
   if (error) return false;
   const rows = (data ?? []) as Array<{ id: string }>;
   return rows.length === 1;
+}
+
+/** One row the waive pass closed. */
+export interface WaivedOutcome {
+  outcome_id: string;
+  kind: string;
+  description: string;
+  reason: string;
+}
+
+/**
+ * The WAIVE half of the uncompletable-policy-forbidden-required-outcome fix (ticket aaf00047).
+ *
+ * BEFORE the completion gate assesses a ticket, walk its OPEN (pending/failed) required-outcome
+ * rows and close any whose completion is POLICY-FORBIDDEN against live DB state as `waived` — a
+ * correctly-NOT-done outcome — so the gate stops re-escalating it on every reopen. The only
+ * current rule (shared with the Phase-1 validator via `assessPolicyForbidden`) is a coupon/loyalty
+ * apply onto a non-active subscription: the active loyalty rule forbids it and the apply handler
+ * fails it upstream with `subscription_not_active`, so no rescue action can ever clear the failed
+ * row (the sibling the cc78ad94 reconcile fix never covered).
+ *
+ * Bounded + fail-closed:
+ *   - Only `pending`/`failed` rows are candidates — a `done`/`verified`/`waived` row actually
+ *     happened (or was already closed) and is never touched.
+ *   - Only `COUPON_APPLY_KINDS` rows are considered; every other kind is left for the normal
+ *     gate/escalation path.
+ *   - The sub status is re-read LIVE and the waive fires ONLY when we positively observe a
+ *     non-active sub. A missing contract_id or an unreadable/absent sub leaves the row open
+ *     (fail-closed — a human handles the ambiguous case; we never auto-waive on absent evidence).
+ *   - The waive is a compare-and-set from the row's current status, so a racing writer that
+ *     verified/progressed the row first is never clobbered.
+ *
+ * Idempotent — a second call after the rows are waived is a no-op (waived rows are skipped).
+ */
+export async function waivePolicyForbiddenOutcomes(input: {
+  admin: SupabaseClient;
+  workspace_id: string;
+  ticket_id: string;
+}): Promise<{ waived: WaivedOutcome[] }> {
+  const outcomes = await listRequiredOutcomes(input.admin, input.ticket_id, {
+    workspace_id: input.workspace_id,
+  });
+  const waived: WaivedOutcome[] = [];
+  for (const o of outcomes) {
+    if (o.status !== "pending" && o.status !== "failed") continue;
+    if (!COUPON_APPLY_KINDS.has(o.kind)) continue;
+    const contractId = readContractId(o.target_ids);
+    if (!contractId) continue; // fail-closed: can't prove which sub → leave open for a human
+    const { data: sub, error } = await input.admin
+      .from("subscriptions")
+      .select("status")
+      .eq("workspace_id", input.workspace_id)
+      .eq("shopify_contract_id", contractId)
+      .maybeSingle();
+    if (error) continue;
+    const subStatus = (sub as { status?: string | null } | null)?.status ?? null;
+    const verdict = assessPolicyForbidden(o.kind, subStatus);
+    if (!verdict.forbidden) continue;
+    const updated = await markOutcomeWaived(input.admin, {
+      id: o.id,
+      workspace_id: input.workspace_id,
+      from: o.status,
+      reason: verdict.reason,
+    });
+    if (updated) {
+      waived.push({ outcome_id: o.id, kind: o.kind, description: o.description, reason: verdict.reason });
+    }
+  }
+  return { waived };
+}
+
+/** Pull a subscription contract id off a row's free-form target_ids (string, non-empty). */
+function readContractId(targetIds: Record<string, unknown> | null | undefined): string | null {
+  const v = targetIds?.["contract_id"];
+  if (typeof v === "string" && v.trim().length > 0) return v.trim();
+  return null;
 }

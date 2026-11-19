@@ -18,6 +18,7 @@ Every blocked item carries a typed `reason`:
 - `missing_target_ids` — kind needs a `contract_id` / order-id but the item didn't emit one.
 - `subscription_not_found` — target contract not present in `workspace_id`.
 - `subscription_customer_mismatch` — target sub belongs to a different customer (the injection vector).
+- `subscription_not_active` — a coupon/loyalty APPLY kind (`apply_loyalty_coupon` / `apply_coupon`) targeting a non-active (paused/cancelled) sub. **PREVENT** half of the uncompletable-policy-forbidden-required-outcome fix (ticket aaf00047): applying a coupon to a paused sub is policy-forbidden and fails upstream with `subscription_not_active`, so the required-outcome row would sit `failed` forever and re-escalate the ticket on every reopen. Rejecting it here means the un-completable row is never authored. Gated by the shared [[required-outcome-policy]] `assessPolicyForbidden` rule (same rule the [[outcome-completion-gate]] WAIVE path reads).
 - `order_not_found` / `order_customer_mismatch` — same, for order-backed kinds.
 - `product_not_found` — target product not present in `workspace_id`.
 
@@ -32,7 +33,8 @@ The caller (`scripts/builder-worker.ts` → `runTicketHandleJob`) treats any blo
 - [[honor-required-outcomes]] — the dispatch step this validator gates.
 - [[ticket-required-outcomes]] — the SDK that stores the rows the validator scans.
 - [[sol-outcome-claim-guard]] — the Phase-3 send guard that catches an unbacked CLAIM in the final reply text.
-- [[outcome-completion-gate]] — the Phase-4 gate that keeps the ticket in-progress until every outcome verifies.
+- [[outcome-completion-gate]] — the Phase-4 gate that keeps the ticket in-progress until every outcome verifies (and now WAIVES policy-forbidden rows).
+- [[required-outcome-policy]] — the shared pure rule behind the PREVENT (here) + WAIVE (gate) halves of the uncompletable-policy-forbidden fix.
 - [[../tables/subscriptions]] · [[../tables/orders]] · [[../tables/products]] — the ownership tables the validator re-reads.
 
 ## Invariants
