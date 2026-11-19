@@ -32,6 +32,7 @@ import {
   isForeignSupabasePostgresMissingSpecStatusHistoryOldValueAdhocNoise,
   isForeignSupabasePostgresMissingDunningCyclesCycleKeyAdhocNoise,
   isForeignSupabasePostgresMissingDunningCyclesRetryCountAdhocNoise,
+  isForeignSupabasePostgresMissingDunningCyclesFailureCountAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionCycleChargesCreatedAtAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionCycleChargesCustomerIdAdhocNoise,
   isForeignSupabasePostgresMissingBillingAttemptEventsCreatedAtAdhocNoise,
@@ -8778,6 +8779,182 @@ test("isForeignSupabasePostgresMissingDunningCyclesRetryCountAdhocNoise returns 
   assert.equal(
     isForeignSupabasePostgresMissingDunningCyclesRetryCountAdhocNoise(
       "column dunning_cycles.retry_count does not exist",
+      null,
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingDunningCyclesFailureCountAdhocNoise ──
+// Same foreign / stale PostgREST direct-REST noise as the cycle_key / retry_count siblings, pinned
+// to the `failure_count` column variant (Control Tower signature `supabase-logs:d07359f74fcdf3ee`).
+// The `public.dunning_cycles` table exists but has never had a `failure_count` column — no ShopCX
+// code reads it. Drop AT CAPTURE only when BOTH the exact column-missing message on
+// `dunning_cycles.failure_count` AND the SELECT-lookup / pgrst_source wrapper shape on
+// `dunning_cycles` are present. A different table/column or a non-SELECT statement still pages.
+
+test("isForeignSupabasePostgresMissingDunningCyclesFailureCountAdhocNoise drops the ad hoc SELECT lookup on the exact dunning_cycles.failure_count column-missing shape", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingDunningCyclesFailureCountAdhocNoise(
+      "column dunning_cycles.failure_count does not exist",
+      "select id, failure_count from public.dunning_cycles order by created_at desc limit 100",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingDunningCyclesFailureCountAdhocNoise(
+      "column public.dunning_cycles.failure_count does not exist",
+      "select id, failure_count from public.dunning_cycles order by created_at desc limit 100",
+    ),
+    true,
+  );
+  // Unqualified FROM (no `public.`) is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingDunningCyclesFailureCountAdhocNoise(
+      "column dunning_cycles.failure_count does not exist",
+      "select failure_count from dunning_cycles limit 10",
+    ),
+    true,
+  );
+  // A trailing WHERE / ORDER BY / LIMIT is still the ad hoc lookup shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingDunningCyclesFailureCountAdhocNoise(
+      "column dunning_cycles.failure_count does not exist",
+      "select id, failure_count from public.dunning_cycles where status = 'failed' order by created_at desc limit 50",
+    ),
+    true,
+  );
+  // Case-insensitive on the query.
+  assert.equal(
+    isForeignSupabasePostgresMissingDunningCyclesFailureCountAdhocNoise(
+      "column dunning_cycles.failure_count does not exist",
+      "SELECT ID, FAILURE_COUNT FROM PUBLIC.DUNNING_CYCLES",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingDunningCyclesFailureCountAdhocNoise(
+      "ERROR: column dunning_cycles.failure_count does not exist",
+      "select failure_count from public.dunning_cycles",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingDunningCyclesFailureCountAdhocNoise drops the PostgREST direct-REST WITH pgrst_source wrapper shape (signature d07359f74fcdf3ee)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingDunningCyclesFailureCountAdhocNoise(
+      "column dunning_cycles.failure_count does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."dunning_cycles".* FROM "public"."dunning_cycles" ORDER BY "public"."dunning_cycles"."failure_count" DESC LIMIT 100 ) SELECT * FROM "pgrst_source"',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingDunningCyclesFailureCountAdhocNoise(
+      "column public.dunning_cycles.failure_count does not exist",
+      'with pgrst_source as ( select "dunning_cycles".* from "dunning_cycles" order by failure_count desc limit 10 )',
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingDunningCyclesFailureCountAdhocNoise KEEPS a PostgREST INSERT/UPDATE wrapper writing failure_count (a real code-bug still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingDunningCyclesFailureCountAdhocNoise(
+      "column dunning_cycles.failure_count does not exist",
+      'with pgrst_source as ( insert into "public"."dunning_cycles" ("failure_count") values (\'x\') returning * )',
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingDunningCyclesFailureCountAdhocNoise(
+      "column dunning_cycles.failure_count does not exist",
+      'with pgrst_source as ( update "public"."dunning_cycles" set "failure_count" = \'x\' returning * )',
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingDunningCyclesFailureCountAdhocNoise KEEPS a column-missing error on any OTHER table (a different table's failure_count still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingDunningCyclesFailureCountAdhocNoise(
+      "column subscription_cycle_charges.failure_count does not exist",
+      "select failure_count from public.subscription_cycle_charges where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingDunningCyclesFailureCountAdhocNoise(
+      "column orders.failure_count does not exist",
+      "select failure_count from public.orders limit 10",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingDunningCyclesFailureCountAdhocNoise KEEPS a DIFFERENT column-missing on dunning_cycles (a real column regression still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingDunningCyclesFailureCountAdhocNoise(
+      "column dunning_cycles.cycle_key does not exist",
+      "select cycle_key from public.dunning_cycles where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingDunningCyclesFailureCountAdhocNoise(
+      "column dunning_cycles.status does not exist",
+      "select status from public.dunning_cycles where id = 'x'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingDunningCyclesFailureCountAdhocNoise KEEPS a non-SELECT statement shape (a real code-bug writing dunning_cycles.failure_count still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingDunningCyclesFailureCountAdhocNoise(
+      "column dunning_cycles.failure_count does not exist",
+      "insert into public.dunning_cycles (failure_count) values ('x')",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingDunningCyclesFailureCountAdhocNoise(
+      "column dunning_cycles.failure_count does not exist",
+      "update public.dunning_cycles set failure_count = 'x' where id = 'y'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingDunningCyclesFailureCountAdhocNoise(
+      "column dunning_cycles.failure_count does not exist",
+      "delete from public.dunning_cycles where failure_count = 'x'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingDunningCyclesFailureCountAdhocNoise returns false on empty / nullish input", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingDunningCyclesFailureCountAdhocNoise(null, null),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingDunningCyclesFailureCountAdhocNoise(undefined, undefined),
+    false,
+  );
+  assert.equal(isForeignSupabasePostgresMissingDunningCyclesFailureCountAdhocNoise("", ""), false);
+  // Exact message but empty / null query — cannot confirm the shape, stays captured.
+  assert.equal(
+    isForeignSupabasePostgresMissingDunningCyclesFailureCountAdhocNoise(
+      "column dunning_cycles.failure_count does not exist",
+      "",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingDunningCyclesFailureCountAdhocNoise(
+      "column dunning_cycles.failure_count does not exist",
       null,
     ),
     false,
