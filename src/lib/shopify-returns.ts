@@ -72,16 +72,62 @@ export const RETURN_REFUND_LEDGER_TERMINAL_STATUSES = new Set(["succeeded", "set
  * Pure — the test suite pins the Jan Bloom shape explicitly. Inputs are pre-summed cents; the
  * async ledger fetch + the subtotal derivation both live at the caller (creator + refund-time
  * re-check) so this stays deterministic and cheap to test.
+ *
+ * Phase 1 of [[../../docs/brain/specs/return-refund-includes-tax]] — a refund pays back what the
+ * customer paid FOR THE PRODUCT, and that includes the tax they were charged on the product. The
+ * founder rule (2026-11-19): "We don't withhold tax amounts from refunds. The only thing we
+ * typically don't refund is shipping they paid or shipping protection." So `taxCents` — the tax
+ * allocated to the RETURNED lines (whole-order tax on a full return, pro-rata by line value on a
+ * partial one; see `allocateReturnTaxCents`) — is ADDED to the refund. Shipping Protection and
+ * customer-paid shipping stay excluded because they are never on the returned-lines subtotal and
+ * their tax (when itemized) is excluded from the allocated figure. `taxCents` is optional and
+ * defaults to 0 so pre-tax callers (and the pinned Jan Bloom unit tests) keep their behavior; a
+ * prior succeeded tax refund already sits in `refundsSucceededCents` and nets out here, so a
+ * customer whose tax was refunded out-of-band is never paid twice (Laurie SHOPCX732: subtotal
+ * 21108 + tax 1267 - refunded 1267 - label 0 = 21108).
  */
 export function computeReturnNetRefundCents(input: {
   orderSubtotalCents: number;
   labelCostCents: number;
   refundsSucceededCents: number;
+  taxCents?: number;
 }): number {
   const subtotal = Number.isFinite(input.orderSubtotalCents) ? Math.max(0, Math.round(input.orderSubtotalCents)) : 0;
+  const tax = Number.isFinite(input.taxCents) ? Math.max(0, Math.round(input.taxCents as number)) : 0;
   const label = Number.isFinite(input.labelCostCents) ? Math.max(0, Math.round(input.labelCostCents)) : 0;
   const refunded = Number.isFinite(input.refundsSucceededCents) ? Math.max(0, Math.round(input.refundsSucceededCents)) : 0;
-  return Math.max(0, subtotal - refunded - label);
+  return Math.max(0, subtotal + tax - refunded - label);
+}
+
+/**
+ * Allocate an order's tax to the RETURNED lines — pure, rounded, and never above the order's tax.
+ *
+ * Phase 1 of [[../../docs/brain/specs/return-refund-includes-tax]]. A full return (every returnable
+ * line coming back) gets the WHOLE order tax; a partial return gets tax PRO-RATA by the returned
+ * lines' share of the order subtotal (`returnedSubtotalCents / orderSubtotalCents`). `createFullReturn`
+ * is a full return, so `returnedSubtotalCents === orderSubtotalCents` and this returns `orderTaxCents`
+ * intact — but the pro-rata math is pinned here so a future partial-return caller allocates correctly.
+ *
+ * The order subtotal used for the ratio is the taxable product subtotal (Shipping Protection /
+ * customer-paid shipping are already stripped by `deriveOrderSubtotalCentsFromLines` upstream), so
+ * tax on shipping or protection — when it was itemized separately on the order's tax — is not folded
+ * into `orderTaxCents` and therefore never allocated to the refund.
+ *
+ * Guards: a zero/missing `orderSubtotalCents` or `orderTaxCents` yields 0 (no base to allocate
+ * against, no tax to give); the result floors at 0 and clamps to `orderTaxCents` so a rounding or a
+ * returned-subtotal that over-runs the order subtotal can never over-refund tax.
+ */
+export function allocateReturnTaxCents(input: {
+  orderTaxCents: number;
+  orderSubtotalCents: number;
+  returnedSubtotalCents: number;
+}): number {
+  const orderTax = Number.isFinite(input.orderTaxCents) ? Math.max(0, Math.round(input.orderTaxCents)) : 0;
+  const orderSubtotal = Number.isFinite(input.orderSubtotalCents) ? Math.max(0, Math.round(input.orderSubtotalCents)) : 0;
+  const returnedSubtotal = Number.isFinite(input.returnedSubtotalCents) ? Math.max(0, Math.round(input.returnedSubtotalCents)) : 0;
+  if (orderTax === 0 || orderSubtotal === 0 || returnedSubtotal === 0) return 0;
+  const allocated = Math.round((orderTax * returnedSubtotal) / orderSubtotal);
+  return Math.max(0, Math.min(orderTax, allocated));
 }
 
 /**
@@ -1333,7 +1379,7 @@ export async function createFullReturn(params: FullReturnParams): Promise<FullRe
     // generalizes.
     const { data: order } = await admin
       .from("orders")
-      .select("line_items, total_cents")
+      .select("line_items, total_cents, shopify_order_id, avalara_total_tax_cents, payment_details")
       .eq("id", params.orderId)
       .maybeSingle();
     const orderLineItems = (order?.line_items as OrderLineItemLite[] | null) ?? null;
@@ -1360,9 +1406,32 @@ export async function createFullReturn(params: FullReturnParams): Promise<FullRe
     // the exact block that stranded ticket 6b0cd91c (Denise Richling, 2026-08-28) after PR #2557.
     // Deferring is simpler and race-free vs a delete on the refusal path.
     const orderSubtotalCents = deriveOrderSubtotalCentsFromLines(orderLineItems);
+    // Phase 1 of [[../../docs/brain/specs/return-refund-includes-tax]] — resolve the order's product
+    // tax, then allocate it to the returned lines. A refund pays back what the customer paid FOR THE
+    // PRODUCT, and that includes tax (founder rule 2026-11-19). Tax source splits on order origin:
+    // an INTERNAL order (shopify_order_id null) carries its tax in orders.avalara_total_tax_cents; a
+    // Shopify order carries it in payment_details.tax_cents (mirrored from the webhook's
+    // payload.total_tax, see [[shopify-webhooks]]). This is a full return (every returnable line),
+    // so the allocated tax is the whole order tax; the pro-rata helper keeps a partial-return caller
+    // correct. A prior succeeded tax refund is already in refundLedger.refundedCents and nets out
+    // below, so a customer whose tax was refunded out-of-band is never paid twice.
+    const orderTaxCents = (() => {
+      const shopifyOrderId = (order?.shopify_order_id as string | null | undefined) ?? null;
+      if (!shopifyOrderId) {
+        return Math.max(0, Math.round(((order?.avalara_total_tax_cents as number | null | undefined) ?? 0)));
+      }
+      const pd = (order?.payment_details as { tax_cents?: number | null } | null | undefined) ?? null;
+      return Math.max(0, Math.round((pd?.tax_cents ?? 0)));
+    })();
+    const allocatedTaxCents = allocateReturnTaxCents({
+      orderTaxCents,
+      orderSubtotalCents,
+      returnedSubtotalCents: orderSubtotalCents,
+    });
     const refundLedger = await readReturnCreationRefundLedger(admin, params.workspaceId, params.orderId);
     const preLabelNetRefundCents = computeReturnNetRefundCents({
       orderSubtotalCents,
+      taxCents: allocatedTaxCents,
       labelCostCents: 0,
       refundsSucceededCents: refundLedger.refundedCents,
     });
@@ -1494,14 +1563,17 @@ export async function createFullReturn(params: FullReturnParams): Promise<FullRe
     // Compute the FINAL net_refund_cents commitment now that EasyPost has told us the actual
     // label cost. `orderSubtotalCents` + `refundLedger` were already resolved upstream for the
     // pre-purchase headroom check (they're DB-only and cheap), so we reuse them here and only
-    // recompute with the actual label. Phase 3 of remedy-state-must-see-out-of-band-refunds — the
-    // `returns` policy says net_refund = order_subtotal - label_cost and explicitly excludes
-    // Shipping Protection; the DB still stores `order_total_cents` for audit (the customer-paid
-    // figure). The downstream pipeline reads net_refund_cents as the contract and never re-derives.
+    // recompute with the actual label. `allocatedTaxCents` was resolved upstream too. Phase 1 of
+    // [[../../docs/brain/specs/return-refund-includes-tax]] — the `returns` policy now says
+    // net_refund = order_subtotal + allocated_tax - label_cost and still excludes Shipping
+    // Protection and customer-paid shipping; the DB still stores `order_total_cents` for audit (the
+    // customer-paid figure). The downstream pipeline reads net_refund_cents as the contract and
+    // never re-derives.
     const orderTotalForAudit = (order?.total_cents as number | null | undefined) ?? 0;
     const finalLabelCostCents = params.freeLabel ? 0 : labelCostCents;
     const rawNetRefundCents = computeReturnNetRefundCents({
       orderSubtotalCents,
+      taxCents: allocatedTaxCents,
       labelCostCents: finalLabelCostCents,
       refundsSucceededCents: refundLedger.refundedCents,
     });
