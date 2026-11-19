@@ -1,0 +1,1 @@
+- **Drop foreign 'dunning_cycles.failure_count does not exist' PostgREST noise at capture** · verified 2026-11-19 · → [[../libraries/error-feed]]
