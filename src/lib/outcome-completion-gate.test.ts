@@ -17,7 +17,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import type { TicketRequiredOutcome, RequiredOutcomeStatus } from "./ticket-required-outcomes";
-import { assessOutcomeCompletion, buildEscalationReason } from "./outcome-completion-gate";
+import { assessOutcomeCompletion, buildEscalationReason, waivePolicyForbiddenOutcomes } from "./outcome-completion-gate";
+import type { SupabaseClient } from "@supabase/supabase-js";
+import { assessPolicyForbidden } from "./required-outcome-policy";
 
 function fakeOutcome(overrides: Partial<TicketRequiredOutcome> & { status: RequiredOutcomeStatus }): TicketRequiredOutcome {
   return {
@@ -128,6 +130,138 @@ test("mixed pending + done + failed + verified → BLOCKED, all THREE non-verifi
   assert.equal(unfinished.length, 3);
   const descs = unfinished.map((u) => u.description).sort();
   assert.deepEqual(descs, ["$15 credit", "$25 refund", "add bag"]);
+});
+
+// ── WAIVE: a waived outcome is terminal-closed — the gate opens on it (ticket aaf00047) ──────
+
+test("waived outcome is terminal-closed → gate OK (not counted as unfinished)", () => {
+  const outcomes = [
+    fakeOutcome({ id: "o1", kind: "cancel", description: "cancel", status: "verified", verified_at: new Date().toISOString() }),
+    fakeOutcome({ id: "o2", kind: "apply_loyalty_coupon", description: "apply LOYALTY-15", status: "waived", failed_reason: "policy-forbidden on a paused sub" }),
+  ];
+  const verdict = assessOutcomeCompletion(outcomes);
+  assert.equal(verdict.ok, true, "a waived (correctly-not-done) row must NOT keep the ticket open");
+});
+
+test("the loop state: a lone FAILED policy-forbidden coupon row still BLOCKS until it is waived", () => {
+  // Before the waive pass runs, the stuck failed row keeps re-escalating — this is the bug.
+  const outcomes = [
+    fakeOutcome({ id: "o1", kind: "apply_loyalty_coupon", description: "apply LOYALTY-15", status: "failed", failed_reason: "subscription_not_active" }),
+  ];
+  const verdict = assessOutcomeCompletion(outcomes);
+  assert.equal(verdict.ok, false, "a failed row loops the gate — the waive pass is what closes it");
+});
+
+// ── The pure policy predicate ────────────────────────────────────────────
+
+test("assessPolicyForbidden: coupon apply on a paused/cancelled sub is forbidden; active is not", () => {
+  assert.equal(assessPolicyForbidden("apply_loyalty_coupon", "paused").forbidden, true);
+  assert.equal(assessPolicyForbidden("apply_coupon", "cancelled").forbidden, true);
+  assert.equal(assessPolicyForbidden("apply_loyalty_coupon", "active").forbidden, false);
+  // Fail-closed on absent evidence + non-coupon kinds.
+  assert.equal(assessPolicyForbidden("apply_loyalty_coupon", null).forbidden, false);
+  assert.equal(assessPolicyForbidden("cancel", "paused").forbidden, false);
+});
+
+// ── WAIVE wire-in: closes the stuck failed row against a live paused sub, idempotent ─────────
+
+type GateRow = Record<string, unknown>;
+
+function fakeWaiveAdmin(seed: {
+  outcomes: GateRow[];
+  subs: Map<string, GateRow>; // key = shopify_contract_id
+}): { admin: SupabaseClient; outcomes: GateRow[] } {
+  const outcomes = seed.outcomes;
+  const admin = {
+    from(table: string) {
+      const filters: Record<string, unknown> = {};
+      if (table === "ticket_required_outcomes") {
+        const q: Record<string, unknown> = {
+          select: () => q,
+          eq(col: string, val: unknown) { filters[col] = val; return q; },
+          order: () => q,
+          async then(resolve: (v: { data: GateRow[]; error: null }) => void) {
+            // listRequiredOutcomes await — return all seeded rows for the ticket.
+            resolve({ data: outcomes.slice(), error: null });
+          },
+          // UPDATE path (markOutcomeWaived → transitionStatus): patch is applied via update().
+          update(patch: Record<string, unknown>) {
+            return {
+              eq(c: string, v: unknown) { filters[c] = v; return this; },
+              async select() {
+                const row = outcomes.find(
+                  (o) => o.id === filters["id"] && o.status === filters["status"],
+                );
+                if (!row) return { data: [], error: null };
+                Object.assign(row, patch);
+                return { data: [row], error: null };
+              },
+            };
+          },
+        };
+        return q;
+      }
+      // subscriptions read
+      const sq = {
+        select: () => sq,
+        eq(col: string, val: unknown) { filters[col] = val; return sq; },
+        async maybeSingle() {
+          const row = seed.subs.get(String(filters["shopify_contract_id"] ?? "")) ?? null;
+          return { data: row, error: null };
+        },
+      };
+      return sq;
+    },
+  } as unknown as SupabaseClient;
+  return { admin, outcomes };
+}
+
+test("waivePolicyForbiddenOutcomes: closes a FAILED apply_loyalty_coupon row on a paused sub", async () => {
+  const outcomes: GateRow[] = [
+    {
+      id: "o1", workspace_id: "w1", ticket_id: "t1", kind: "apply_loyalty_coupon",
+      description: "apply LOYALTY-15", target_ids: { contract_id: "gid://paused", code: "LOYALTY-15" },
+      status: "failed", failed_reason: "subscription_not_active",
+    },
+  ];
+  const subs = new Map<string, GateRow>([["gid://paused", { status: "paused" }]]);
+  const { admin } = fakeWaiveAdmin({ outcomes, subs });
+  const { waived } = await waivePolicyForbiddenOutcomes({ admin, workspace_id: "w1", ticket_id: "t1" });
+  assert.equal(waived.length, 1);
+  assert.equal(waived[0].kind, "apply_loyalty_coupon");
+  assert.equal(outcomes[0].status, "waived", "the row is CAS-moved to waived");
+
+  // Idempotent — a second pass finds the row already waived and does nothing.
+  const second = await waivePolicyForbiddenOutcomes({ admin, workspace_id: "w1", ticket_id: "t1" });
+  assert.equal(second.waived.length, 0);
+});
+
+test("waivePolicyForbiddenOutcomes: leaves a coupon row on an ACTIVE sub open (not policy-forbidden)", async () => {
+  const outcomes: GateRow[] = [
+    {
+      id: "o1", workspace_id: "w1", ticket_id: "t1", kind: "apply_loyalty_coupon",
+      description: "apply LOYALTY-15", target_ids: { contract_id: "gid://active" },
+      status: "failed", failed_reason: "transient error",
+    },
+  ];
+  const subs = new Map<string, GateRow>([["gid://active", { status: "active" }]]);
+  const { admin } = fakeWaiveAdmin({ outcomes, subs });
+  const { waived } = await waivePolicyForbiddenOutcomes({ admin, workspace_id: "w1", ticket_id: "t1" });
+  assert.equal(waived.length, 0, "an active-sub failure is a real failure, not a policy waive");
+  assert.equal(outcomes[0].status, "failed");
+});
+
+test("waivePolicyForbiddenOutcomes: fail-closed when target_ids has no contract_id", async () => {
+  const outcomes: GateRow[] = [
+    {
+      id: "o1", workspace_id: "w1", ticket_id: "t1", kind: "apply_loyalty_coupon",
+      description: "apply LOYALTY-15", target_ids: {}, status: "failed", failed_reason: "x",
+    },
+  ];
+  const { admin } = fakeWaiveAdmin({ outcomes, subs: new Map() });
+  const { waived } = await waivePolicyForbiddenOutcomes({ admin, workspace_id: "w1", ticket_id: "t1" });
+  assert.equal(waived.length, 0);
+  assert.equal(outcomes[0].status, "failed", "no contract id → leave open for a human");
 });
 
 // ── Escalation reason shape ─────────────────────────────────────────────

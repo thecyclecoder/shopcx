@@ -20,6 +20,7 @@
  * grep answers "what can Sol dispatch?" — no config table sleight-of-hand.
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { COUPON_APPLY_KINDS, assessPolicyForbidden } from "./required-outcome-policy";
 
 /**
  * The explicit allowlist of required-outcome kinds Sol's box session is allowed to enqueue for
@@ -121,6 +122,7 @@ export type OutcomeBlockReason =
   | "missing_target_ids"
   | "subscription_not_found"
   | "subscription_customer_mismatch"
+  | "subscription_not_active"
   | "order_not_found"
   | "order_customer_mismatch"
   | "product_not_found";
@@ -233,7 +235,7 @@ export async function validateRequiredOutcomes(ctx: ValidatorContext): Promise<V
     if (shape.needs_contract && contractId) {
       const { data: sub } = await ctx.admin
         .from("subscriptions")
-        .select("customer_id, workspace_id")
+        .select("customer_id, workspace_id, status")
         .eq("workspace_id", ctx.workspace_id)
         .eq("shopify_contract_id", contractId)
         .maybeSingle();
@@ -256,6 +258,26 @@ export async function validateRequiredOutcomes(ctx: ValidatorContext): Promise<V
           detail: `contract_id ${contractId} belongs to a different customer than the ticket`,
         });
         continue;
+      }
+      // PREVENT the uncompletable-policy-forbidden row (ticket aaf00047). A coupon/loyalty apply
+      // onto a non-active (paused/cancelled) sub is policy-forbidden — the active loyalty rule
+      // refuses it and the handler fails it upstream with `subscription_not_active`, so the
+      // required-outcome row would sit in `status='failed'` forever and re-escalate the ticket on
+      // every reopen. Reject it here so the un-completable row is never authored. Same rule the
+      // completion gate's WAIVE path reads (shared `assessPolicyForbidden`).
+      if (COUPON_APPLY_KINDS.has(kind)) {
+        const subStatus = (sub as { status?: string | null }).status ?? null;
+        const verdict = assessPolicyForbidden(kind, subStatus);
+        if (verdict.forbidden) {
+          blocked.push({
+            index,
+            kind,
+            description,
+            reason: "subscription_not_active",
+            detail: verdict.reason,
+          });
+          continue;
+        }
       }
     }
 
