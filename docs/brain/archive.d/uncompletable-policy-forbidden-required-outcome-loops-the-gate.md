@@ -1,0 +1,1 @@
+- **A policy-forbidden, un-completable required outcome re-escalates the completion gate forever** · verified 2026-11-19 · → [[../lifecycles/ticket-lifecycle]]
