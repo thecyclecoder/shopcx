@@ -1,0 +1,1 @@
+- **Portal "pause 30/60 days" pushes the next renewal back by that many days** · verified 2026-11-19 · → [[../libraries/portal__pause-renewal-date]] + [[../libraries/portal__handlers__pause]] + [[../inngest/portal-auto-resume]]
