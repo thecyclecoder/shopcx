@@ -669,10 +669,10 @@ test("the misread-literal gate fires at authoring (specText given), never retroa
 
 // ── a regex-shaped pattern left in the literal default can never pass ─────────────────────────────
 test("validateLiteralGrepIsNotRegex rejects escaped metacharacters and wildcards, accepts plain snippets", () => {
-  for (const p of ["buildToolDefinitions\\(.*mode", "foo\\.bar", "a.*b", "x.+y"]) {
+  for (const p of ["buildToolDefinitions\\(.*mode", "foo\\.bar", "a.*b", "x.+y", "subscription-items|commerce/subscription|portal/handlers", "remedy-selector|remedy-actions"]) {
     assert.equal(validateLiteralGrepIsNotRegex(p).valid, false, p);
   }
-  for (const p of ["buildToolDefinitions(mode", "isFoo(message, query)", "get_shopgrowth_store", "a || b", "foo.bar"]) {
+  for (const p of ["buildToolDefinitions(mode", "isFoo(message, query)", "get_shopgrowth_store", "a || b", "a ||b", "string | null", "foo.bar"]) {
     assert.equal(validateLiteralGrepIsNotRegex(p).valid, true, p);
   }
 });
