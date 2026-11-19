@@ -14,7 +14,7 @@ same line shape and tax codes so the displayed tax equals the
 charged tax (Avalara is deterministic for the same inputs).
 Tax-code resolution per line:
 1. product_variants.shopify_tax_code  (Shopify Plus / Avalara field)
-2. products.avalara_tax_code          (our classifier or manual override)
+2. products.avalara_tax_code          (our classifier or manual override) — the product is the line's `product_id`, or its variant row's `product_id` when the line carries none
 3. workspaces.avalara_default_tax_code (the default at the call site)
 4. omit — let Avalara guess from description
 Variants with taxable=false are still sent as lines but with
@@ -44,7 +44,7 @@ async function buildAvalaraLines({ admin, workspaceId, lines, shippingCents, shi
 
 ## Gotchas
 
-_None documented._
+- **A line without `product_id` must still resolve its product.** Before 2026-11-19 the product lookup used only the line's own `product_id`. The internal renewal priced lines carried none, so every renewal line fell to the workspace default `P0000000` (fully taxable): sampled November renewals of Tabs, coffee, pods, creamer and Ashwavana were all committed as `P0000000`, and NY customers were charged tax on exempt supplements (Laura Light SHOPCX767). The builder now falls back to `product_variants.product_id`.
 
 ---
 
