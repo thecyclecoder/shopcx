@@ -75,28 +75,35 @@ export async function buildAvalaraLines({
   if (lines.length === 0) return [];
 
   const variantIds = [...new Set(lines.map((l) => l.variant_id).filter(Boolean))];
-  const productIds = [...new Set(lines.map((l) => l.product_id).filter(Boolean))];
 
-  const [{ data: variants }, { data: products }] = await Promise.all([
-    variantIds.length
-      ? admin
-          .from("product_variants")
-          .select("id, product_id, shopify_tax_code, taxable")
-          .eq("workspace_id", workspaceId)
-          .in("id", variantIds)
-      : Promise.resolve({ data: [] as VariantTaxRow[] }),
-    productIds.length
-      ? admin
-          .from("products")
-          .select("id, avalara_tax_code, taxable, title")
-          .eq("workspace_id", workspaceId)
-          .in("id", productIds)
-      : Promise.resolve({ data: [] as ProductTaxRow[] }),
-  ]);
+  const { data: variants } = variantIds.length
+    ? await admin
+        .from("product_variants")
+        .select("id, product_id, shopify_tax_code, taxable")
+        .eq("workspace_id", workspaceId)
+        .in("id", variantIds)
+    : { data: [] as VariantTaxRow[] };
 
   const variantById = new Map<string, VariantTaxRow>(
     ((variants as VariantTaxRow[]) || []).map((v) => [v.id, v]),
   );
+
+  // A line's product comes from the line itself OR its variant row. Callers that don't carry
+  // product_id (the internal renewal priced lines did not) must still resolve the product's
+  // avalara_tax_code — otherwise the line falls to the workspace default P0000000 (fully
+  // taxable) and an exempt product is taxed. 2026-11-19: every sampled internal renewal had
+  // been committed to Avalara as P0000000 (Laura Light SHOPCX767, NY tax on Superfood Tabs).
+  const productIdFor = (l: CartLineForTax): string | undefined =>
+    l.product_id || variantById.get(l.variant_id)?.product_id || undefined;
+  const productIds = [...new Set(lines.map(productIdFor).filter((id): id is string => !!id))];
+
+  const { data: products } = productIds.length
+    ? await admin
+        .from("products")
+        .select("id, avalara_tax_code, taxable, title")
+        .eq("workspace_id", workspaceId)
+        .in("id", productIds)
+    : { data: [] as ProductTaxRow[] };
   const productById = new Map<string, ProductTaxRow>(
     ((products as ProductTaxRow[]) || []).map((p) => [p.id, p]),
   );
@@ -109,7 +116,8 @@ export async function buildAvalaraLines({
     if (l.is_gift || l.unit_price_cents <= 0 || l.line_total_cents <= 0) return;
 
     const variant = variantById.get(l.variant_id);
-    const product = productById.get(l.product_id);
+    const pid = productIdFor(l);
+    const product = pid ? productById.get(pid) : undefined;
     const taxCode =
       variant?.shopify_tax_code ||
       product?.avalara_tax_code ||
