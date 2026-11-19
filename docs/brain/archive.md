@@ -12,6 +12,14 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Renewal-integrity tile: stop red-paging on designed renewal holds (no-payment-method etc.)** · verified 2026-11-19 · → [[../libraries/control-tower]]
+- **Drop foreign 'dunning_cycles.failure_count does not exist' PostgREST noise at capture** · verified 2026-11-19 · → [[../libraries/error-feed]]
+- **Drop foreign-app noise: PostgREST SELECT on coupon_redemptions.code** · verified 2026-11-18 · → [[../libraries/error-feed]]
+- **Drop foreign-app 'column coupons.status does not exist' adhoc-REST noise** · verified 2026-11-18 · → [[../libraries/error-feed]]
+- **Drop foreign PostgREST noise: column coupons.value_cents does not exist** · verified 2026-11-18 · → [[../libraries/error-feed]]
+- **Drop ad-hoc 'orders.avalara_doc_code does not exist' PostgREST noise at capture** · verified 2026-11-18 · → [[../libraries/error-feed]]
+- **Scope out foreign PostgREST probe selecting non-existent subscriptions.internal_contract_id** · verified 2026-11-18 · → [[../libraries/error-feed]]
+- **Drop foreign-app noise: ad-hoc SELECT of non-existent subscriptions.tax_exempt column** · verified 2026-11-18 · → [[../libraries/error-feed]]
 - **CS Director verdict skips merged-away tickets** · verified 2026-11-17 · → [[../libraries/cs-director]]
 - **Drop foreign-app noise: Postgres 'current transaction is aborted' cascade on an ad-hoc subscriptions-items SQL Editor query** · verified 2026-11-17 · → [[../libraries/error-feed]]
 - **Drop foreign ad-hoc monthly_revenue_snapshots to_char(text) SQL-editor error from the postgres feed** · verified 2026-11-17 · → [[../libraries/error-feed]]
