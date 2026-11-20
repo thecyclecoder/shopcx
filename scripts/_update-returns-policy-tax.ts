@@ -76,17 +76,16 @@ function patchInternalSummary(s: string): string {
 async function main() {
   const admin = createAdminClient();
 
-  // Every workspace that has an active `returns` policy row.
-  const { data: rows, error } = await admin
-    .from("policies")
-    .select("workspace_id")
-    .eq("slug", "returns")
-    .eq("is_active", true)
-    .is("superseded_by", null);
+  // Enumerate workspaces, then resolve each one's active `returns` policy through the policies SDK
+  // (`getPolicy` below) — a raw policies-table read is forbidden by
+  // `scripts/_check-policies-sdk-compliance.ts` (a hand-rolled column silently reads empty). Reading
+  // the `workspaces` table directly is fine; workspaces without a returns policy are skipped in the
+  // loop via `getPolicy(...) === null`.
+  const { data: rows, error } = await admin.from("workspaces").select("id");
   if (error) throw new Error(`read workspaces: ${error.message}`);
-  const workspaceIds = Array.from(new Set((rows ?? []).map((r) => String(r.workspace_id))));
+  const workspaceIds = Array.from(new Set((rows ?? []).map((r) => String(r.id))));
   if (workspaceIds.length === 0) {
-    console.log("No active `returns` policy found in any workspace — nothing to do.");
+    console.log("No workspaces found — nothing to do.");
     return;
   }
 
