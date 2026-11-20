@@ -39,6 +39,7 @@ import {
   cycleKeyFromNextBillingDate,
   STALE_IN_FLIGHT_RECLAIM_MS,
 } from "@/lib/subscription-cycle-charge-claim";
+import { NO_PAYMENT_METHOD_ALERT_DEDUPE_MS } from "@/lib/inngest/internal-subscription-renewals";
 
 // The permanent spec-test sandbox tenant (is_test=true). Its seeded fixtures are deliberately stuck
 // (e.g. SPEC_TEST_FIXTURES.subscriptionCompId is a comp sub whose customer has no comp_role, so the
@@ -2175,16 +2176,33 @@ const ACTIVE_DUNNING_STATUSES = ["active", "rotating", "retrying", "skipped", "p
 /**
  * Designed-hold customer_event types the internal renewal cron emits when it DELIBERATELY leaves
  * a due sub's `next_billing_date` in the past for a known, already-surfaced customer-action reason
- * (see `src/lib/inngest/internal-subscription-renewals.ts`). An overdue sub carrying a fresh event
+ * (see `src/lib/inngest/internal-subscription-renewals.ts`). An overdue sub carrying a hold event
  * of one of these types is a customer-action item the cron handled correctly — NOT a cron miss —
  * so it is subtracted from the renewal-integrity count. Keep in sync with the cron's `eventType`s.
+ *
+ * Split into two look-back windows (see {@link countRenewalIntegrityOverdueSubs}): the three
+ * {@link RENEWAL_DAILY_RELOGGED_HOLD_EVENT_TYPES} keep the tight beat window; the weekly-deduped
+ * {@link RENEWAL_NO_PAYMENT_METHOD_HOLD_EVENT_TYPE} gets the widened {@link NO_PM_HOLD_LOOKBACK_MS}.
  */
-const RENEWAL_DESIGNED_HOLD_EVENT_TYPES = [
-  "subscription.renewal_blocked_no_payment_method",
+/**
+ * The three holds the renewal cron RE-LOGS on every run while the condition persists — so a
+ * correctly-held sub always carries a fresh event inside the last beat window. These keep the tight
+ * beat-or-26h-floor exclusion check.
+ */
+const RENEWAL_DAILY_RELOGGED_HOLD_EVENT_TYPES = [
   "subscription.renewal_blocked_no_recipient_name",
   "subscription.renewal_held_overcharge_guard",
   "subscription.renewal_held_coupon_unavailable",
 ] as const;
+
+/**
+ * The no-payment-method hold, handled separately. Unlike the three above, its alert is deduped to
+ * one write per {@link NO_PAYMENT_METHOD_ALERT_DEDUPE_MS} (weekly) per sub (see
+ * `shouldAlertNoPaymentMethod` in src/lib/inngest/internal-subscription-renewals.ts), so a
+ * correctly-held sub emits a hold event only once every 7 days — invisible to the beat window on 6
+ * of 7 days. It gets the widened {@link NO_PM_HOLD_LOOKBACK_MS} look-back instead.
+ */
+const RENEWAL_NO_PAYMENT_METHOD_HOLD_EVENT_TYPE = "subscription.renewal_blocked_no_payment_method";
 
 /**
  * Fallback look-back window for designed-hold events when no renewal-cron beat is known. The cron
@@ -2192,6 +2210,17 @@ const RENEWAL_DESIGNED_HOLD_EVENT_TYPES = [
  * is still in scope when the beat timestamp is unavailable.
  */
 const RENEWAL_DESIGNED_HOLD_LOOKBACK_MS = 26 * 60 * 60 * 1000;
+
+/**
+ * Widened look-back for the no-payment-method designed hold. Because that alert is deduped weekly
+ * (see {@link RENEWAL_NO_PAYMENT_METHOD_HOLD_EVENT_TYPE}), the most recent hold event for a
+ * correctly-held sub can be up to a full {@link NO_PAYMENT_METHOD_ALERT_DEDUPE_MS} old. The single
+ * beat-window check is narrower than that dedupe, so on 6 of every 7 days the hold slips past the
+ * exclusion and false-pages the platform owner. Match the dedupe window plus a jitter grace (2h)
+ * so the last-written hold is still subtracted, while real misses (no hold event at all) and the
+ * three daily-relogged holds keep the tight beat-window check.
+ */
+const NO_PM_HOLD_LOOKBACK_MS = NO_PAYMENT_METHOD_ALERT_DEDUPE_MS + 2 * 60 * 60 * 1000;
 
 /**
  * READ-ONLY: overdue active internal subscriptions that AREN'T already owned by an active
@@ -2226,6 +2255,7 @@ export async function countRenewalIntegrityOverdueSubs(
   admin: Admin,
   startOfTodayIso: string,
   latestRenewalCronBeatIso: string | null = null,
+  now: number = Date.now(),
 ): Promise<number> {
   const { data: overdueRows, error: overdueErr } = await admin
     .from("subscriptions")
@@ -2269,27 +2299,49 @@ export async function countRenewalIntegrityOverdueSubs(
   // in the past for a known, already-surfaced customer-action reason (no payment method, no
   // recipient name, overcharge guard, coupon lookup unavailable) and logs a customer_event for
   // each. Those are customer-action items the cron handled correctly, NOT cron misses — so subtract
-  // any overdue sub carrying a fresh hold event. "Fresh" = since the last renewal-cron beat (the
-  // most recent run that could have emitted it); fall back to a ~26h look-back when no beat is
-  // known, so a hold from the last daily run is still in scope. The sandbox is excluded on both
-  // sides per the same convention as the dunning subtraction above.
-  const holdWindowStartIso =
-    beatMs != null && Number.isFinite(beatMs)
-      ? latestRenewalCronBeatIso!
-      : new Date(Date.now() - RENEWAL_DESIGNED_HOLD_LOOKBACK_MS).toISOString();
-  const { data: holdRows, error: holdErr } = await admin
-    .from("customer_events")
-    .select("properties")
-    .in("event_type", [...RENEWAL_DESIGNED_HOLD_EVENT_TYPES])
-    .gte("created_at", holdWindowStartIso)
-    .neq("workspace_id", SPEC_TEST_SANDBOX_WORKSPACE_ID);
-  if (!holdErr) {
-    const overdueIdSet = new Set(overdueIds);
-    for (const row of holdRows ?? []) {
-      const props = (row as { properties: { subscription_id?: string | null } | null }).properties;
-      const subId = props?.subscription_id ?? null;
+  // any overdue sub carrying a hold event. The sandbox is excluded on both sides per the same
+  // convention as the dunning subtraction above.
+  //
+  // Two reads, split by how often the hold is re-logged:
+  //   (1) The three DAILY-relogged holds (no_recipient_name, overcharge_guard, coupon_unavailable)
+  //       always carry a fresh event inside the last beat window, so "fresh" = since the last
+  //       renewal-cron beat; fall back to a ~26h look-back when no beat is known.
+  //   (2) The no-payment-method hold is alert-deduped weekly, so its most recent event can be up to
+  //       NO_PM_HOLD_LOOKBACK_MS old — a wider floor so a correctly-held sub whose hold was
+  //       suppressed by the weekly dedupe is still subtracted instead of false-paging.
+  const overdueIdSet = new Set(overdueIds);
+  const absorbHoldRows = (
+    rows: Array<{ properties: { subscription_id?: string | null } | null }> | null,
+  ): void => {
+    for (const row of rows ?? []) {
+      const subId = row.properties?.subscription_id ?? null;
       if (subId && overdueIdSet.has(subId)) coveredIds.add(subId);
     }
+  };
+
+  const dailyHoldWindowStartIso =
+    beatMs != null && Number.isFinite(beatMs)
+      ? latestRenewalCronBeatIso!
+      : new Date(now - RENEWAL_DESIGNED_HOLD_LOOKBACK_MS).toISOString();
+  const { data: dailyHoldRows, error: dailyHoldErr } = await admin
+    .from("customer_events")
+    .select("properties")
+    .in("event_type", [...RENEWAL_DAILY_RELOGGED_HOLD_EVENT_TYPES])
+    .gte("created_at", dailyHoldWindowStartIso)
+    .neq("workspace_id", SPEC_TEST_SANDBOX_WORKSPACE_ID);
+  if (!dailyHoldErr) {
+    absorbHoldRows(dailyHoldRows as Array<{ properties: { subscription_id?: string | null } | null }> | null);
+  }
+
+  const noPmHoldWindowStartIso = new Date(now - NO_PM_HOLD_LOOKBACK_MS).toISOString();
+  const { data: noPmHoldRows, error: noPmHoldErr } = await admin
+    .from("customer_events")
+    .select("properties")
+    .eq("event_type", RENEWAL_NO_PAYMENT_METHOD_HOLD_EVENT_TYPE)
+    .gte("created_at", noPmHoldWindowStartIso)
+    .neq("workspace_id", SPEC_TEST_SANDBOX_WORKSPACE_ID);
+  if (!noPmHoldErr) {
+    absorbHoldRows(noPmHoldRows as Array<{ properties: { subscription_id?: string | null } | null }> | null);
   }
 
   let uncovered = 0;
