@@ -10,6 +10,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  isSelfVerifyFixPhase,
+  SELF_VERIFY_FIX_PHASE_TITLE_PREFIX,
   decideSelfVerifySelfHeal,
   isDecomposableSelfVerifyCheck,
   SELF_VERIFY_FIX_PHASE_LOOP_GUARD_MAX,
@@ -94,4 +96,11 @@ test("build + tsc whole-artifact pair (no grep) → self_heal_noop(all_whole_art
   const d = decideSelfVerifySelfHeal({ failing: [buildCheck, tscCheck], existingFixPhases: [] });
   assert.equal(d.action, "noop");
   if (d.action === "noop") assert.equal(d.reason, "all_whole_artifact");
+});
+
+// ── each fix lane counts only its own phases toward its loop-guard ──────────────────────────────
+test("isSelfVerifyFixPhase tells this lane's anchor phases apart from pre-merge Fix N phases", () => {
+  assert.equal(isSelfVerifyFixPhase({ kind: "fix", title: `${SELF_VERIFY_FIX_PHASE_TITLE_PREFIX} journey editor dispatches through the shared executors` }), true);
+  assert.equal(isSelfVerifyFixPhase({ kind: "fix", title: "Fix 1 — resolve 1 pre-merge spec-test regression" }), false);
+  assert.equal(isSelfVerifyFixPhase({ kind: "phase", title: `${SELF_VERIFY_FIX_PHASE_TITLE_PREFIX} x` }), false);
 });

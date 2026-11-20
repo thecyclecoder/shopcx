@@ -33,4 +33,6 @@ On NOOP, the Phase-1 re-enqueue **circuit breaker** ([[agent-jobs]] `selfVerifyC
 
 The builder-worker cap-exhaustion branch records ONE `director_activity` row per self-heal, `action_kind='build_self_verify_self_heal'` ([[director-activity]]), discriminated by `metadata.outcome` (`fix_phases_appended` with `appended_positions`, OR `self_heal_noop` with `noop_reason` + `detail`). Best-effort — a self-heal failure never changes the job's `failed` outcome.
 
+**Lane-scoped loop-guard (2026-11-20):** every phase this lane appends is titled with `SELF_VERIFY_FIX_PHASE_TITLE_PREFIX`; `isSelfVerifyFixPhase` identifies them. The builder-worker passes only these as `existingFixPhases`, and [[pre-merge-fix]] excludes them from its own cap, so neither lane's repairs exhaust the other's loop-guard.
+
 **Verification pinned:** `src/lib/self-verify-fix-phase.test.ts` (whole-suite → noop, grep → append-per-anchor, mixed, pending-dedup, shipped-no-dedup, loop-guard, empty).

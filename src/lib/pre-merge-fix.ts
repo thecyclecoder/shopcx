@@ -24,6 +24,7 @@ import { resolve as resolvePath } from "node:path";
 import type { createAdminClient } from "@/lib/supabase/admin";
 import { getSpec, appendFixPhases } from "@/lib/specs-table";
 import { recordDirectorActivity } from "@/lib/director-activity";
+import { isSelfVerifyFixPhase } from "@/lib/self-verify-fix-phase";
 // vera-harness-error-is-not-a-code-regression Phase 2 — belt-and-suspenders on the pre-merge fix
 // authoring path: filter HARNESS/COMMAND-signature failing checks out of the set that appends a Fix
 // phase, so a slipped harness `fail` never wedges the origin's build chain with an unbuildable phase.
@@ -214,7 +215,9 @@ export async function spawnPreMergeFix(admin: Admin, input: SpawnPreMergeFixInpu
     if (!origin) {
       return { spawned: false, escalated: false, reason: `origin spec ${originSlug} not found — cannot append fix phase` };
     }
-    const existingFixPhases = (origin.phases || []).filter((p) => p.kind === "fix");
+    // Only THIS lane's fix phases count toward its loop-guard: a self-verify anchor phase
+    // (self-verify-fix-phase) is a different lane's repair and must not exhaust the pre-merge cap.
+    const existingFixPhases = (origin.phases || []).filter((p) => p.kind === "fix" && !isSelfVerifyFixPhase(p));
 
     // Loop-guard (fixes-as-phases): bound the fix CYCLES on this origin. At the cap, a still-red re-test
     // means the fixes aren't converging → ESCALATE, don't append another Fix N. The auto-merge tests-gate
