@@ -30850,11 +30850,12 @@ async function dispatchJob(job: Job) {
           // the job's `failed` outcome below (the worktree genuinely fails its own checks either way).
           try {
             const { getSpec: getSpecRowForHeal, appendFixPhases } = await import("../src/lib/specs-table");
-            const { decideSelfVerifySelfHeal } = await import("../src/lib/self-verify-fix-phase");
+            const { decideSelfVerifySelfHeal, isSelfVerifyFixPhase } = await import("../src/lib/self-verify-fix-phase");
             const { recordDirectorActivity } = await import("../src/lib/director-activity");
             const originForHeal = await getSpecRowForHeal(job.workspace_id, slug);
             const existingFixPhases = (originForHeal?.phases || [])
-              .filter((p) => p.kind === "fix")
+              // This lane's own phases only — a pre-merge (spec-test / security) Fix N must not exhaust it.
+              .filter((p) => isSelfVerifyFixPhase(p))
               .map((p) => ({ status: p.status as string, build_sha: p.build_sha ?? null, origin_check_keys: p.origin_check_keys ?? [] }));
             const healDecision = decideSelfVerifySelfHeal({
               failing: sv.failing.map((f) => ({ text: f.text, exec_kind: f.exec_kind, evidence: f.evidence })),
