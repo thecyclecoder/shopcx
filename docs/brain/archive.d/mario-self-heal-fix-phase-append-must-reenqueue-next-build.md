@@ -1,0 +1,1 @@
+- **Self-verify self-heal must actually enqueue the next build it promises** · verified 2026-11-20 · → [[lifecycles/spec-goal-branch-pm-flow]] · [[libraries/agent-jobs]] · [[libraries/self-verify-fix-phase]]

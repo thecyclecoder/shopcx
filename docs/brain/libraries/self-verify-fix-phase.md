@@ -24,6 +24,7 @@ On NOOP, the Phase-1 re-enqueue **circuit breaker** ([[agent-jobs]] `selfVerifyC
 ## Exports
 
 - `decideSelfVerifySelfHeal(input)` — the pure decision (above).
+- `shouldReenqueueAfterSelfHeal(decision: SelfHealDecision): boolean` — ([[mario-self-heal-fix-phase-append-must-reenqueue-next-build]] Phase 1) the predicate deciding whether to route a decision through `enqueueBuildIfDue` after the self-heal branch runs. Returns `true` iff the decision's `action === "append"` (fix phases were materialized and the promised next build must be enqueued); returns `false` for `action === "noop"` (no fix phases, no re-enqueue — the Phase-1 re-enqueue circuit breaker stays the explicit stop). Called from `scripts/builder-worker.ts` after `appendFixPhases` succeeds.
 - `isDecomposableSelfVerifyCheck(execKind)` — `true` for `grep` (per-anchor positive-absence); `false` for `WHOLE_ARTIFACT_SELF_VERIFY_KINDS` (`unit_test｜build｜tsc`) and unknown/null.
 - `selfVerifyCheckKey(f)` — stable `<kind>:<normalized text>` dedup key.
 - `WHOLE_ARTIFACT_SELF_VERIFY_KINDS`, `SELF_VERIFY_FIX_PHASE_LOOP_GUARD_MAX` — constants.
