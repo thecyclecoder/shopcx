@@ -1,0 +1,1 @@
+- **A return refunds the product's tax too; only paid shipping and shipping protection are withheld** · verified 2026-11-20 · → [[../lifecycles/return-pipeline]]
