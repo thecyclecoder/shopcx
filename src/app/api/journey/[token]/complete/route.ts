@@ -38,8 +38,11 @@ export async function POST(
   // In-journey cancel from the next-order editor routes through the SAME shared cancel
   // handler below (remedy-selector offers + remedy-actions executors) — not a second cancel
   // copy. The client flags cancel_flow because a next-order session's config_snapshot carries
-  // nextOrderJourney, not cancelJourney.
-  const cancelFlow = config.cancelJourney === true || cancel_flow === true;
+  // nextOrderJourney, not cancelJourney. The client flag is honored ONLY on a session the server
+  // provisioned as a next-order journey: a token minted for any other journey (discount signup,
+  // add payment method) must never reach the cancel / save-offer path by setting a body flag.
+  const nextOrderCancel = config.nextOrderJourney === true && cancel_flow === true;
+  const cancelFlow = config.cancelJourney === true || nextOrderCancel;
 
   // ── Code-driven journey completion (step-builder based) ──
   if (config.codeDriven && journeyType) {
@@ -1276,7 +1279,7 @@ export async function POST(
     // Lifecycle event for the next-order journey's in-journey cancel — cancelled vs saved,
     // keyed by the journey_sessions row so M3/M4 can attribute the outcome to the arm. A save
     // that failed to apply is NOT reported as saved (verify-before-report).
-    if (cancel_flow === true || config.nextOrderJourney === true) {
+    if (config.nextOrderJourney === true) {
       const lifecycle = outcome === "cancelled" ? "cancelled" : (saveFailed ? "save_failed" : "saved");
       await admin.from("journey_step_events").insert({
         session_id: session.id,
