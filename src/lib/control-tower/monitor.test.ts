@@ -1876,6 +1876,10 @@ test("countRenewalIntegrityOverdueSubs: grace is off when no renewal-cron beat i
 const FRESH_HOLD_ISO = "2026-07-13T09:00:05.000Z"; // 5s after LAST_CRON_BEAT_ISO
 // A hold event from before the last cron beat is stale — the cron has since re-evaluated the sub.
 const STALE_HOLD_ISO = "2026-07-13T06:00:00.000Z"; // before LAST_CRON_BEAT_ISO
+// Pinned "now" for the designed-hold cases so the no-payment-method widened look-back
+// (now - NO_PM_HOLD_LOOKBACK_MS) is deterministic against these fixed fixtures — a few minutes
+// after today's 09:00 UTC cron beat, the day after LAST_CRON_BEAT_ISO.
+const NOW_MS = new Date("2026-07-14T09:05:00.000Z").getTime();
 
 test("countRenewalIntegrityOverdueSubs: overdue no-payment-method sub with a fresh hold event is NOT counted (designed hold, not a cron miss)", async () => {
   const admin = fakeRenewalIntegrityAdmin({
@@ -1901,8 +1905,66 @@ test("countRenewalIntegrityOverdueSubs: overdue no-payment-method sub with a fre
       },
     ],
   });
-  const n = await countRenewalIntegrityOverdueSubs(admin, CUTOFF_ISO, LAST_CRON_BEAT_ISO);
+  const n = await countRenewalIntegrityOverdueSubs(admin, CUTOFF_ISO, LAST_CRON_BEAT_ISO, NOW_MS);
   assert.equal(n, 0);
+});
+
+test("countRenewalIntegrityOverdueSubs: a no-payment-method hold OLDER than the last beat but INSIDE the weekly dedupe window is still subtracted (no false page)", async () => {
+  const admin = fakeRenewalIntegrityAdmin({
+    subscriptions: [
+      // Overdue + updated before the cron ran (so grace doesn't hide it). The no-payment-method
+      // alert is deduped weekly, so the most recent hold event is 3 days before the last beat —
+      // the tight beat-window check would miss it and false-page the platform owner. The widened
+      // NO_PM_HOLD_LOOKBACK_MS look-back must still subtract it.
+      {
+        id: "sub-held-no-pm-weekly",
+        workspace_id: WS,
+        is_internal: true,
+        status: "active",
+        next_billing_date: OVERDUE_ISO,
+        updated_at: PRE_CRON_UPDATE_ISO,
+      },
+    ],
+    dunning_cycles: [],
+    customer_events: [
+      {
+        workspace_id: WS,
+        event_type: "subscription.renewal_blocked_no_payment_method",
+        created_at: "2026-07-10T09:00:00.000Z", // BEFORE LAST_CRON_BEAT_ISO, inside the weekly window of NOW_MS
+        properties: { subscription_id: "sub-held-no-pm-weekly" },
+      },
+    ],
+  });
+  const n = await countRenewalIntegrityOverdueSubs(admin, CUTOFF_ISO, LAST_CRON_BEAT_ISO, NOW_MS);
+  assert.equal(n, 0);
+});
+
+test("countRenewalIntegrityOverdueSubs: a no-payment-method hold OLDER than the weekly dedupe window still counts (window is bounded, not infinite)", async () => {
+  const admin = fakeRenewalIntegrityAdmin({
+    subscriptions: [
+      {
+        id: "sub-held-no-pm-ancient",
+        workspace_id: WS,
+        is_internal: true,
+        status: "active",
+        next_billing_date: OVERDUE_ISO,
+        updated_at: PRE_CRON_UPDATE_ISO,
+      },
+    ],
+    dunning_cycles: [],
+    customer_events: [
+      {
+        workspace_id: WS,
+        event_type: "subscription.renewal_blocked_no_payment_method",
+        created_at: "2026-07-01T00:00:00.000Z", // >7d before NOW_MS — outside NO_PM_HOLD_LOOKBACK_MS
+        properties: { subscription_id: "sub-held-no-pm-ancient" },
+      },
+    ],
+  });
+  // The hold is stale beyond the weekly window, so the cron should have re-logged it since — a
+  // missing fresh hold is a real miss again. Still counts.
+  const n = await countRenewalIntegrityOverdueSubs(admin, CUTOFF_ISO, LAST_CRON_BEAT_ISO, NOW_MS);
+  assert.equal(n, 1);
 });
 
 test("countRenewalIntegrityOverdueSubs: overdue sub with NO hold event and no dunning still counts (real cron miss)", async () => {
