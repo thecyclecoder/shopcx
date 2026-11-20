@@ -175,3 +175,14 @@ export function decideSelfVerifySelfHeal(input: {
 
   return { action: "append", fixes, signature: keySig, decomposableKeys };
 }
+
+/**
+ * mario-self-heal-fix-phase-append-must-reenqueue-next-build Phase 1 — the pure predicate behind the
+ * build lane's self-heal re-enqueue. ONLY the `append` branch materialized fix phases and promised
+ * "the next build addresses them specifically", so ONLY it must route the promised next build through
+ * `enqueueBuildIfDue`. The `noop` branch appended nothing, so it deliberately does NOT re-enqueue —
+ * the Phase-1 re-enqueue circuit breaker stays the explicit stop for a genuinely-unbuildable spec.
+ */
+export function shouldReenqueueAfterSelfHeal(decision: SelfHealDecision): boolean {
+  return decision.action === "append";
+}
