@@ -12664,6 +12664,55 @@ export function isForeignSupabasePostgresMissingCrisisEventsDefaultSubstituteVar
 }
 
 /**
+ * Foreign-app noise — Postgres reporting
+ * `column crisis_events.substitute_variant_id does not exist` for an ad hoc / stale
+ * PostgREST direct-REST SELECT against `public.crisis_events`. The `crisis_events`
+ * table exists (see `docs/brain/tables/crisis_events.md`) but has NEVER carried a
+ * `substitute_variant_id` column — a stale integration / Supabase Studio session
+ * assumes one and leaks the column-missing ERROR into this feed. There is no lever from
+ * ShopCX to make that query resolve, so paging Platform on it (Control Tower signature
+ * `supabase-logs:7305ebd53ce69b40`,
+ * [[../specs/error-feed-drop-crisis-events-substitute-variant-id-column-a]]) is repair
+ * work for a query we don't own.
+ *
+ * Sibling of `isForeignSupabasePostgresMissingCrisisEventsDefaultSubstituteVariantIdColumnAdhocNoise`
+ * — the same narrow-gating shape (same ERROR-prefix strip, same exact-message equality
+ * check, same bare-SELECT and PostgREST-CTE-wrapper regex guards on `crisis_events`),
+ * scoped to the single off-schema `substitute_variant_id` column name.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical column-missing shape for this table+column —
+ *      trimmed (leading `ERROR: ` stripped) equal to
+ *      `column crisis_events.substitute_variant_id does not exist` (with or without the
+ *      `public.` qualifier), AND
+ *   2. the `query` is a SELECT-lookup on `public.crisis_events` — either the bare
+ *      `select ... from public.crisis_events` shape OR the PostgREST-generated
+ *      `WITH pgrst_source AS ( SELECT ... FROM "public"."crisis_events" ... )` CTE
+ *      wrapper form.
+ *
+ * Narrowly gated so a column-missing error for ANY OTHER table, a DIFFERENT column on
+ * `crisis_events`, or a non-SELECT statement shape (INSERT/UPDATE/DELETE/DDL — a real
+ * code-write) still pages on first sighting. Consumed by the `postgres` LogQuery's
+ * `mapRow` in [[./supabase-log-poll]] as a capture-time drop (`null` → do not record).
+ */
+export function isForeignSupabasePostgresMissingCrisisEventsSubstituteVariantIdColumnAdhocNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column crisis_events.substitute_variant_id does not exist" ||
+    stripped === "column public.crisis_events.substitute_variant_id does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  if (/^select\b[\s\S]*\bfrom\s+(?:public\.)?crisis_events\b/.test(q)) return true;
+  return /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"?(?:public"?\.)?"?crisis_events\b/.test(q);
+}
+
+/**
  * Foreign-app noise — Postgres reporting `column products.<ingredients|supplement_facts|
  * benefits> does not exist` for an ad hoc / stale PostgREST direct-REST SELECT against
  * `public.products`. The `products` table exists (see `docs/brain/tables/products.md`)

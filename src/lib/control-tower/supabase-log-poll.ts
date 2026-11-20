@@ -216,6 +216,7 @@ import {
   isForeignSupabasePostgresMissingCrisisEventsProductTitleColumnNoise,
   isForeignSupabasePostgresMissingCrisisEventsResolvedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingCrisisEventsDefaultSubstituteVariantIdColumnAdhocNoise,
+  isForeignSupabasePostgresMissingCrisisEventsSubstituteVariantIdColumnAdhocNoise,
   isForeignSupabasePostgresMissingProductsIntelligenceColumnsAdhocNoise,
   isForeignSupabasePostgresMissingProductsPricingRuleIdLookupNoise,
   isForeignSupabasePostgresMissingPlaybooksTitleAdhocNoise,
@@ -2516,6 +2517,13 @@ const LOG_QUERIES: LogQuery[] = [
       // narrow gate as the resolved_at filter above — a different column/table or a
       // non-SELECT write still pages.
       if (isForeignSupabasePostgresMissingCrisisEventsDefaultSubstituteVariantIdColumnAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: a stale/foreign PostgREST direct-REST read
+      // selecting a non-existent `substitute_variant_id` column off `public.crisis_events`.
+      // The table exists but has never carried that column, so paging Platform on it
+      // (Control Tower signature `supabase-logs:7305ebd53ce69b40`) is repair work for a
+      // query we don't own. Same narrow gate as the default_substitute_variant_id filter
+      // above — a different column/table or a non-SELECT write still pages.
+      if (isForeignSupabasePostgresMissingCrisisEventsSubstituteVariantIdColumnAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
       // against `public.meta_ad_accounts.name`. The `meta_ad_accounts` table exists but
       // has NO bare `name` column — the human-readable account label lives on
