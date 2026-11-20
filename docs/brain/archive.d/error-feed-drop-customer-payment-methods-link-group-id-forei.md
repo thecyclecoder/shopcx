@@ -1,0 +1,1 @@
+- **Drop foreign customer_payment_methods.link_group_id direct-REST read at capture** · verified 2026-11-20 · → [[../libraries/error-feed]]
