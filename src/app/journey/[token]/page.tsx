@@ -240,6 +240,20 @@ export default function JourneyPage() {
     );
   }
 
+  // ── Next-Order Journey (in-journey subscription editor) ──
+  if (status !== "loading" && config?.codeDriven && (config as { nextOrderJourney?: boolean }).nextOrderJourney) {
+    return (
+      <NextOrderJourney
+        config={config}
+        token={token}
+        customerName={customerName}
+        primaryColor={primaryColor}
+        workspaceName={workspaceName}
+        onComplete={(msg) => { setCompletedMessage(msg); setStatus("completed"); }}
+      />
+    );
+  }
+
   // ── Cancel Journey ──
   if (status !== "loading" && config?.codeDriven && (config as { cancelJourney?: boolean }).cancelJourney) {
     return (
@@ -962,6 +976,471 @@ function CancelJourney({
           <span className="ml-3 text-sm text-zinc-500">Processing...</span>
         </div>
       )}
+    </JourneyShell>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────
+// Next-Order Journey Component (in-journey subscription editor)
+// ──────────────────────────────────────────────────────────────
+
+interface NextOrderEditableItem {
+  title: string;
+  variant_title?: string;
+  variant_id?: string;
+  quantity: number;
+  price?: string | null;
+}
+
+interface NextOrderSub {
+  id: string;
+  contractId: string;
+  items: NextOrderEditableItem[];
+  nextBillingDate: string | null;
+  totalPrice: string | null;
+  frequency: string | null;
+  billingInterval: string | null;
+  billingIntervalCount: number | null;
+  status: string;
+  isFirstRenewal: boolean;
+}
+
+interface NextOrderCatalogVariant {
+  variant_id: string;
+  product_title: string;
+  variant_title: string | null;
+  price: string | null;
+}
+
+type EditAction =
+  | { action: "swap_product"; subscription_id: string; variant_id: string; new_variant_id: string }
+  | { action: "change_quantity"; subscription_id: string; variant_id: string; quantity: number }
+  | { action: "remove"; subscription_id: string; variant_id: string }
+  | { action: "add_item"; subscription_id: string; variant_id: string; quantity: number }
+  | { action: "skip"; subscription_id: string }
+  | { action: "change_date"; subscription_id: string; next_billing_date: string }
+  | { action: "change_frequency"; subscription_id: string; interval: "DAY" | "WEEK" | "MONTH" | "YEAR"; interval_count: number };
+
+function NextOrderJourney({
+  config,
+  token,
+  customerName,
+  primaryColor,
+  workspaceName,
+  onComplete,
+}: {
+  config: JourneyConfig;
+  token: string;
+  customerName: string;
+  primaryColor: string;
+  workspaceName: string;
+  onComplete: (msg: string) => void;
+}) {
+  const meta = (config.metadata || {}) as {
+    subscriptions?: NextOrderSub[];
+    catalog?: NextOrderCatalogVariant[];
+    cancelReasons?: { value: string; label: string }[];
+    selectedSubscriptionId?: string;
+  };
+  const [subs, setSubs] = useState<NextOrderSub[]>(meta.subscriptions || []);
+  const catalog = meta.catalog || [];
+  const cancelReasons = meta.cancelReasons || [];
+
+  const [mode, setMode] = useState<"edit" | "cancel">("edit");
+  const [selectedSubId, setSelectedSubId] = useState<string | null>(
+    meta.selectedSubscriptionId || ((meta.subscriptions || []).length === 1 ? meta.subscriptions![0].id : null),
+  );
+  const [busy, setBusy] = useState(false);
+  const [banner, setBanner] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
+  const [swapFor, setSwapFor] = useState<string | null>(null); // variant_id being swapped
+  const [adding, setAdding] = useState(false);
+  const [dateValue, setDateValue] = useState("");
+  const [freqInterval, setFreqInterval] = useState<"WEEK" | "MONTH">("MONTH");
+  const [freqCount, setFreqCount] = useState(1);
+
+  const selectedSub = subs.find(s => s.id === selectedSubId) || null;
+
+  // Re-pull the subscription live after a successful edit so the editor reflects the applied state.
+  const reload = useCallback(async () => {
+    try {
+      const res = await fetch(`/api/journey/${token}`);
+      if (!res.ok) return;
+      const data = await res.json();
+      const m = (data.config?.metadata || {}) as { subscriptions?: NextOrderSub[] };
+      if (m.subscriptions) setSubs(m.subscriptions);
+    } catch { /* non-fatal — the edit still applied */ }
+  }, [token]);
+
+  // Verify-before-report: the server only returns success once the mutation actually landed.
+  const runEdit = async (payload: EditAction) => {
+    if (busy) return;
+    setBusy(true);
+    setBanner(null);
+    try {
+      const res = await fetch(`/api/journey/${token}/edit`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setBanner({ kind: "ok", text: data.message || "Done — your subscription has been updated." });
+        await reload();
+      } else {
+        setBanner({ kind: "err", text: data.message || "We couldn't make that change — please try again or contact support." });
+      }
+    } catch {
+      setBanner({ kind: "err", text: "Something went wrong. Our team will follow up with you." });
+    } finally {
+      setBusy(false);
+      setSwapFor(null);
+      setAdding(false);
+    }
+  };
+
+  // ── Cancel sub-flow (reuses the shared cancel offers + executors via /remedies + /complete) ──
+  const [cancelPhase, setCancelPhase] = useState<"reason" | "remedies" | "confirm" | "submitting">("reason");
+  const [remedies, setRemedies] = useState<RemedyOption[]>([]);
+  const [cancelReason, setCancelReason] = useState<{ value: string; label: string } | null>(null);
+
+  const enterCancel = () => { setMode("cancel"); setCancelPhase("reason"); setBanner(null); };
+
+  const pickCancelReason = async (value: string, label: string) => {
+    setCancelReason({ value, label });
+    setCancelPhase("submitting");
+    try {
+      const res = await fetch(`/api/journey/${token}/remedies`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ cancel_reason: value, cancel_reason_label: label, subscription_id: selectedSubId }),
+      });
+      const data = await res.json();
+      if (data.type === "remedies" && (data.remedies || []).length) {
+        setRemedies(data.remedies);
+        setCancelPhase("remedies");
+      } else {
+        setCancelPhase("confirm");
+      }
+    } catch {
+      setCancelPhase("confirm");
+    }
+  };
+
+  const acceptRemedy = async (remedy: RemedyOption) => {
+    setCancelPhase("submitting");
+    const actionType = remedy.coupon_code ? "coupon" : "save";
+    const res = await fetch(`/api/journey/${token}/complete`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        outcome: "saved_remedy",
+        cancel_flow: true,
+        responses: {
+          ...(cancelReason ? { cancel_reason: cancelReason } : {}),
+          ...(selectedSubId ? { select_subscription: { value: selectedSubId, label: selectedSubId } } : {}),
+          remedy_selection: { value: remedy.remedy_id, label: remedy.pitch },
+          remedy_action: { value: actionType, label: actionType },
+          ...(remedy.coupon_code ? { remedy_coupon: { value: remedy.coupon_code, label: remedy.coupon_code } } : {}),
+        },
+      }),
+    });
+    const result = await res.json();
+    if (typeof result.redirect_url === "string" && result.redirect_url) {
+      onComplete(result.message || "Opening your subscription so you can make the change...");
+      window.location.href = result.redirect_url;
+      return;
+    }
+    onComplete(result.message || "We've updated your subscription. Thank you for staying with us!");
+  };
+
+  const confirmCancel = async () => {
+    setCancelPhase("submitting");
+    const res = await fetch(`/api/journey/${token}/complete`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        outcome: "cancelled",
+        cancel_flow: true,
+        responses: {
+          ...(cancelReason ? { cancel_reason: cancelReason } : {}),
+          ...(selectedSubId ? { select_subscription: { value: selectedSubId, label: selectedSubId } } : {}),
+          confirm_cancel: { value: "confirmed", label: "Yes, cancel my subscription" },
+        },
+      }),
+    });
+    const result = await res.json();
+    onComplete(result.message || "Your subscription has been cancelled.");
+  };
+
+  const keepSubscription = () => { setMode("edit"); setCancelPhase("reason"); setRemedies([]); setCancelReason(null); };
+
+  // ── Subscription picker (when >1 and none pre-selected) ──
+  if (!selectedSub && subs.length > 1) {
+    return (
+      <JourneyShell workspaceName={workspaceName} primaryColor={primaryColor}>
+        {customerName && <p className="mb-2" style={{ fontSize: "17px", color: "#71717a" }}>Hi {customerName},</p>}
+        <h2 style={{ fontSize: "17px" }} className="font-semibold text-zinc-900">Which subscription would you like to edit?</h2>
+        <div className="mt-4 space-y-3">
+          {subs.map(sub => (
+            <button
+              key={sub.id}
+              onClick={() => setSelectedSubId(sub.id)}
+              className="flex w-full flex-col items-start rounded-xl border-2 border-zinc-200 px-4 py-4 text-left transition-all hover:border-zinc-300 hover:bg-zinc-50"
+            >
+              <span style={{ fontSize: "16px" }} className="font-medium text-zinc-900">{sub.items.map(i => i.title).join(", ")}</span>
+              <span className="mt-1 text-sm text-zinc-500">
+                {sub.nextBillingDate ? `Renews ${new Date(sub.nextBillingDate).toLocaleDateString("en-US", { month: "short", day: "numeric" })}` : ""}
+                {sub.totalPrice ? ` — ${sub.totalPrice}` : ""}
+              </span>
+            </button>
+          ))}
+        </div>
+      </JourneyShell>
+    );
+  }
+
+  if (!selectedSub) {
+    return (
+      <JourneyShell workspaceName={workspaceName} primaryColor={primaryColor}>
+        <div className="py-4 text-center">
+          <h2 style={{ fontSize: "17px" }} className="font-semibold text-zinc-900">You don&apos;t have any active subscriptions</h2>
+          <p style={{ fontSize: "15px" }} className="mt-3 text-zinc-600">There&apos;s nothing currently set to renew. If you need help, just reply to the email and we&apos;ll take a look.</p>
+        </div>
+      </JourneyShell>
+    );
+  }
+
+  // ── Cancel mode ──
+  if (mode === "cancel") {
+    return (
+      <JourneyShell workspaceName={workspaceName} primaryColor={primaryColor}>
+        {cancelPhase === "submitting" && (
+          <div className="flex items-center justify-center py-8">
+            <div className="h-6 w-6 animate-spin rounded-full border-2 border-zinc-300 border-t-indigo-600" />
+            <span className="ml-3 text-sm text-zinc-500">Processing...</span>
+          </div>
+        )}
+
+        {cancelPhase === "reason" && (
+          <div>
+            <h2 style={{ fontSize: "17px" }} className="font-semibold text-zinc-900">Why are you cancelling?</h2>
+            <div className="mt-4 space-y-3">
+              {cancelReasons.map(r => (
+                <button
+                  key={r.value}
+                  onClick={() => pickCancelReason(r.value, r.label)}
+                  className="flex w-full items-center rounded-xl border-2 border-zinc-200 px-4 py-4 text-left transition-all hover:border-zinc-300 hover:bg-zinc-50"
+                >
+                  <span style={{ fontSize: "16px" }} className="font-medium text-zinc-800">{r.label}</span>
+                </button>
+              ))}
+              {cancelReasons.length === 0 && (
+                <button
+                  onClick={() => setCancelPhase("confirm")}
+                  className="w-full rounded-xl border-2 border-zinc-200 px-4 py-4 text-left text-zinc-700 hover:bg-zinc-50"
+                >
+                  Continue to cancel
+                </button>
+              )}
+            </div>
+            <button onClick={keepSubscription} className="mt-4 w-full text-center text-sm text-zinc-400 hover:text-zinc-600">Never mind, keep my subscription</button>
+          </div>
+        )}
+
+        {cancelPhase === "remedies" && (
+          <div>
+            <p style={{ fontSize: "17px" }} className="text-zinc-700">Before you go, here are some options:</p>
+            <div className="mt-4 space-y-3">
+              {remedies.map((remedy, idx) => (
+                <button
+                  key={idx}
+                  onClick={() => acceptRemedy(remedy)}
+                  className="w-full rounded-xl border-2 border-zinc-200 px-4 py-4 text-left transition-all hover:border-zinc-300 hover:bg-zinc-50"
+                >
+                  <span style={{ fontSize: "16px" }} className="font-semibold text-zinc-800">{remedy.name}</span>
+                  {remedy.pitch && <span style={{ fontSize: "14px" }} className="mt-1 block text-zinc-500">{remedy.pitch}</span>}
+                </button>
+              ))}
+              <button onClick={() => setCancelPhase("confirm")} className="w-full rounded-xl border-2 border-zinc-200 px-4 py-4 text-left text-zinc-500 hover:bg-zinc-50">
+                <span style={{ fontSize: "16px" }}>I still want to cancel</span>
+              </button>
+            </div>
+          </div>
+        )}
+
+        {cancelPhase === "confirm" && (
+          <div className="text-center">
+            <h2 style={{ fontSize: "17px" }} className="font-semibold text-zinc-900">Are you sure?</h2>
+            <p className="mt-2 text-sm text-zinc-500">This will cancel your subscription at the end of your current billing period. You won&apos;t be charged again.</p>
+            <div className="mt-6 flex gap-3">
+              <button onClick={keepSubscription} className="flex-1 rounded-xl px-4 py-3 font-semibold text-white" style={{ backgroundColor: primaryColor, fontSize: "16px" }}>Keep my subscription</button>
+              <button onClick={confirmCancel} className="flex-1 rounded-xl border-2 border-red-200 px-4 py-3 font-semibold text-red-600 hover:bg-red-50" style={{ fontSize: "16px" }}>Yes, cancel</button>
+            </div>
+          </div>
+        )}
+      </JourneyShell>
+    );
+  }
+
+  // ── Edit mode ──
+  const editableItems = selectedSub.items.filter(i => i.variant_id);
+  return (
+    <JourneyShell workspaceName={workspaceName} primaryColor={primaryColor}>
+      {customerName && <p className="mb-2 text-sm text-zinc-500">Hi {customerName},</p>}
+      <h2 style={{ fontSize: "17px" }} className="font-semibold text-zinc-900">Your next order</h2>
+      <p className="mt-1 text-sm text-zinc-500">
+        {selectedSub.nextBillingDate ? `Renews ${new Date(selectedSub.nextBillingDate).toLocaleDateString("en-US", { month: "long", day: "numeric" })}` : "Make changes before your next delivery."}
+        {selectedSub.frequency ? ` · ${selectedSub.frequency}` : ""}
+      </p>
+
+      {banner && (
+        <div className={`mt-4 rounded-lg px-3 py-2 text-sm ${banner.kind === "ok" ? "bg-emerald-50 text-emerald-700" : "bg-red-50 text-red-700"}`}>
+          {banner.text}
+        </div>
+      )}
+
+      {/* Items */}
+      <div className="mt-4 space-y-3">
+        {editableItems.map((item) => (
+          <div key={item.variant_id} className="rounded-xl border border-zinc-200 p-3">
+            <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0">
+                <p style={{ fontSize: "15px" }} className="font-medium text-zinc-900">{item.title}</p>
+                {item.variant_title && <p className="text-xs text-zinc-500">{item.variant_title}</p>}
+                {item.price && <p className="text-xs text-zinc-400">{item.price}</p>}
+              </div>
+              <button
+                onClick={() => runEdit({ action: "remove", subscription_id: selectedSub.id, variant_id: item.variant_id! })}
+                disabled={busy}
+                className="shrink-0 text-xs font-medium text-red-500 hover:text-red-600 disabled:opacity-50"
+              >
+                Remove
+              </button>
+            </div>
+            <div className="mt-2 flex items-center gap-2">
+              <span className="text-xs text-zinc-500">Qty</span>
+              <button
+                onClick={() => runEdit({ action: "change_quantity", subscription_id: selectedSub.id, variant_id: item.variant_id!, quantity: Math.max(1, item.quantity - 1) })}
+                disabled={busy || item.quantity <= 1}
+                className="h-7 w-7 rounded-md border border-zinc-200 text-zinc-700 disabled:opacity-40"
+              >−</button>
+              <span style={{ fontSize: "15px" }} className="w-6 text-center">{item.quantity}</span>
+              <button
+                onClick={() => runEdit({ action: "change_quantity", subscription_id: selectedSub.id, variant_id: item.variant_id!, quantity: item.quantity + 1 })}
+                disabled={busy}
+                className="h-7 w-7 rounded-md border border-zinc-200 text-zinc-700 disabled:opacity-40"
+              >+</button>
+              <button
+                onClick={() => setSwapFor(swapFor === item.variant_id ? null : item.variant_id!)}
+                disabled={busy}
+                className="ml-auto text-xs font-medium hover:underline disabled:opacity-50"
+                style={{ color: primaryColor }}
+              >
+                {swapFor === item.variant_id ? "Cancel swap" : "Swap"}
+              </button>
+            </div>
+            {swapFor === item.variant_id && (
+              <select
+                className="mt-2 w-full rounded-md border border-zinc-200 px-2 py-2 text-sm"
+                defaultValue=""
+                disabled={busy}
+                onChange={(e) => {
+                  if (!e.target.value) return;
+                  runEdit({ action: "swap_product", subscription_id: selectedSub.id, variant_id: item.variant_id!, new_variant_id: e.target.value });
+                }}
+              >
+                <option value="">Swap to…</option>
+                {catalog.filter(v => v.variant_id !== item.variant_id).map(v => (
+                  <option key={v.variant_id} value={v.variant_id}>{v.product_title}{v.variant_title ? ` — ${v.variant_title}` : ""}{v.price ? ` (${v.price})` : ""}</option>
+                ))}
+              </select>
+            )}
+          </div>
+        ))}
+      </div>
+
+      {/* Add item */}
+      {catalog.length > 0 && (
+        <div className="mt-3">
+          {adding ? (
+            <select
+              className="w-full rounded-md border border-zinc-200 px-2 py-2 text-sm"
+              defaultValue=""
+              disabled={busy}
+              onChange={(e) => { if (e.target.value) runEdit({ action: "add_item", subscription_id: selectedSub.id, variant_id: e.target.value, quantity: 1 }); }}
+            >
+              <option value="">Add an item…</option>
+              {catalog.map(v => (
+                <option key={v.variant_id} value={v.variant_id}>{v.product_title}{v.variant_title ? ` — ${v.variant_title}` : ""}{v.price ? ` (${v.price})` : ""}</option>
+              ))}
+            </select>
+          ) : (
+            <button onClick={() => setAdding(true)} disabled={busy} className="w-full rounded-xl border-2 border-dashed border-zinc-200 px-4 py-3 text-sm font-medium text-zinc-600 hover:bg-zinc-50 disabled:opacity-50">+ Add an item</button>
+          )}
+        </div>
+      )}
+
+      {/* Timing controls */}
+      <div className="mt-5 space-y-3 border-t border-zinc-100 pt-4">
+        <button
+          onClick={() => runEdit({ action: "skip", subscription_id: selectedSub.id })}
+          disabled={busy}
+          className="w-full rounded-xl border-2 border-zinc-200 px-4 py-3 text-left text-sm font-medium text-zinc-800 hover:bg-zinc-50 disabled:opacity-50"
+        >
+          Skip my next order
+        </button>
+
+        <div className="flex items-center gap-2">
+          <input
+            type="date"
+            value={dateValue}
+            onChange={(e) => setDateValue(e.target.value)}
+            disabled={busy}
+            className="flex-1 rounded-md border border-zinc-200 px-2 py-2 text-sm"
+          />
+          <button
+            onClick={() => dateValue && runEdit({ action: "change_date", subscription_id: selectedSub.id, next_billing_date: dateValue })}
+            disabled={busy || !dateValue}
+            className="rounded-md px-3 py-2 text-sm font-semibold text-white disabled:opacity-40"
+            style={{ backgroundColor: primaryColor }}
+          >
+            Change date
+          </button>
+        </div>
+
+        <div className="flex items-center gap-2">
+          <span className="text-sm text-zinc-500">Every</span>
+          <input
+            type="number"
+            min={1}
+            value={freqCount}
+            onChange={(e) => setFreqCount(Math.max(1, parseInt(e.target.value) || 1))}
+            disabled={busy}
+            className="w-16 rounded-md border border-zinc-200 px-2 py-2 text-sm"
+          />
+          <select value={freqInterval} onChange={(e) => setFreqInterval(e.target.value as "WEEK" | "MONTH")} disabled={busy} className="rounded-md border border-zinc-200 px-2 py-2 text-sm">
+            <option value="WEEK">week(s)</option>
+            <option value="MONTH">month(s)</option>
+          </select>
+          <button
+            onClick={() => runEdit({ action: "change_frequency", subscription_id: selectedSub.id, interval: freqInterval, interval_count: freqCount })}
+            disabled={busy}
+            className="ml-auto rounded-md px-3 py-2 text-sm font-semibold text-white disabled:opacity-40"
+            style={{ backgroundColor: primaryColor }}
+          >
+            Update
+          </button>
+        </div>
+      </div>
+
+      {/* Cancel entry point */}
+      <button
+        onClick={enterCancel}
+        disabled={busy}
+        className="mt-5 w-full text-center text-sm text-zinc-400 hover:text-zinc-600 disabled:opacity-50"
+      >
+        Cancel my subscription
+      </button>
     </JourneyShell>
   );
 }

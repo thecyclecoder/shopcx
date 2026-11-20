@@ -56,11 +56,14 @@ function PauseCard({ contract, onUpdate, showToast, startAction, completeAction,
     setBusy(true);
     startAction();
     try {
-      await postJson('pause', { contractId: contract.id, pauseDays: days });
-      const resumeDate = new Date();
-      resumeDate.setDate(resumeDate.getDate() + days);
-      const label = resumeDate.toLocaleDateString('en-US', { month: 'long', day: 'numeric' });
-      completeAction('Subscription paused until ' + label);
+      // The pause counts from the next renewal, so the resume date comes from the server
+      // (old next billing date + days), not a local today + days guess.
+      const res = await postJson('pause', { contractId: contract.id, pauseDays: days });
+      const resumeAt = res && (res.resumeAt || (res.patch && res.patch.pauseResumeAt));
+      const label = resumeAt
+        ? new Date(resumeAt).toLocaleDateString('en-US', { month: 'long', day: 'numeric', timeZone: 'UTC' })
+        : null;
+      completeAction(label ? 'Your next order is now ' + label : 'Subscription paused.');
       clearCaches(); onUpdate();
     } catch { failAction('Could not pause.'); }
     setBusy(false);

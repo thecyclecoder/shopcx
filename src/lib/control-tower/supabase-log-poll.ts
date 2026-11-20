@@ -35,12 +35,15 @@ import {
   isForeignGoTrueEdgeNoise,
   isForeignGoTrueAuthLogNoise,
   isForeignSupabasePostgresAdhocSkuSalesRoundTypeNoise,
+  isForeignSupabasePostgresAdhocMonthlyRevenueSnapshotsToCharTextNoise,
   isForeignSupabasePostgresMissingControlTowerEventsLookupNoise,
   isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise,
   isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise,
   isForeignSupabasePostgresMissingPlaybooksStepsDirectRestColumnNoise,
   isForeignSupabasePostgresMissingWorkerHeartbeatsCreatedAtAdhocNoise,
   isForeignSupabasePostgresMissingSpecsOverallStatusColumnAdhocNoise,
+  isForeignSupabasePostgresMissingCouponsStatusColumnAdhocNoise,
+  isForeignSupabasePostgresMissingCouponsValueCentsColumnAdhocNoise,
   isForeignSupabasePostgresMissingDirectorActivityDetailColumnAdhocNoise,
   isForeignSupabasePostgresMissingTicketDirectionsCreatedAtAdhocNoise,
   isForeignSupabasePostgresMissingSpecTestRunsVerdictColumnAdhocNoise,
@@ -55,6 +58,7 @@ import {
   isForeignSupabasePostgresMissingAgentActionRequestsUpdatedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingFraudCasesCustomerIdColumnAdhocNoise,
   isForeignSupabasePostgresMissingLoyaltyRedemptionsCustomerIdColumnNoise,
+  isForeignSupabasePostgresMissingLoyaltyTransactionsCustomerIdColumnNoise,
   isForeignSupabasePostgresMissingCustomersDisplayNameAdhocNoise,
   isForeignSupabasePostgresMissingCustomerLinksLinkedCustomerIdColumnNoise,
   isForeignSupabasePostgresSubscriptionsLinkedCustomerIdEdgeListNoise,
@@ -81,6 +85,7 @@ import {
   isForeignSupabasePostgresMissingAppstleContractSnapshotsUpdatedAtAdhocNoise,
   isForeignSupabasePostgresMissingAppstleContractSnapshotsContractIdAdhocNoise,
   isForeignSupabasePostgresMissingMigrationAuditsContractIdAdhocNoise,
+  isForeignSupabasePostgresMissingSubscriptionsInternalContractIdAdhocNoise,
   isForeignSupabasePostgresJsonbIlikeOnErrorEventsSampleAdhocNoise,
   isForeignSupabasePostgresMissingOrdersSourceColumnNoise,
   isForeignSupabasePostgresMissingOrdersUpdatedAtColumnAdhocNoise,
@@ -95,9 +100,11 @@ import {
   isForeignSupabasePostgresMissingOrdersNoteColumnAdhocNoise,
   isForeignSupabasePostgresMissingOrdersShippingNameColumnAdhocNoise,
   isForeignSupabasePostgresMissingOrdersShopifyOrderNameAdhocNoise,
+  isForeignSupabasePostgresMissingOrdersAvalaraDocCodeColumnAdhocNoise,
   isForeignSupabasePostgresMissingOrdersEasypostTrackerAdhocNoise,
   isForeignSupabasePostgresMissingOrdersTrackingNumberAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsPausedAtColumnAdhocNoise,
+  isForeignSupabasePostgresMissingSubscriptionsTaxExemptColumnAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsDeliveryAddressColumnAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsLineItemsColumnAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsRenewalSubtotalCentsColumnAdhocNoise,
@@ -136,6 +143,7 @@ import {
   isForeignSupabasePostgresMissingSpecStatusHistoryOldValueAdhocNoise,
   isForeignSupabasePostgresMissingDunningCyclesCycleKeyAdhocNoise,
   isForeignSupabasePostgresMissingDunningCyclesRetryCountAdhocNoise,
+  isForeignSupabasePostgresMissingDunningCyclesFailureCountAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionCycleChargesCreatedAtAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionCycleChargesCustomerIdAdhocNoise,
   isForeignSupabasePostgresMissingBillingAttemptEventsCreatedAtAdhocNoise,
@@ -217,6 +225,7 @@ import {
   isForeignSupabasePostgresMissingLoyaltyMembersLifetimePointsAdhocNoise,
   isForeignSupabasePostgresMissingLoyaltyRedemptionsCouponCodeAdhocNoise,
   isForeignSupabasePostgresMissingLoyaltyRedemptionsCodeColumnNoise,
+  isForeignSupabasePostgresMissingCouponRedemptionsCodeColumnNoise,
   isForeignSupabasePostgresMissingLoyaltyRedemptionsRedeemedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingTicketsAssignedAgentColumnAdhocNoise,
   isForeignSupabasePostgresMissingTicketsPlaybookIdDirectRestColumnNoise,
@@ -430,6 +439,24 @@ const LOG_QUERIES: LogQuery[] = [
       // table, a `specs` column rename, or a non-SELECT write still surfaces / pages.
       if (isForeignSupabasePostgresMissingSpecsOverallStatusColumnAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: a foreign/stale direct-REST client reads
+      // `public.coupons` expecting a generic `status` column that our schema has never had —
+      // a ShopCX coupon's lifecycle lives on other columns ([[../tables/coupons]]), never a
+      // scalar `status`. There is no lever from ShopCX to make the query resolve (Control Tower
+      // signature `supabase-logs:b02068974ae0efb2`). Gated on the exact `column coupons.status
+      // does not exist` message AND the SELECT-lookup shape on `coupons` (bare or PostgREST CTE
+      // wrapper) — a real `status`-missing on another table, a different `coupons` column, or a
+      // non-SELECT write still surfaces / pages.
+      if (isForeignSupabasePostgresMissingCouponsStatusColumnAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: a foreign/stale direct-REST client reads
+      // `public.coupons` expecting cents-shaped columns (`value_cents`, `amount_cents`) that our
+      // schema has never carried — a ShopCX coupon's amount lives on the single `value` column
+      // ([[../tables/coupons]]), never a `value_cents`. There is no lever from ShopCX to make the
+      // query resolve (Control Tower signature `supabase-logs:6c1c30a9b575115d`). Gated on the
+      // exact `column coupons.value_cents does not exist` message AND the SELECT-lookup shape on
+      // `coupons` (bare or PostgREST CTE wrapper) — a real `value_cents`-missing on another table,
+      // a different `coupons` column, or a non-SELECT write still surfaces / pages.
+      if (isForeignSupabasePostgresMissingCouponsValueCentsColumnAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: a foreign/stale direct-REST client reads
       // `public.director_activity` expecting a `detail` column that the table never carried —
       // there is no lever from ShopCX to make the query resolve ([[../tables/director_activity]],
       // Control Tower signature `supabase-logs:ebc1e2907868a3c5`). Gated on the exact
@@ -539,6 +566,15 @@ const LOG_QUERIES: LogQuery[] = [
       // shape on `loyalty_redemptions` (bare or PostgREST CTE wrapper) — a different missing
       // column, `customer_id` on `loyalty_members`, a non-SELECT write, or a FATAL still pages.
       if (isForeignSupabasePostgresMissingLoyaltyRedemptionsCustomerIdColumnNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: a foreign/stale PostgREST client reads
+      // `loyalty_transactions` by `customer_id`, a column the ledger has never owned (it is keyed
+      // by `member_id`; `customer_id` lives on the sibling `loyalty_members` table). The resulting
+      // undefined_column ERROR is repair work for a query no ShopCX code owns (Control Tower
+      // signature `supabase-logs:3c76f3fab04b4b69`). Narrowly gated to require BOTH the exact
+      // `column loyalty_transactions.customer_id does not exist` message AND the SELECT-lookup
+      // shape on `loyalty_transactions` (bare or PostgREST CTE wrapper) — a different missing
+      // column, a non-SELECT write, or a FATAL still pages.
+      if (isForeignSupabasePostgresMissingLoyaltyTransactionsCustomerIdColumnNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an external-tool / Studio exploratory SELECT reads
       // `display_name` from `customers`, a column that table has never carried (user-facing names
       // come from `workspace_members.display_name`) and that no ShopCX code selects. The resulting
@@ -781,6 +817,12 @@ const LOG_QUERIES: LogQuery[] = [
       // SELECT-lookup shape (bare or PostgREST CTE wrapper); a different column, a write/DDL, or a
       // JOIN against migration_audits still pages on first sighting.
       if (isForeignSupabasePostgresMissingMigrationAuditsContractIdAdhocNoise(message, query)) return null;
+      // Same foreign conflation aimed at `subscriptions` — a stale SQL Editor / Supabase Studio /
+      // deprecated-integration SELECT-lookup selecting the non-existent `internal_contract_id`
+      // column (that migration-pointer column lives on `migration_audits`, not the subscription
+      // row). Drop the SELECT-lookup shape (bare or PostgREST CTE wrapper); a different column, a
+      // write/DDL, or a JOIN against subscriptions still pages on first sighting.
+      if (isForeignSupabasePostgresMissingSubscriptionsInternalContractIdAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: a Supabase Studio Table Editor quick-filter (or an
       // external PostgREST probe) typed as a case-insensitive free-text search over the jsonb
       // `sample` column on `public.error_events` emits `WHERE "sample" ILIKE $1`, which
@@ -959,6 +1001,18 @@ const LOG_QUERIES: LogQuery[] = [
       // non-SELECT statement (real code-bug shape), still surfaces / pages on first
       // sighting.
       if (isForeignSupabasePostgresMissingOrdersShopifyOrderNameAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc `select ... avalara_doc_code ... from
+      // public.orders` lookup by an external tool / stale exploratory query — or the
+      // PostgREST `WITH pgrst_source AS ( SELECT ... FROM "public"."orders" ... )` CTE
+      // wrapper the same client emits over the REST endpoint. Our `orders` table has NO
+      // `avalara_doc_code` column (the Avalara AvaTax document code lives on the
+      // tax-transaction ledger, not on our internal `orders` row) and no ShopCX code path
+      // selects it — there is no lever to make the query resolve. A column-missing error on
+      // any other column of `orders` (including the live `order_number`), on a different
+      // Avalara column (`avalara_transaction_code`), on `avalara_doc_code` from any other
+      // table, or on `orders` via a non-SELECT statement (real code-bug shape), still
+      // surfaces / pages on first sighting.
+      if (isForeignSupabasePostgresMissingOrdersAvalaraDocCodeColumnAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc `select ... easypost_tracker_id
       // ... from public.orders` lookup (or its `easypost_tracking_code` / `easypost_carrier`
       // twins) by an external tool / stale exploratory query — or the PostgREST
@@ -1022,6 +1076,22 @@ const LOG_QUERIES: LogQuery[] = [
       // `subscriptions` via a non-SELECT statement (real code-bug shape), still
       // surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingSubscriptionsPausedAtColumnAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc `select ... tax_exempt ... from
+      // public.subscriptions` lookup by an external tool (Supabase Studio Table Editor /
+      // API Docs, foreign SQL client, stale exploratory session, third-party integration)
+      // or the PostgREST `WITH pgrst_source AS ( SELECT ... FROM "public"."subscriptions"
+      // ... )` CTE wrapper the same client emits over the REST endpoint. Our
+      // `subscriptions` table has NO `tax_exempt` column — tax-exempt state lives in the
+      // separate `customer_tax_exemptions` table. No ShopCX code path issues a SELECT on
+      // `subscriptions.tax_exempt`, so the resulting column-missing ERROR is repair work
+      // for a query we don't own
+      // ([[../specs/error-feed-drop-subscriptions-tax-exempt-column-adhoc-noise]], Control
+      // Tower signature `supabase-logs:b37d78bd56a6f274`). Narrowly gated to require BOTH
+      // the exact column-missing message AND the SELECT-lookup shape — a column-missing
+      // error on any other column of `subscriptions` (including the real `pause_resume_at`),
+      // or on `tax_exempt` from any other table, or on `subscriptions` via a non-SELECT
+      // statement (real code-bug shape), still surfaces / pages on first sighting.
+      if (isForeignSupabasePostgresMissingSubscriptionsTaxExemptColumnAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc `select ... delivery_address ...
       // from public.subscriptions` lookup by an external tool (Supabase Studio Table
       // Editor / API Docs, foreign SQL client, stale exploratory session, third-party
@@ -1497,6 +1567,11 @@ const LOG_QUERIES: LogQuery[] = [
       // column and no ShopCX code reads it; a foreign/stale PostgREST SELECT is unfixable noise.
       // Narrowly gated: a different table/column or a non-SELECT write still pages.
       if (isForeignSupabasePostgresMissingDunningCyclesRetryCountAdhocNoise(message, query)) return null;
+      // Same foreign-read noise, pinned to the `failure_count` column variant (Control Tower
+      // signature `supabase-logs:d07359f74fcdf3ee`) — `dunning_cycles` has no `failure_count`
+      // column and no ShopCX code reads it; a foreign/stale PostgREST SELECT is unfixable noise.
+      // Narrowly gated: a different table/column or a non-SELECT write still pages.
+      if (isForeignSupabasePostgresMissingDunningCyclesFailureCountAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
       // against `public.subscriptions.paused_until`. The `subscriptions` table exists but
       // has no `paused_until` column — the canonical pause timestamp is `pause_resume_at`
@@ -2740,6 +2815,13 @@ const LOG_QUERIES: LogQuery[] = [
       // pages on first sighting.
       if (isForeignSupabasePostgresMissingLoyaltyRedemptionsCodeColumnNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
+      // against `public.coupon_redemptions.code`. The `coupon_redemptions` table exists but
+      // has NO `code` column — the real column is `derived_code`. Same narrow gating (exact
+      // column-missing message AND a SELECT-on-coupon_redemptions shape, bare OR PostgREST
+      // CTE wrapper); any other column / table / non-SELECT / JOIN still pages on first
+      // sighting.
+      if (isForeignSupabasePostgresMissingCouponRedemptionsCodeColumnNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
       // against `public.loyalty_redemptions.redeemed_at`. Same table as the `code` /
       // `coupon_code` siblings above, another foreign-owned column name — the real
       // redemption timestamp on this table is `created_at`; `redeemed_at` lives on the
@@ -2842,6 +2924,15 @@ const LOG_QUERIES: LogQuery[] = [
       // pages ([[../specs/error-feed-drop-adhoc-sku-sales-round-type-noise]], signature
       // `supabase-logs:2bb9715f15cb72f4`).
       if (isForeignSupabasePostgresAdhocSkuSalesRoundTypeNoise(message, query)) return null;
+      // Foreign-app noise: a hand-authored monthly-revenue query in the Supabase SQL Editor
+      // calls `to_char(month, 'yyyy-mm')` on a `text` column, which fails to resolve against
+      // any `to_char` overload. Not ShopCX source — its `monthly_revenue_snapshots` relation
+      // appears in no file under `src/` and in no migration. Narrowly gated to the exact
+      // to_char-type message AND both query fingerprints, so a genuine to_char type bug in
+      // product code (or any other message on this query) still pages
+      // ([[../specs/error-feed-drop-adhoc-monthly-revenue-snapshots-to-char-text]], signature
+      // `supabase-logs:b979de40e41e6ba2`).
+      if (isForeignSupabasePostgresAdhocMonthlyRevenueSnapshotsToCharTextNoise(message, query)) return null;
       return {
         keyParts: ["postgres", severity, message],
         title: `postgres ${severity}: ${message}`,

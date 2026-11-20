@@ -22,6 +22,8 @@ date lands in a spent cycle and the subscription is **never charged again, silen
 
 `retimeAfterResume()` fixes both paths, on the cron and the event function alike:
 
+- **A `next_billing_date` already in the FUTURE is honored verbatim** (`storedIsFuture → next = stored`).
+  The portal pause now writes `next_billing_date = old renewal + pauseDays` ([[../libraries/portal__handlers__pause]] via [[../libraries/portal__pause-renewal-date]]), so a future date already IS the renewal the customer was promised — rolling it to a cycle-grid date would silently move the charge they chose (Laura Light, ticket b74b5a1c). Only a PAST date falls through to the roll-forward below.
 - rolls forward from the sub's ORIGINAL date by its own cadence (`rollForwardToFutureBillingDate`),
   so a customer who billed on the 12th still bills on the 12th — the pause skips some of their days,
   it does not move them. Tomorrow is the floor if the roll cannot produce a future date.

@@ -1,0 +1,1 @@
+- **Mario's failed-build ownership drop must also cover goal-escort loop_guard escalations, not only init_loop_guard** · verified 2026-11-17 · → [[lifecycles/mario-pipeline-plumbing]]

@@ -1,0 +1,1 @@
+- **Drop foreign-app noise: ad-hoc SELECT of non-existent subscriptions.tax_exempt column** · verified 2026-11-18 · → [[../libraries/error-feed]]

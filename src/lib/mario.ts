@@ -285,15 +285,18 @@ export async function readFailedBuildStalls(
 
 /**
  * Returns the set of spec slugs in `workspace_id` whose LATEST build FAILED and whose failure is
- * currently OWNED by a human via an `init_loop_guard` escalation — so Mario must not re-diagnose it.
- * The platform init lane's loop-guard, after a build fails the resubmit cap with nothing in-flight,
- * POSTs an escalation to the CEO and records a `director_activity` row (action_kind='escalated',
- * metadata.escalation_kind='init_loop_guard'); the human now owns the spec.
+ * currently OWNED by a human via a loop-guard escalation (init + goal-escort) — so Mario must not
+ * re-diagnose it. After a build fails the resubmit cap with nothing in-flight, the loop guard POSTs
+ * an escalation to the CEO and records a `director_activity` row (action_kind='escalated'): the
+ * platform INIT lane uses metadata.escalation_kind='init_loop_guard', while a GOAL-ESCORTED spec uses
+ * metadata.escalation_kind='loop_guard' (dedupe_key 'loopguard:<slug>'). Both mean the human now owns
+ * the spec, so both are recognized here.
  *
- * A slug is OWNED when its latest init_loop_guard escalation is NEWER than its latest build failure
- * (the escalation covers THIS failure) AND is NOT yet superseded (no later `escorted_init` on the
- * director ledger and no later `build_done` on the timecard — either means the human resolved it and
- * a new build was driven). A genuinely orphaned failure with no such escalation is NOT owned.
+ * A slug is OWNED when its latest loop-guard escalation (either kind) is NEWER than its latest build
+ * failure (the escalation covers THIS failure) AND is NOT yet superseded (no later `escorted_init`/
+ * `escorted_goal` on the director ledger and no later `build_done` on the timecard — either means the
+ * human resolved it and a new build was driven). A genuinely orphaned failure with no such escalation
+ * is NOT owned.
  *
  * Extracted from `readFailedBuildStalls` so `evaluateStalledSpecs` can apply this ownership as a
  * CROSS-SOURCE drop. A failed build always emits `build_started` but never `build_done`, so the
@@ -352,7 +355,10 @@ export async function readInitLoopGuardOwnedSlugs(
     .select("spec_slug, created_at")
     .eq("workspace_id", workspace_id)
     .eq("action_kind", "escalated")
-    .eq("metadata->>escalation_kind", "init_loop_guard")
+    // Cover BOTH the init-escort loop guard ('init_loop_guard') AND the goal-escort loop guard
+    // ('loop_guard', dedupe_key 'loopguard:<slug>') — a goal-escorted spec parked on a build
+    // loop-guard escalation is human-owned exactly like an init one, so Mario must stop re-firing.
+    .in("metadata->>escalation_kind", ["init_loop_guard", "loop_guard"])
     .in("spec_slug", slugs)
     .gte("created_at", sinceIso)
     .order("created_at", { ascending: false })
@@ -372,15 +378,18 @@ export async function readInitLoopGuardOwnedSlugs(
   }
   if (owned.size === 0) return empty;
 
-  // Re-confirm current state: an escalation SUPERSEDED by a later `escorted_init` (human resolved it)
-  // or a later `build_done` (a new build was driven) is no longer owned → surface as a normal stall.
+  // Re-confirm current state: an escalation SUPERSEDED by a later `escorted_init`/`escorted_goal`
+  // (human resolved it) or a later `build_done` (a new build was driven) is no longer owned →
+  // surface as a normal stall.
   const ownedSlugs = [...owned];
   const [escortedRes, doneRes] = await Promise.all([
     admin
       .from("director_activity")
       .select("spec_slug, created_at")
       .eq("workspace_id", workspace_id)
-      .eq("action_kind", "escorted_init")
+      // Match both supersede kinds: 'escorted_init' (init-escort) and 'escorted_goal'
+      // (goal-escort) — a human-resolved re-drive of either un-owns the slug.
+      .in("action_kind", ["escorted_init", "escorted_goal"])
       .in("spec_slug", ownedSlugs)
       .order("created_at", { ascending: false })
       .limit(500),

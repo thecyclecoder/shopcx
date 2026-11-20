@@ -67,6 +67,11 @@ export async function GET(
     triggerIntent === "cancellation" ||
     configObj.cancelJourney === true;
 
+  const isNextOrder =
+    triggerIntent === "next_order" ||
+    triggerIntent === "next-order" ||
+    configObj.nextOrderJourney === true;
+
   if (triggerIntent) {
     const { buildJourneySteps } = await import("@/lib/journey-step-builder");
     const built = await buildJourneySteps(
@@ -76,10 +81,10 @@ export async function GET(
       session.ticket_id || "",
     );
 
-    // Cancel-specific affordance: if the orchestrator passed a
-    // subscription_id on the session, pre-select it so the picker step
-    // is auto-completed (single-sub customers never see it).
-    if (isCancel && session.subscription_id && built.metadata) {
+    // Cancel + next-order affordance: if the launcher passed a subscription_id
+    // on the session, pre-select it so the picker step is auto-completed
+    // (single-sub customers never see it).
+    if ((isCancel || isNextOrder) && session.subscription_id && built.metadata) {
       (built.metadata as Record<string, unknown>).selectedSubscriptionId = session.subscription_id;
     }
 
@@ -90,7 +95,22 @@ export async function GET(
       liveRendered: true,
       journeyType: triggerIntent,
       ...(isCancel ? { cancelJourney: true } : {}),
+      ...(isNextOrder ? { nextOrderJourney: true } : {}),
     };
+  }
+
+  // Lifecycle event: record the first open of a next-order journey so the
+  // experiment harness + results dashboard have an engagement stream keyed
+  // by the journey_sessions row (verify-before-report + lifecycle events).
+  if (isNextOrder && session.status === "pending") {
+    await admin.from("journey_step_events").insert({
+      session_id: session.id,
+      workspace_id: session.workspace_id,
+      step_index: session.current_step || 0,
+      step_key: "lifecycle",
+      response_value: "opened",
+      response_label: "Opened next-order journey",
+    });
   }
 
   // Merge workspace branding into config if not already present

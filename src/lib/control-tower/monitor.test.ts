@@ -1645,20 +1645,33 @@ interface FakeDunningRow {
   workspace_id: string;
   status: string;
 }
+interface FakeCustomerEventRow {
+  workspace_id: string;
+  event_type: string;
+  created_at: string;
+  properties: { subscription_id?: string | null } | null;
+}
 
 /**
- * Tiny fake admin that models only the two calls `countRenewalIntegrityOverdueSubs` makes:
+ * Tiny fake admin that models the calls `countRenewalIntegrityOverdueSubs` makes:
  *   1) `.from("subscriptions").select("id").eq("is_internal", true).eq("status","active")
  *       .lt("next_billing_date", cutoff).neq("workspace_id", sandbox)` → rows
  *   2) `.from("dunning_cycles").select("subscription_id").in("status", [...])
  *       .in("subscription_id", overdueIds).neq("workspace_id", sandbox)` → rows
+ *   3) `.from("customer_events").select("properties").in("event_type", [...])
+ *       .gte("created_at", windowStart).neq("workspace_id", sandbox)` → rows (designed-hold exclusion)
  * Enough to cover the helper's contract without pulling in the full monitor mock.
  */
 function fakeRenewalIntegrityAdmin(seed: {
   subscriptions: FakeSubscriptionRow[];
   dunning_cycles: FakeDunningRow[];
+  customer_events?: FakeCustomerEventRow[];
 }): ReturnType<typeof createAdminClient> {
-  const state = { subscriptions: [...seed.subscriptions], dunning_cycles: [...seed.dunning_cycles] };
+  const state = {
+    subscriptions: [...seed.subscriptions],
+    dunning_cycles: [...seed.dunning_cycles],
+    customer_events: [...(seed.customer_events ?? [])],
+  };
 
   const build = (table: keyof typeof state) => {
     let filtered: Array<Record<string, unknown>> = state[table].map((r) => ({ ...r }));
@@ -1670,6 +1683,10 @@ function fakeRenewalIntegrityAdmin(seed: {
       },
       lt: (col: string, val: unknown) => {
         filtered = filtered.filter((r) => (r[col] as string) < (val as string));
+        return chain;
+      },
+      gte: (col: string, val: unknown) => {
+        filtered = filtered.filter((r) => (r[col] as string) >= (val as string));
         return chain;
       },
       neq: (col: string, val: unknown) => {
@@ -1848,6 +1865,118 @@ test("countRenewalIntegrityOverdueSubs: grace is off when no renewal-cron beat i
   // Null beat ⇒ fail-safe: no grace, both overdue rows count. A missing beat can't hide a real miss.
   const n = await countRenewalIntegrityOverdueSubs(admin, CUTOFF_ISO, null);
   assert.equal(n, 2);
+});
+
+// ── Designed-hold exclusion tests
+// (control-tower-renewal-integrity-exclude-designed-holds P1) — an overdue internal sub the cron
+// DELIBERATELY held for a known, already-surfaced customer-action reason (no payment method, etc.)
+// is NOT a cron miss; a fresh renewal-hold customer_event subtracts it from the count.
+
+// A hold event emitted during the last cron run (at/after the beat) is "fresh".
+const FRESH_HOLD_ISO = "2026-07-13T09:00:05.000Z"; // 5s after LAST_CRON_BEAT_ISO
+// A hold event from before the last cron beat is stale — the cron has since re-evaluated the sub.
+const STALE_HOLD_ISO = "2026-07-13T06:00:00.000Z"; // before LAST_CRON_BEAT_ISO
+
+test("countRenewalIntegrityOverdueSubs: overdue no-payment-method sub with a fresh hold event is NOT counted (designed hold, not a cron miss)", async () => {
+  const admin = fakeRenewalIntegrityAdmin({
+    subscriptions: [
+      // Overdue + updated before the cron ran (so grace doesn't hide it), but the cron logged a
+      // no-payment-method hold during its run — a surfaced customer-action item, not a cron miss.
+      {
+        id: "sub-held-no-pm",
+        workspace_id: WS,
+        is_internal: true,
+        status: "active",
+        next_billing_date: OVERDUE_ISO,
+        updated_at: PRE_CRON_UPDATE_ISO,
+      },
+    ],
+    dunning_cycles: [],
+    customer_events: [
+      {
+        workspace_id: WS,
+        event_type: "subscription.renewal_blocked_no_payment_method",
+        created_at: FRESH_HOLD_ISO,
+        properties: { subscription_id: "sub-held-no-pm" },
+      },
+    ],
+  });
+  const n = await countRenewalIntegrityOverdueSubs(admin, CUTOFF_ISO, LAST_CRON_BEAT_ISO);
+  assert.equal(n, 0);
+});
+
+test("countRenewalIntegrityOverdueSubs: overdue sub with NO hold event and no dunning still counts (real cron miss)", async () => {
+  const admin = fakeRenewalIntegrityAdmin({
+    subscriptions: [
+      {
+        id: "sub-naked-miss",
+        workspace_id: WS,
+        is_internal: true,
+        status: "active",
+        next_billing_date: OVERDUE_ISO,
+        updated_at: PRE_CRON_UPDATE_ISO,
+      },
+    ],
+    dunning_cycles: [],
+    // A hold event exists but for a DIFFERENT sub — it must not cover sub-naked-miss.
+    customer_events: [
+      {
+        workspace_id: WS,
+        event_type: "subscription.renewal_held_coupon_unavailable",
+        created_at: FRESH_HOLD_ISO,
+        properties: { subscription_id: "some-other-sub" },
+      },
+    ],
+  });
+  const n = await countRenewalIntegrityOverdueSubs(admin, CUTOFF_ISO, LAST_CRON_BEAT_ISO);
+  assert.equal(n, 1);
+});
+
+test("countRenewalIntegrityOverdueSubs: a STALE hold event (before the last cron beat) does NOT exclude — the cron has since re-evaluated the sub", async () => {
+  const admin = fakeRenewalIntegrityAdmin({
+    subscriptions: [
+      {
+        id: "sub-stale-hold",
+        workspace_id: WS,
+        is_internal: true,
+        status: "active",
+        next_billing_date: OVERDUE_ISO,
+        updated_at: PRE_CRON_UPDATE_ISO,
+      },
+    ],
+    dunning_cycles: [],
+    customer_events: [
+      {
+        workspace_id: WS,
+        event_type: "subscription.renewal_blocked_no_recipient_name",
+        created_at: STALE_HOLD_ISO,
+        properties: { subscription_id: "sub-stale-hold" },
+      },
+    ],
+  });
+  const n = await countRenewalIntegrityOverdueSubs(admin, CUTOFF_ISO, LAST_CRON_BEAT_ISO);
+  assert.equal(n, 1);
+});
+
+test("countRenewalIntegrityOverdueSubs: mix — a held overdue sub drops out while an unheld overdue sub still counts", async () => {
+  const admin = fakeRenewalIntegrityAdmin({
+    subscriptions: [
+      { id: "sub-held", workspace_id: WS, is_internal: true, status: "active", next_billing_date: OVERDUE_ISO, updated_at: PRE_CRON_UPDATE_ISO },
+      { id: "sub-missed", workspace_id: WS, is_internal: true, status: "active", next_billing_date: OVERDUE_ISO, updated_at: PRE_CRON_UPDATE_ISO },
+    ],
+    dunning_cycles: [],
+    customer_events: [
+      {
+        workspace_id: WS,
+        event_type: "subscription.renewal_held_overcharge_guard",
+        created_at: FRESH_HOLD_ISO,
+        properties: { subscription_id: "sub-held" },
+      },
+    ],
+  });
+  // Only sub-missed remains — sub-held is a designed hold, sub-missed is a real cron miss.
+  const n = await countRenewalIntegrityOverdueSubs(admin, CUTOFF_ISO, LAST_CRON_BEAT_ISO);
+  assert.equal(n, 1);
 });
 
 // ─── Box-emitted cron freshness suppression during worker outage

@@ -1,0 +1,1 @@
+- **Fix auto-issued return store credit failing to log (issued_by='system' not a uuid)** · verified 2026-11-17 · → [[../lifecycles/return-pipeline]]

@@ -61,7 +61,14 @@ function isEscalated(chain: Array<[string, ...unknown[]]>): boolean {
   return chain.some(([m, k, v]) => m === "eq" && k === "action_kind" && v === "escalated");
 }
 function isEscorted(chain: Array<[string, ...unknown[]]>): boolean {
-  return chain.some(([m, k, v]) => m === "eq" && k === "action_kind" && v === "escorted_init");
+  // The supersede re-confirm now matches both escort kinds via `.in('action_kind', [...])`.
+  return chain.some(
+    ([m, k, v]) =>
+      m === "in" &&
+      k === "action_kind" &&
+      Array.isArray(v) &&
+      (v as unknown[]).includes("escorted_init"),
+  );
 }
 
 test("(a) failed build + covering init_loop_guard escalation → OWNED (so it is dropped across sources)", async () => {
