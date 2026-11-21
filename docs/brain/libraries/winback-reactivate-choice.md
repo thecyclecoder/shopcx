@@ -29,3 +29,13 @@ the real result for the page to show.
 
 `reactivated`, `declined`, `reactivate_needs_payment_method`, `reactivate_needs_address`,
 `reactivate_failed`, `error_no_target_sub`.
+
+## Fraud / ban / chargeback gate (2026-11-21)
+
+`winbackBlockReason(admin, workspaceId, customerId)` → reason string or null. Blocks confirmed fraud,
+reseller flags, `banned` (any linked profile), active chargebacks (all via
+[[customer-fraud-status]] `getCustomerFraudStatus` + `shouldBlockOrchestrator`, the orchestrator's gate)
+plus `customers.portal_banned`. `handleReactivateChoice` checks it before any restart: a blocked
+click ends the session with outcome `blocked_fraud_gate`, writes an internal ticket note, restarts
+nothing, adds no gift. Win-back send scripts must call the same function so the audience filter and
+the click gate can't diverge (CEO: never send restart offers to banned, fraud or chargeback customers).
