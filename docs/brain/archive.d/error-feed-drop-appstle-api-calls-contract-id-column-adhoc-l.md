@@ -1,0 +1,1 @@
+- **Scope out Studio Table-Editor appstle_api_calls.contract_id missing-column noise** · verified 2026-11-21 · → [[../libraries/error-feed]]
