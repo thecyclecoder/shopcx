@@ -43,12 +43,33 @@ function emptyConfig(): BuiltJourneyConfig {
   return { codeDriven: true, multiStep: false, steps: [] };
 }
 
+/** Shipping-protection lines (SKU "Insure01", title "Shipping Protection") are add-ons, not products. */
+export function isProtectionLine(i: { sku?: unknown; title?: unknown }): boolean {
+  return /^insure/i.test(String(i.sku ?? "")) || /shipping protection/i.test(String(i.title ?? ""));
+}
+
+/** True when a sub carries at least one real product (not only protection / $0 lines). */
+export function hasRealItems(items: unknown): boolean {
+  const list = (items as { sku?: string; title?: string; price_cents?: number }[] | null) || [];
+  return list.some((i) => !isProtectionLine(i) && Number(i.price_cents ?? 1) !== 0);
+}
+
 /**
- * Resolve the subscription this win-back should restart: the customer's most recent CANCELLED sub
- * (that is who we are emailing), else a paused one. Read across the whole linked-account group —
- * a customer whose cancelled sub sits on a sibling profile would otherwise get an empty journey.
+ * Resolve the subscription this win-back should restart.
+ *
+ * 1. The session's own `subscription_id` (the sub the email/SMS was minted for) wins, as long as it
+ *    is still cancelled/paused and belongs to this customer's linked-account group. Without this the
+ *    page could name and restart a DIFFERENT sub than the email (Dylan's 11/21 test: email said
+ *    Creatine, page restarted a paused Shipping-Protection-only sub).
+ * 2. Otherwise: a paused sub with real items, else the most recently updated cancelled sub with real
+ *    items. A protection-only sub is never picked.
+ *
+ * Read across the whole linked-account group — a customer whose cancelled sub sits on a sibling
+ * profile would otherwise get an empty journey.
  */
-export async function resolveTargetSubscription(admin: Admin, workspaceId: string, customerId: string) {
+export async function resolveTargetSubscription(
+  admin: Admin, workspaceId: string, customerId: string, preferredSubscriptionId?: string | null,
+) {
   const { data: link } = await admin.from("customer_links")
     .select("group_id").eq("workspace_id", workspaceId).eq("customer_id", customerId).maybeSingle();
   let ids = [customerId];
@@ -62,8 +83,19 @@ export async function resolveTargetSubscription(admin: Admin, workspaceId: strin
     .eq("workspace_id", workspaceId).in("customer_id", ids)
     .in("status", ["cancelled", "paused"])
     .order("updated_at", { ascending: false });
-  const paused = (subs || []).find((s) => s.status === "paused");
-  return paused ?? (subs || [])[0] ?? null;
+  return pickTargetSubscription(subs || [], preferredSubscriptionId);
+}
+
+/** Pure selection rule behind `resolveTargetSubscription` (exported for tests). */
+export function pickTargetSubscription<T extends { id: string; status: string; items: unknown }>(
+  subs: T[], preferredSubscriptionId?: string | null,
+): T | null {
+  if (preferredSubscriptionId) {
+    const bound = subs.find((s) => s.id === preferredSubscriptionId);
+    if (bound) return bound;
+  }
+  const real = subs.filter((s) => hasRealItems(s.items));
+  return real.find((s) => s.status === "paused") ?? real[0] ?? null;
 }
 
 export interface WinbackGift { variant_id: string; label: string }
@@ -107,7 +139,7 @@ export function parseReactivateValue(value: string): { restart: boolean; giftVar
 /** Human-readable item summary, e.g. "Superfood Tabs — Mixed Berry ×2". */
 function describeItems(items: unknown): string {
   const list = (items as { title?: string; variant_title?: string; quantity?: number; sku?: string; price_cents?: number }[] | null) || [];
-  const real = list.filter((i) => !String(i.sku ?? "").startsWith("insure") && Number(i.price_cents ?? 1) !== 0);
+  const real = list.filter((i) => !isProtectionLine(i) && Number(i.price_cents ?? 1) !== 0);
   if (!real.length) return "your subscription";
   return real
     .map((i) => `${i.title ?? i.sku ?? "item"}${i.variant_title ? ` — ${i.variant_title}` : ""}${(i.quantity ?? 1) > 1 ? ` ×${i.quantity}` : ""}`)
@@ -116,8 +148,9 @@ function describeItems(items: unknown): string {
 
 export async function buildReactivateSteps(
   admin: Admin, workspaceId: string, customerId: string, ticketId: string,
+  subscriptionId?: string | null,
 ): Promise<BuiltJourneyConfig> {
-  const sub = await resolveTargetSubscription(admin, workspaceId, customerId);
+  const sub = await resolveTargetSubscription(admin, workspaceId, customerId, subscriptionId);
   if (!sub) return emptyConfig();
 
   const what = describeItems(sub.items);

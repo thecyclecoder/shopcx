@@ -28,3 +28,28 @@ test("restart + gift round-trips the variant id", () => {
 test("not_now is not a restart", () => {
   assert.deepEqual(parseReactivateValue("not_now"), { restart: false, giftVariantId: null });
 });
+
+import { pickTargetSubscription, isProtectionLine, hasRealItems } from "./reactivate-journey-builder";
+
+const protectionOnly = { id: "sp", status: "paused", items: [{ sku: "Insure01", title: "Shipping Protection", price_cents: 395 }] };
+const creatine = { id: "cr", status: "cancelled", items: [{ sku: "CRE-BC", title: "Creatine Prime+", price_cents: 4995 }, { sku: "Insure01", title: "Shipping Protection", price_cents: 395 }] };
+const coffee = { id: "co", status: "cancelled", items: [{ sku: "KC-COCOA", title: "Amazing Coffee K-Cups", price_cents: 3995 }] };
+
+test("protection line detected case-insensitively by SKU or title", () => {
+  assert.equal(isProtectionLine({ sku: "Insure01" }), true);
+  assert.equal(isProtectionLine({ sku: "insure02" }), true);
+  assert.equal(isProtectionLine({ sku: "X", title: "Shipping Protection" }), true);
+  assert.equal(isProtectionLine({ sku: "CRE-BC", title: "Creatine Prime+" }), false);
+  assert.equal(hasRealItems(protectionOnly.items), false);
+  assert.equal(hasRealItems(creatine.items), true);
+});
+test("session-bound sub wins over a paused sub (the 11/21 test case)", () => {
+  assert.equal(pickTargetSubscription([protectionOnly, coffee, creatine], "cr")?.id, "cr");
+});
+test("bound id not in the customer's cancelled/paused set falls back", () => {
+  assert.equal(pickTargetSubscription([coffee, creatine], "someone-else")?.id, "co");
+});
+test("fallback never picks a protection-only sub", () => {
+  assert.equal(pickTargetSubscription([protectionOnly, coffee])?.id, "co");
+  assert.equal(pickTargetSubscription([protectionOnly]), null);
+});

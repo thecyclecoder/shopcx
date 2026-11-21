@@ -36,6 +36,8 @@ export async function buildJourneySteps(
   journeyType: string,
   customerId: string,
   ticketId: string,
+  /** The session's bound subscription (journey_sessions.subscription_id), when the mint set one. */
+  subscriptionId?: string | null,
 ): Promise<BuiltJourneyConfig> {
   const admin = createAdminClient();
 
@@ -74,7 +76,7 @@ export async function buildJourneySteps(
     case "reactivate":
     case "reactivate_subscription": {
       const { buildReactivateSteps } = await import("@/lib/reactivate-journey-builder");
-      return buildReactivateSteps(admin, workspaceId, customerId, ticketId);
+      return buildReactivateSteps(admin, workspaceId, customerId, ticketId, subscriptionId);
     }
     case "crisis_tier1": {
       const { buildCrisisTier1Steps } = await import("@/lib/crisis-journey-builder");

@@ -28,6 +28,8 @@ export function winbackChoiceFrom(
 
 export type ReactivateChoiceSession = {
   id: string; workspace_id: string; ticket_id: string | null; customer_id: string | null;
+  /** The sub the win-back link was minted for. When set, it is the one restarted. */
+  subscription_id?: string | null;
 };
 
 export async function handleReactivateChoice(
@@ -68,7 +70,7 @@ export async function handleReactivateChoice(
   }
 
   const { resolveTargetSubscription } = await import("@/lib/reactivate-journey-builder");
-  const sub = await resolveTargetSubscription(admin, session.workspace_id, session.customer_id);
+  const sub = await resolveTargetSubscription(admin, session.workspace_id, session.customer_id, session.subscription_id);
   if (!sub?.shopify_contract_id) {
     await finish("error_no_target_sub", null);
     await note("[Win-back] ⚠ Restart clicked but no cancelled or paused subscription was found. Nothing restarted — needs manual follow-up.");
