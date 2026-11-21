@@ -117,7 +117,7 @@ export async function loadWinbackGifts(admin: Admin, workspaceId: string): Promi
     .maybeSingle();
   const cfg = (data?.config as Record<string, unknown> | null) || {};
   // A limited-time gift offer stops on its stated deadline (config.winback_gifts_ends_at, ISO).
-  // The email says "ends Nov 30", so the page must actually stop offering the gift then.
+  // The email says "ends Dec 31", so the page must actually stop offering the gift then.
   if (!winbackGiftsLive(cfg.winback_gifts_ends_at)) return [];
   const raw = (cfg.winback_gifts as unknown[]) || [];
   return raw
