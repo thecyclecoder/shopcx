@@ -68,3 +68,9 @@ const { count } = await admin.from("journey_definitions")
 
 The `reactivate-subscription` row carries `config.winback_gifts` = `[{ variant_id (product_variants uuid), label }]`,
 read by [[../libraries/reactivate-journey-builder]] `loadWinbackGifts` (migration `20270121120000_winback_gift_options.sql`).
+
+- **`config.winback_gifts_ends_at`** (ISO timestamp, optional): deadline for the win-back free-bag offer. After it,
+  `loadWinbackGifts` returns `[]` and the restart page falls back to a plain restart. Set to
+  2026-12-01T07:59:59Z (Nov 30 11:59 PM Pacific) by migration `20270121130000` for the limited-time
+  promo, so the email's "ends Nov 30" is true (CEO 2026-11-21).
+
