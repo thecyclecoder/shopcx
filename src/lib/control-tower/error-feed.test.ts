@@ -187,6 +187,7 @@ import {
   isForeignSupabasePostgresJsonbIlikeOnErrorEventsSampleAdhocNoise,
   isForeignSupabasePostgresMissingErrorEventsMetadataAdhocNoise,
   isForeignSupabasePostgresMissingCustomerEventsColumnAdhocNoise,
+  isForeignSupabasePostgresInvalidTimestampCustomerEventsAdhocNoise,
   isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise,
   isForeignSupabasePostgresMissingErrorEventsCoalesceSearchNoise,
   isForeignSupabasePostgresMissingErrorEventsUnqualifiedColumnAdhocNoise,
@@ -5734,6 +5735,161 @@ test("isForeignSupabasePostgresMissingCustomerEventsColumnAdhocNoise returns fal
     isForeignSupabasePostgresMissingCustomerEventsColumnAdhocNoise(
       "column customer_events.metadata does not exist",
       null,
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresInvalidTimestampCustomerEventsAdhocNoise ──
+// The twin of the missing-column drop for a different failure class: an ad hoc
+// `select ... from public.customer_events` lookup whose `timestamp with time zone` literal
+// carried a `+HH:MM` UTC offset that URL-decoded to ` HH:MM` (the `+` degraded to a space),
+// so Postgres rejects it with `invalid input syntax for type timestamp with time zone:
+// "<value>"`. ShopCX's own code never issues this read and every timestamp literal it builds
+// is offset-correct, so the parse rejection is repair work for a foreign query we don't own.
+// Drop AT CAPTURE only when BOTH the `+`→space degraded value shape AND the SELECT-lookup
+// shape (bare or PostgREST CTE wrapper) are present; a malformed-timestamp error on another
+// table, or via a non-SELECT statement (real in-code timestamp bug), still pages.
+
+test("isForeignSupabasePostgresInvalidTimestampCustomerEventsAdhocNoise drops the ad hoc SELECT lookup on the +→space degraded timestamp shape", () => {
+  assert.equal(
+    isForeignSupabasePostgresInvalidTimestampCustomerEventsAdhocNoise(
+      'invalid input syntax for type timestamp with time zone: "2026-11-21T10:30:00 05:30"',
+      "select * from public.customer_events where created_at > '2026-11-21T10:30:00 05:30'",
+    ),
+    true,
+  );
+  // Bare / unqualified `from customer_events` (no `public.` prefix) is the same shape.
+  assert.equal(
+    isForeignSupabasePostgresInvalidTimestampCustomerEventsAdhocNoise(
+      'invalid input syntax for type timestamp with time zone: "2026-01-02T00:00:00 00:00"',
+      "select event_type, created_at from customer_events where created_at >= '2026-01-02T00:00:00 00:00'",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the shape check.
+  assert.equal(
+    isForeignSupabasePostgresInvalidTimestampCustomerEventsAdhocNoise(
+      'ERROR: invalid input syntax for type timestamp with time zone: "2026-11-21T10:30:00 05:30"',
+      "select metadata from public.customer_events",
+    ),
+    true,
+  );
+  // Lowercase `t` datetime separator (what Postgres normalizes to in the log) still drops.
+  assert.equal(
+    isForeignSupabasePostgresInvalidTimestampCustomerEventsAdhocNoise(
+      'invalid input syntax for type timestamp with time zone: "2026-11-21t10:30:00 05:30"',
+      "select id from public.customer_events",
+    ),
+    true,
+  );
+  // Leading / trailing whitespace on message and query is tolerated.
+  assert.equal(
+    isForeignSupabasePostgresInvalidTimestampCustomerEventsAdhocNoise(
+      '  invalid input syntax for type timestamp with time zone: "2026-11-21T10:30:00 05:30"  ',
+      "   select * from public.customer_events   ",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresInvalidTimestampCustomerEventsAdhocNoise drops the PostgREST CTE wrapper form (same external callers)", () => {
+  assert.equal(
+    isForeignSupabasePostgresInvalidTimestampCustomerEventsAdhocNoise(
+      'invalid input syntax for type timestamp with time zone: "2026-11-21T10:30:00 05:30"',
+      'with pgrst_source as ( select "customer_events"."event_type", "customer_events"."created_at" from "public"."customer_events" ) select * from pgrst_source',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresInvalidTimestampCustomerEventsAdhocNoise(
+      'ERROR: invalid input syntax for type timestamp with time zone: "2026-11-21T10:30:00 05:30"',
+      'WITH pgrst_source AS ( SELECT "customer_events"."metadata" FROM "public"."customer_events" LIMIT 1 ) SELECT * FROM pgrst_source',
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresInvalidTimestampCustomerEventsAdhocNoise KEEPS a non-SELECT statement shape (a real in-code timestamp bug writing customer_events still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresInvalidTimestampCustomerEventsAdhocNoise(
+      'invalid input syntax for type timestamp with time zone: "2026-11-21T10:30:00 05:30"',
+      "insert into public.customer_events (id, created_at) values ($1, '2026-11-21T10:30:00 05:30')",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresInvalidTimestampCustomerEventsAdhocNoise(
+      'invalid input syntax for type timestamp with time zone: "2026-11-21T10:30:00 05:30"',
+      "update public.customer_events set created_at = '2026-11-21T10:30:00 05:30' where id = $1",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresInvalidTimestampCustomerEventsAdhocNoise KEEPS a malformed-timestamp error on OTHER tables (a real code bug on another table still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresInvalidTimestampCustomerEventsAdhocNoise(
+      'invalid input syntax for type timestamp with time zone: "2026-11-21T10:30:00 05:30"',
+      "select * from public.error_events where created_at > '2026-11-21T10:30:00 05:30'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresInvalidTimestampCustomerEventsAdhocNoise(
+      'invalid input syntax for type timestamp with time zone: "2026-11-21T10:30:00 05:30"',
+      "select * from public.orders where created_at > '2026-11-21T10:30:00 05:30'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresInvalidTimestampCustomerEventsAdhocNoise KEEPS a non-degraded / genuinely-malformed timestamp value (a real in-code timestamp bug still pages)", () => {
+  // A valid offset-correct literal that still failed for some OTHER reason is not the
+  // `+`→space degradation — the pin is exact, so it stays captured.
+  assert.equal(
+    isForeignSupabasePostgresInvalidTimestampCustomerEventsAdhocNoise(
+      'invalid input syntax for type timestamp with time zone: "2026-11-21T10:30:00+05:30"',
+      "select * from public.customer_events",
+    ),
+    false,
+  );
+  // No offset at all — real malformed timestamp our own code might emit, still pages.
+  assert.equal(
+    isForeignSupabasePostgresInvalidTimestampCustomerEventsAdhocNoise(
+      'invalid input syntax for type timestamp with time zone: "2026-11-21T10:30:00"',
+      "select * from public.customer_events",
+    ),
+    false,
+  );
+  // Garbage text value — not the degraded shape.
+  assert.equal(
+    isForeignSupabasePostgresInvalidTimestampCustomerEventsAdhocNoise(
+      'invalid input syntax for type timestamp with time zone: "not-a-timestamp"',
+      "select * from public.customer_events",
+    ),
+    false,
+  );
+  // A different Postgres error (FATAL / relation-missing) on this table is untouched.
+  assert.equal(
+    isForeignSupabasePostgresInvalidTimestampCustomerEventsAdhocNoise(
+      'relation "public.customer_events" does not exist',
+      "select * from public.customer_events",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresInvalidTimestampCustomerEventsAdhocNoise returns false on empty / nullish input", () => {
+  assert.equal(isForeignSupabasePostgresInvalidTimestampCustomerEventsAdhocNoise(null, null), false);
+  assert.equal(isForeignSupabasePostgresInvalidTimestampCustomerEventsAdhocNoise(undefined, undefined), false);
+  assert.equal(isForeignSupabasePostgresInvalidTimestampCustomerEventsAdhocNoise("", ""), false);
+  // Empty query — even with the exact message we cannot confirm the shape, so the row stays
+  // captured.
+  assert.equal(
+    isForeignSupabasePostgresInvalidTimestampCustomerEventsAdhocNoise(
+      'invalid input syntax for type timestamp with time zone: "2026-11-21T10:30:00 05:30"',
+      "",
     ),
     false,
   );

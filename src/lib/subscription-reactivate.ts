@@ -9,16 +9,18 @@
  * nothing restarted. Rule (CEO 2026-11-16): cancels, saves and account management exist on two
  * surfaces and must stay in sync — so both surfaces now call this function.
  *
- * Behaviour (lifted unchanged from the portal handler):
- *   1. Never-migrated Appstle sub → revived ON SHOPCX from our mirror via `ensureShopcxEngine`
- *      (born ACTIVE on the chosen date, customer's own price). Typed refusals
+ * Behaviour:
+ *   1. `ensureShopcxEngine` is the ONLY engine resolution here — a never-migrated Appstle sub
+ *      (appstle_retired switch on) is revived ON SHOPCX from our mirror (born ACTIVE on the chosen
+ *      date, customer's own price); every other engine is a pass-through. Typed refusals
  *      `needs_payment_method` / `needs_address` are returned, not thrown.
- *   2. ShopCX contract → next billing date set on the contract through the commerce SDK.
- *   3. Legacy Appstle path (only while the appstle_retired switch is off) → Appstle date API.
- *   4. Resume through `subscriptionAction` (internal-aware), then the local row is stamped active.
+ *   2. Unless it was just rebuilt on ShopCX, the restart date is set through the commerce SDK
+ *      (`subscriptionUpdateNextBillingDate`), which branches internal | shopcx | appstle and
+ *      dispatches to the right writer / vendor wrapper — reactivate never hand-rolls the vendor
+ *      call nor resolves `billing_source` itself (check-vendor-dispatch-in-sdk).
+ *   3. Resume through `subscriptionAction` (internal-aware), then the local row is stamped active.
  */
 import { subscriptionAction } from "@/lib/commerce/subscription";
-import { decrypt } from "@/lib/crypto";
 import { createAdminClient } from "@/lib/supabase/admin";
 
 export type ReactivateFailureReason = "needs_payment_method" | "needs_address" | "appstle_not_configured" | "error";
@@ -42,43 +44,37 @@ export async function reactivateSubscription(
   let revivedOnShopcx = false;
 
   try {
-    const { resolveBillingSource } = await import("@/lib/internal-subscription");
-    let engine = await resolveBillingSource(workspaceId, contractId);
-
-    if (engine === "appstle") {
-      const { ensureShopcxEngine, ensureFailureText } = await import("@/lib/commerce/shopcx-revive");
-      const ens = await ensureShopcxEngine(workspaceId, contractId, "resume", { nextBillingDate });
-      if (!ens.ok) {
-        if (ens.reason === "needs_payment_method" || ens.reason === "needs_address") {
-          return { ok: false, reason: ens.reason, message: ens.error };
-        }
-        return { ok: false, reason: "error", message: ensureFailureText(ens) };
+    // ensureShopcxEngine is the appstle_retired chokepoint and the ONLY engine resolution this
+    // flow does — reactivate never resolves billing_source itself (check-vendor-dispatch-in-sdk):
+    // engine dispatch stays inside the commerce SDK chokepoints. For a never-migrated Appstle sub
+    // (switch on) it rebuilds the subscription ON ShopCX, born active on the chosen date, and
+    // surfaces needs_payment_method / needs_address refusals; for every other engine (a ShopCX
+    // contract, an internal sub, or an Appstle sub while the switch is off) it is a pass-through
+    // no-op that returns the live contract id unchanged.
+    const { ensureShopcxEngine, ensureFailureText } = await import("@/lib/commerce/shopcx-revive");
+    const ens = await ensureShopcxEngine(workspaceId, contractId, "resume", { nextBillingDate });
+    if (!ens.ok) {
+      if (ens.reason === "needs_payment_method" || ens.reason === "needs_address") {
+        return { ok: false, reason: ens.reason, message: ens.error };
       }
-      if (ens.engine === "shopcx") {
-        contractId = ens.contractId;
-        engine = "shopcx";
-        revivedOnShopcx = ens.built;
-      }
+      return { ok: false, reason: "error", message: ensureFailureText(ens) };
     }
+    contractId = ens.contractId;
+    revivedOnShopcx = ens.built;
 
-    if (engine === "shopcx" && !revivedOnShopcx) {
+    if (!revivedOnShopcx) {
+      // Not freshly rebuilt on ShopCX (a fresh build is already born on the chosen date) → set the
+      // restart date through the commerce SDK, which branches internal | shopcx | appstle and
+      // dispatches to the right internal writer / Shopify / Appstle vendor wrapper. Never hand-roll
+      // the Appstle vendor PUT (check-no-direct-appstle-mutations).
       const { subscriptionUpdateNextBillingDate } = await import("@/lib/commerce/subscription");
       const d = await subscriptionUpdateNextBillingDate(workspaceId, contractId, nextBillingDate);
-      if (!d.success) return { ok: false, reason: "error", message: d.error || "Could not set next billing date" };
-    }
-
-    if (engine === "appstle") {
-      const { healOnTouch } = await import("@/lib/appstle-pricing");
-      await healOnTouch(workspaceId, contractId);
-      const admin = createAdminClient();
-      const { data: ws } = await admin.from("workspaces").select("appstle_api_key_encrypted").eq("id", workspaceId).single();
-      if (!ws?.appstle_api_key_encrypted) return { ok: false, reason: "appstle_not_configured", message: "Appstle not configured" };
-      const apiKey = decrypt(ws.appstle_api_key_encrypted);
-      const { portalFetch } = await import("@/lib/portal/helpers");
-      await portalFetch(
-        `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-update-billing-date?contractId=${contractId}&rescheduleFutureOrder=true&nextBillingDate=${encodeURIComponent(nextBillingDate)}`,
-        { method: "PUT", headers: { "X-API-Key": apiKey }, cache: "no-store" },
-      );
+      if (!d.success) {
+        if (/not configured/i.test(d.error || "")) {
+          return { ok: false, reason: "appstle_not_configured", message: "Appstle not configured" };
+        }
+        return { ok: false, reason: "error", message: d.error || "Could not set next billing date" };
+      }
     }
 
     if (revivedOnShopcx) {
