@@ -1115,6 +1115,7 @@ function CodeDrivenJourney({
     }
 
     // Last step or single-step — submit everything
+    let serverMessage: string | null = null;
     if (isMultiStep) {
       await fetch(`/api/journey/${token}/complete`, {
         method: "POST",
@@ -1122,7 +1123,7 @@ function CodeDrivenJourney({
         body: JSON.stringify({ outcome: "completed", responses: stepResponses }),
       });
     } else {
-      await fetch(`/api/journey/${token}/step`, {
+      const stepRes = await fetch(`/api/journey/${token}/step`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1132,14 +1133,20 @@ function CodeDrivenJourney({
           codeDriven: true,
         }),
       });
+      // A step that ACTS on the spot (e.g. the win-back restart) returns the real result —
+      // show it instead of the generic "we'll email you" line.
+      try {
+        const data = await stepRes.json() as { message?: string };
+        if (data?.message) serverMessage = data.message;
+      } catch { /* non-JSON — fall back to the generic line */ }
     }
 
     setSubmitted(true);
     setSubmitting(false);
     setTimeout(() => {
-      onComplete(isMultiStep
+      onComplete(serverMessage || (isMultiStep
         ? "You're all set! Check your email for next steps."
-        : "Thanks! We'll send you an email shortly with the next step.");
+        : "Thanks! We'll send you an email shortly with the next step."));
     }, 1000);
   };
 

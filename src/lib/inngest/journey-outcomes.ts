@@ -77,16 +77,11 @@ export const journeySessionCompleted = inngest.createFunction(
             if (subData.status === "active") {
               console.log(`[journey-outcomes] reactivate: ${subData.shopify_contract_id} already active — no-op`);
             } else {
-              const { subscriptionAction } = await import("@/lib/commerce/subscription");
-              const r = await subscriptionAction(
-                workspace_id,
-                subData.shopify_contract_id,
-                "resume",
-                undefined,
-                "Customer via win-back reactivation journey",
-              );
-              if (!r.success) {
-                console.error(`[journey-outcomes] reactivate FAILED ${subData.shopify_contract_id}: ${r.error}`);
+              // Same reactivation path as the portal + the win-back step route.
+              const { reactivateSubscription } = await import("@/lib/subscription-reactivate");
+              const r = await reactivateSubscription(workspace_id, subData.shopify_contract_id);
+              if (!r.ok) {
+                console.error(`[journey-outcomes] reactivate FAILED ${subData.shopify_contract_id}: ${r.reason} ${r.message}`);
               }
             }
           }
