@@ -71,6 +71,6 @@ read by [[../libraries/reactivate-journey-builder]] `loadWinbackGifts` (migratio
 
 - **`config.winback_gifts_ends_at`** (ISO timestamp, optional): deadline for the win-back free-bag offer. After it,
   `loadWinbackGifts` returns `[]` and the restart page falls back to a plain restart. Set to
-  2027-01-01T07:59:59Z (Nov 30 11:59 PM Pacific) by migration `20270121130000` for the limited-time
+  2027-01-01T07:59:59Z (Dec 31 11:59 PM Pacific) by migration `20270121130000` for the limited-time
   promo, so the email's "ends Dec 31" is true (CEO 2026-11-21).
 
