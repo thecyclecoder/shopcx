@@ -66,6 +66,44 @@ export async function resolveTargetSubscription(admin: Admin, workspaceId: strin
   return paused ?? (subs || [])[0] ?? null;
 }
 
+export interface WinbackGift { variant_id: string; label: string }
+
+/**
+ * Free-gift options for the restart, DB-driven: `journey_definitions.config.winback_gifts` on the
+ * workspace's win-back journey (seeded by migration 20270121120000). Each entry is a
+ * product_variants UUID + the label the customer sees. Empty/absent → no gift, plain restart.
+ * The click handler re-reads this list and only honours a variant that is on it.
+ */
+export async function loadWinbackGifts(admin: Admin, workspaceId: string): Promise<WinbackGift[]> {
+  const { data } = await admin.from("journey_definitions")
+    .select("config")
+    .eq("workspace_id", workspaceId)
+    .in("trigger_intent", ["reactivate_subscription", "reactivate", "win_back"])
+    .eq("is_active", true)
+    .order("priority", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  const raw = ((data?.config as Record<string, unknown> | null)?.winback_gifts as unknown[]) || [];
+  return raw
+    .map((g) => g as Partial<WinbackGift>)
+    .filter((g): g is WinbackGift => typeof g.variant_id === "string" && typeof g.label === "string" && !!g.variant_id && !!g.label);
+}
+
+/** Option value for "restart + this gift". Parsed back by `parseReactivateValue`. */
+export function giftOptionValue(variantId: string): string {
+  return `reactivate:${variantId}`;
+}
+
+/** `reactivate` → plain restart; `reactivate:<variant uuid>` → restart + that gift; else not a restart. */
+export function parseReactivateValue(value: string): { restart: boolean; giftVariantId: string | null } {
+  if (value === "reactivate") return { restart: true, giftVariantId: null };
+  if (value.startsWith("reactivate:")) {
+    const id = value.slice("reactivate:".length).trim();
+    return { restart: true, giftVariantId: id || null };
+  }
+  return { restart: false, giftVariantId: null };
+}
+
 /** Human-readable item summary, e.g. "Superfood Tabs — Mixed Berry ×2". */
 function describeItems(items: unknown): string {
   const list = (items as { title?: string; variant_title?: string; quantity?: number; sku?: string; price_cents?: number }[] | null) || [];
@@ -84,6 +122,16 @@ export async function buildReactivateSteps(
 
   const what = describeItems(sub.items);
   const wasPaused = sub.status === "paused";
+  const gifts = await loadWinbackGifts(admin, workspaceId);
+  const options = gifts.length
+    ? [
+        ...gifts.map((g) => ({ value: giftOptionValue(g.variant_id), label: `Restart + free ${g.label}` })),
+        { value: "not_now", label: "Not right now" },
+      ]
+    : [
+        { value: "reactivate", label: "Yes, restart my subscription" },
+        { value: "not_now", label: "Not right now" },
+      ];
 
   return {
     codeDriven: true,
@@ -94,11 +142,10 @@ export async function buildReactivateSteps(
       question: wasPaused
         ? `Ready to restart your subscription? We'll pick it right back up with ${what}.`
         : `Want your subscription back? We'll restart it with ${what}.`,
-      subtitle: "One click and you're set: same items, same price you had before. Your next order processes tomorrow.",
-      options: [
-        { value: "reactivate", label: "Yes, restart my subscription" },
-        { value: "not_now", label: "Not right now" },
-      ],
+      subtitle: gifts.length
+        ? "Pick your free bag and you're set: same items, same price you had before, and the gift ships free in your first order, which processes tomorrow."
+        : "One click and you're set: same items, same price you had before. Your next order processes tomorrow.",
+      options,
       isTerminal: true,
     }],
     metadata: {

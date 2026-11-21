@@ -54,7 +54,9 @@ export async function handleReactivateChoice(
     }).eq("id", session.id);
   };
 
-  if (choice !== "reactivate") {
+  const { parseReactivateValue, loadWinbackGifts } = await import("@/lib/reactivate-journey-builder");
+  const parsed = parseReactivateValue(choice);
+  if (!parsed.restart) {
     await finish("declined", null);
     await note("[Win-back] Customer chose \"Not right now\". No change made.");
     return { outcome: "declined", message: "No problem. Your subscription stays off, and you can restart it anytime." };
@@ -100,7 +102,33 @@ export async function handleReactivateChoice(
 
   await finish("reactivated", sub.id as string);
   const when = new Date(r.nextBillingDate).toLocaleDateString("en-US", { month: "long", day: "numeric", timeZone: "UTC" });
-  await note(`[Win-back] Customer restarted their subscription (contract ${r.contractId}). Next order: ${when}.`);
+
+  // Free gift on the FIRST order only (one-time $0 line, never recurring). Only a variant on the
+  // DB-configured list is honoured — the option value comes from the client.
+  let giftLabel: string | null = null;
+  let giftError: string | null = null;
+  if (parsed.giftVariantId) {
+    const gifts = await loadWinbackGifts(admin, session.workspace_id);
+    const gift = gifts.find((g) => g.variant_id === parsed.giftVariantId);
+    if (!gift) {
+      giftError = "gift not on the configured list";
+    } else {
+      const { resolveShopifyVariantId } = await import("@/lib/product-variants");
+      const shopifyVariantId = await resolveShopifyVariantId(session.workspace_id, gift.variant_id);
+      if (!shopifyVariantId) {
+        giftError = "gift variant has no Shopify id";
+      } else {
+        const { subscriptionAddFreeProduct } = await import("@/lib/commerce/subscription");
+        const g = await subscriptionAddFreeProduct(session.workspace_id, r.contractId, shopifyVariantId, 1);
+        if (g.success) giftLabel = gift.label;
+        else giftError = g.error || "add free product failed";
+      }
+    }
+  }
+  await note(`[Win-back] Customer restarted their subscription (contract ${r.contractId}). Next order: ${when}.`
+    + (giftLabel ? ` Free gift added: ${giftLabel}.` : "")
+    + (giftError ? ` ⚠ Free gift NOT added (${giftError}) — add it manually.` : ""));
+  if (giftError) console.error(`[winback-reactivate] gift FAILED contract=${r.contractId} variant=${parsed.giftVariantId}: ${giftError}`);
   const { logCustomerEvent } = await import("@/lib/customer-events");
   await logCustomerEvent({
     workspaceId: session.workspace_id,
@@ -108,7 +136,14 @@ export async function handleReactivateChoice(
     eventType: "winback.reactivated",
     source: "journey",
     summary: "Customer restarted their subscription from the win-back journey",
-    properties: { session_id: session.id, subscription_id: sub.id, shopify_contract_id: r.contractId, next_billing_date: r.nextBillingDate, revived_on_shopcx: r.revivedOnShopcx },
+    properties: { session_id: session.id, subscription_id: sub.id, gift_variant_id: parsed.giftVariantId, gift_added: !!giftLabel, gift_error: giftError, shopify_contract_id: r.contractId, next_billing_date: r.nextBillingDate, revived_on_shopcx: r.revivedOnShopcx },
   });
-  return { outcome: "reactivated", message: `You're all set! Your subscription is back on, and your next order processes on ${when}.` };
+  return {
+    outcome: "reactivated",
+    message: giftLabel
+      ? `You're all set! Your subscription is back on, and your free ${giftLabel} ships with your next order on ${when}.`
+      : giftError
+        ? `You're all set! Your subscription is back on, and your next order processes on ${when}. We'll add your free gift to it.`
+        : `You're all set! Your subscription is back on, and your next order processes on ${when}.`,
+  };
 }
