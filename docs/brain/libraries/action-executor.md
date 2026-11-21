@@ -275,3 +275,5 @@ Pure validator wired into the `create_return` direct-action handler. Normalizes 
 ---
 
 [[../README]] · [[../../CLAUDE]]
+
+- **`change_next_date` logs `agent.date.changed` (2026-11-21).** Every successful date move writes a `customer_events` row (`event_type='agent.date.changed'`, `source='agent'`, `properties.shopify_contract_id` + `nextBillingDate` + `ticket_id`), mirroring the portal's `portal.date.changed`. The drift monitor ([[commerce__shopcx-drift-reconciler]] `CUSTOMER_SCHEDULING_EVENT_TYPES`) reads it so a hold the customer asked an agent for is not paged as unexplained lateness. A logging failure never fails the action.

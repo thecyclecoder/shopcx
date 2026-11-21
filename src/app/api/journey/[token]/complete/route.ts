@@ -35,6 +35,18 @@ export async function POST(
   const config = session.config_snapshot as Record<string, unknown> || {};
   const journeyType = config.journeyType as string || null;
 
+  // ── Win-back "restart my subscription" ──
+  // Runs the restart synchronously (same path as the portal) and returns the real result, so the
+  // customer is never told "updated" when nothing restarted. Completes the session itself.
+  {
+    const { winbackChoiceFrom, handleReactivateChoice } = await import("@/lib/winback-reactivate-choice");
+    const choice = winbackChoiceFrom(journeyType, responses);
+    if (choice) {
+      const result = await handleReactivateChoice(admin, session, choice, responses || {});
+      return NextResponse.json({ success: true, ...result });
+    }
+  }
+
   // In-journey cancel from the next-order editor routes through the SAME shared cancel
   // handler below (remedy-selector offers + remedy-actions executors) — not a second cancel
   // copy. The client flags cancel_flow because a next-order session's config_snapshot carries

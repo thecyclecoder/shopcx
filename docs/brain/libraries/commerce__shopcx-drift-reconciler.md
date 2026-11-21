@@ -66,7 +66,7 @@ anything materially later.
 
 Not every late sub is a defect, so each `LateSub` carries a reason flag, and the pure predicate
 **`isEscalatableLate(l)`** is the single source of truth for "should this PAGE anyone". It pages only
-when lateness is unexplained — `!inDunning && !inheritedFromAppstle && !internalAccount`. The cron
+when lateness is unexplained — `!inDunning && !inheritedFromAppstle && !internalAccount && !customerScheduled`. The cron
 ([[../inngest/shopcx-drift-reconcile]]) filters on that same logic before opening a
 `shopcx-subscription-health:late` repair job, and every suppressed category is still counted in the
 heartbeat for visibility.
@@ -76,6 +76,7 @@ heartbeat for visibility.
 | `inDunning` | an OPEN or terminal dunning cycle holds the date on purpose | `lateInDunning` |
 | `inheritedFromAppstle` | last charge predates migration — it arrived already behind | `lateInherited` |
 | `internalAccount` | the owning customer (or the sub) is an **internal test account** — the founder's manually-manipulated test harness, not a real customer money path | `lateInternal` |
+| `customerScheduled` | the customer chose the date: a `customer_events` row in `CUSTOMER_SCHEDULING_EVENT_TYPES` (portal date change, agent `change_next_date` → `agent.date.changed`, pause/resume/auto-resume, reactivation, Order Now, Appstle next-order-date-changed / paused) on this contract or its `migrated_from_contract_id` (`properties->>shopify_contract_id`) since the last charge | `lateCustomerScheduled` |
 
 **Internal-account exclusion (2026-10-14).** `findLateSubscriptions` selects `customer_id, is_internal`
 and resolves the owning [[../tables/customers]]`.is_internal` per candidate, setting
@@ -83,6 +84,13 @@ and resolves the owning [[../tables/customers]]`.is_internal` per candidate, set
 category still paging — two of the founder's test subs looked late beyond cadence and opened a repair
 job daily. They are now counted (`lateInternal`) but never escalated, mirroring the dunning/inherited
 suppressions.
+
+**Customer-scheduled exclusion (2026-11-21).** 30 subs read as unexplained-late and kept a
+`shopcx-subscription-health:late` repair job parked as needs-human for a month. 26 of the 30 were dates
+the customer chose (6 portal date changes, 7 Order Now, 7 pause/auto-resume, 4 reactivations).
+"Re-pin the date" would have overridden the customer, so those are now flagged `customerScheduled`,
+counted, and never paged. Order Now counts because it bills the upcoming cycle early, so the next
+date correctly sits one full cadence past that cycle.
 
 ## Related
 

@@ -22,10 +22,17 @@
  * Single terminal step, single choice. Restarting a subscription is not a decision that benefits
  * from a funnel — every extra screen is a place to lose them. The confirm IS the conversion.
  *
- * The chosen value is executed by [[../inngest/journey-outcomes]] on completion:
- *   reactivate   → subscriptionAction("resume") on a paused sub, or re-create from the cancelled
- *                  contract's original items when there is nothing to resume
+ * The chosen value is executed SYNCHRONOUSLY by [[winback-reactivate-choice]] (called from the
+ * journey /complete and /step routes), and the customer sees the real result on the page:
+ *   reactivate   → `reactivateSubscription` ([[subscription-reactivate]]), the same path as the
+ *                  portal's Reactivate button: resume a paused sub, or revive a cancelled one on
+ *                  ShopCX from our mirror at the customer's own price, first order tomorrow. A
+ *                  missing card/address is reported honestly + noted on the ticket for follow-up.
  *   not_now      → recorded, no mutation — an honest opt-out beats a dead link
+ *
+ * 2026-11-21 fix: before this, the page posted outcome "completed" but the outcome handler only
+ * acted on "reactivated" and keyed on a session.subscription_id the mint never set, so
+ * "Yes, restart" never restarted anything.
  */
 import type { createAdminClient } from "@/lib/supabase/admin";
 import type { BuiltJourneyConfig } from "@/lib/journey-step-builder";
@@ -41,7 +48,7 @@ function emptyConfig(): BuiltJourneyConfig {
  * (that is who we are emailing), else a paused one. Read across the whole linked-account group —
  * a customer whose cancelled sub sits on a sibling profile would otherwise get an empty journey.
  */
-async function resolveTargetSubscription(admin: Admin, workspaceId: string, customerId: string) {
+export async function resolveTargetSubscription(admin: Admin, workspaceId: string, customerId: string) {
   const { data: link } = await admin.from("customer_links")
     .select("group_id").eq("workspace_id", workspaceId).eq("customer_id", customerId).maybeSingle();
   let ids = [customerId];
@@ -87,7 +94,7 @@ export async function buildReactivateSteps(
       question: wasPaused
         ? `Ready to restart your subscription? We'll pick it right back up with ${what}.`
         : `Want your subscription back? We'll restart it with ${what}.`,
-      subtitle: "One click and you're set — same items, same price you had before. Nothing ships today; your next order follows your normal schedule.",
+      subtitle: "One click and you're set: same items, same price you had before. Your next order processes tomorrow.",
       options: [
         { value: "reactivate", label: "Yes, restart my subscription" },
         { value: "not_now", label: "Not right now" },

@@ -128,7 +128,7 @@ async function main() {
       rules: nextRules,
       customer_summary: nextCustomer,
       internal_summary: nextInternal,
-      updated_by: "spec:return-refund-includes-tax",
+      updated_by: null, // policies.updated_by is a uuid column; a "spec:<slug>" tag here 22P02-errors every run
     });
     console.log(`  ✓ wrote v${res.version}${res.versionBumped ? " (bumped)" : ""}`);
   }
