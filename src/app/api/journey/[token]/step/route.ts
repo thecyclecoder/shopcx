@@ -12,7 +12,7 @@ export async function POST(
 
   const { data: session } = await admin
     .from("journey_sessions")
-    .select("id, workspace_id, ticket_id, customer_id, current_step, responses, status, token_expires_at")
+    .select("id, workspace_id, ticket_id, customer_id, subscription_id, current_step, responses, status, token_expires_at")
     .eq("token", token)
     .single();
 
