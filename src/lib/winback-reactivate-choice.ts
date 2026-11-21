@@ -69,6 +69,15 @@ export async function handleReactivateChoice(
     return { outcome: "error", message: "We couldn't restart it automatically. Our team will reach out shortly to finish it for you." };
   }
 
+  // Never restart (or gift) a banned, fraud, reseller or chargeback customer, even if a link reached
+  // them (CEO 2026-11-21). Same gate the orchestrator uses, across linked profiles, plus portal_banned.
+  const blocked = await winbackBlockReason(admin, session.workspace_id, session.customer_id);
+  if (blocked) {
+    await finish("blocked_fraud_gate", null);
+    await note(`[Win-back] ⛔ Restart clicked but blocked: ${blocked}. Nothing restarted, no gift added.`);
+    return { outcome: "blocked_fraud_gate", message: "We weren't able to restart this online. Please reach out to our support team and we'll help you from there." };
+  }
+
   const { resolveTargetSubscription } = await import("@/lib/reactivate-journey-builder");
   const sub = await resolveTargetSubscription(admin, session.workspace_id, session.customer_id, session.subscription_id);
   if (!sub?.shopify_contract_id) {
@@ -148,4 +157,22 @@ export async function handleReactivateChoice(
         ? `You're all set! Your subscription is back on, and your next order processes on ${when}. We'll add your free gift to it.`
         : `You're all set! Your subscription is back on, and your next order processes on ${when}.`,
   };
+}
+
+/**
+ * Why this customer must not get a win-back restart, or null when they may.
+ * Blocks: confirmed fraud, reseller flags, banned / portal_banned (any linked profile), active chargebacks.
+ * Shared with the win-back send scripts so the audience filter and the click gate cannot diverge.
+ */
+export async function winbackBlockReason(
+  admin: ReturnType<typeof createAdminClient>,
+  workspaceId: string,
+  customerId: string,
+): Promise<string | null> {
+  const { getCustomerFraudStatus, shouldBlockOrchestrator, describeBlockReason } = await import("@/lib/customer-fraud-status");
+  const s = await getCustomerFraudStatus(admin as never, workspaceId, customerId);
+  if (shouldBlockOrchestrator(s)) return describeBlockReason(s);
+  const { data: c } = await admin.from("customers").select("portal_banned").eq("id", customerId).maybeSingle();
+  if (c?.portal_banned) return "customer is portal-banned";
+  return null;
 }
