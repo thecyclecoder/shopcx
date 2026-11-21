@@ -3809,6 +3809,44 @@ test("isForeignSupabasePostgresMissingAppstleApiCallsColumnAdhocNoise drops both
     ),
     true,
   );
+  // `contract_id` column-missing — the third confused-column variant for this same
+  // Studio/PostgREST read shape (Control Tower signature supabase-logs:18b93ce98123329f).
+  assert.equal(
+    isForeignSupabasePostgresMissingAppstleApiCallsColumnAdhocNoise(
+      "column appstle_api_calls.contract_id does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."appstle_api_calls"."id", "public"."appstle_api_calls"."contract_id" FROM "public"."appstle_api_calls" LIMIT $1 OFFSET $2 )',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAppstleApiCallsColumnAdhocNoise(
+      "column public.appstle_api_calls.contract_id does not exist",
+      'with pgrst_source as ( select "public"."appstle_api_calls"."contract_id" from "public"."appstle_api_calls" limit 1 )',
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingAppstleApiCallsColumnAdhocNoise drops the contract_id confused-column under the CTE wrapper while a real column on the same table still pages", () => {
+  // The Studio Table-Editor click on a `contract_id` column that never existed on
+  // appstle_api_calls — dropped at capture time, no error_event, no page to Platform.
+  assert.equal(
+    isForeignSupabasePostgresMissingAppstleApiCallsColumnAdhocNoise(
+      "column appstle_api_calls.contract_id does not exist",
+      'WITH pgrst_source AS ( SELECT "contract_id" FROM "public"."appstle_api_calls" )',
+    ),
+    true,
+  );
+  // A different, REAL column on the same table (e.g. `appstle_contract_id`, which is a
+  // genuine column) failing is a real schema regression and must still page — the
+  // message pin is exact, so a non-allowlisted column name does not drop.
+  assert.equal(
+    isForeignSupabasePostgresMissingAppstleApiCallsColumnAdhocNoise(
+      "column appstle_api_calls.appstle_contract_id does not exist",
+      'WITH pgrst_source AS ( SELECT "appstle_contract_id" FROM "public"."appstle_api_calls" )',
+    ),
+    false,
+  );
 });
 
 test("isForeignSupabasePostgresMissingAppstleApiCallsColumnAdhocNoise KEEPS the same column-missing message when the FROM is a different table (a real schema regression on another table still pages)", () => {
