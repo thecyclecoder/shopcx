@@ -15,7 +15,10 @@ the real result for the page to show.
   target sub ([[reactivate-journey-builder]] `resolveTargetSubscription`), restarts it with
   [[subscription-reactivate]], completes the session (`outcome_action_taken: true`, `subscription_id`),
   writes a ticket note (if the session has a ticket) and a `winback.reactivated` /
-  `winback.reactivate_failed` customer event.
+  `winback.reactivate_failed` customer event. If the choice carries a gift, it is honoured ONLY when
+  the variant is on `loadWinbackGifts`, resolved to a Shopify id (`resolveShopifyVariantId`) and added
+  with `subscriptionAddFreeProduct` (one-time $0 line on the first order). A failed gift add never
+  undoes the restart: the ticket note flags it for manual add and the event records `gift_error`.
 
 ## Callers
 

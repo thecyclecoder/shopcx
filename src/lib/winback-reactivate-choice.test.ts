@@ -15,3 +15,16 @@ test("no choice → null", () => {
   assert.equal(winbackChoiceFrom("win_back", {}), null);
   assert.equal(winbackChoiceFrom(null, null), null);
 });
+
+import { parseReactivateValue, giftOptionValue } from "./reactivate-journey-builder";
+
+test("plain restart value", () => {
+  assert.deepEqual(parseReactivateValue("reactivate"), { restart: true, giftVariantId: null });
+});
+test("restart + gift round-trips the variant id", () => {
+  const v = "e3953a24-c060-41e7-9ca4-06a481df236b";
+  assert.deepEqual(parseReactivateValue(giftOptionValue(v)), { restart: true, giftVariantId: v });
+});
+test("not_now is not a restart", () => {
+  assert.deepEqual(parseReactivateValue("not_now"), { restart: false, giftVariantId: null });
+});
