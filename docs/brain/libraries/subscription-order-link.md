@@ -68,6 +68,26 @@ Deliberately conservative — **ambiguity is left unlinked rather than guessed**
 
 Ran 2026-08-24: **1,088 orders linked** (942 `sku_match`, 146 `sole_candidate`, 2 ambiguous correctly skipped). A re-run finds 0 — idempotent via the compare-and-set.
 
+## Renewal orders: which sibling sub renewed (2026-11-21)
+
+The Shopify order webhook ([[shopify-webhooks]]) links a RENEWAL order in this order:
+
+1. **Appstle metafield** `appstle_subscription.details` → contract id (Appstle-billed renewals).
+2. **Cycle-charge claim** — `pickSubscriptionByCycleClaim(claims, orderCreatedAt)`: the one sibling
+   sub with a [[../tables/subscription_cycle_charges]] claim within `RENEWAL_CLAIM_WINDOW_MS` (20 min)
+   of the order. This is how a ShopCX-billed renewal is identified; it holds even after the customer
+   edits the sub's items.
+3. **Ranked SKUs** — `chooseSubscriptionForRenewalOrder(orderLines, subs)`: most overlapping
+   non-Shipping-Protection SKUs, then most overlapping SKUs, then exact set; a tie stays unlinked.
+4. Sole active/paused sub.
+
+The old step 3 took the first sub sharing ANY SKU. Shipping Protection's SKU (`insure01`) is on most
+subs, so a two-sub customer's renewal could land on the wrong sibling (SC142618 on 2026-11-20,
+SC142137 on 2026-11-12). The sub that really renewed then read as a month late in the drift monitor
+([[commerce__shopcx-drift-reconciler]] `findLateSubscriptions`) and lost the order from its history.
+`scripts/_backfill-renewal-order-sub-links.ts` re-links the 56 such orders since 2026-09-01, moving a
+link only on cycle-claim evidence (Appstle renewals have no claims and are never touched).
+
 ## Gotchas
 
 - **Renewals were never broken.** Don't "fix" the `billing-success` path in `webhooks/appstle` — it links 1833/1833.
