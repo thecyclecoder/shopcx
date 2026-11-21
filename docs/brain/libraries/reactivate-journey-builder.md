@@ -8,7 +8,13 @@ The one-click win-back journey (journey slug `reactivate-subscription`, journey 
 ## Exports
 
 - `buildReactivateSteps(admin, workspaceId, customerId, ticketId)` → a single terminal
-  `single_choice` step `reactivate_choice` with options `reactivate` / `not_now`.
+  `single_choice` step `reactivate_choice`. With gifts configured: one option per gift
+  (`reactivate:<variant uuid>`, "Restart + free {label}") plus `not_now`; without: `reactivate` / `not_now`.
+- `loadWinbackGifts(admin, workspaceId)` → `{ variant_id, label }[]` from
+  `journey_definitions.config.winback_gifts` on the active win-back journey (DB-driven; seeded by
+  migration `20270121120000_winback_gift_options.sql`: Ashwavana Strawberry, Creatine Prime+ Piña
+  Colada, Cinnamon Roll Creamer — excess inventory, CEO 2026-11-21).
+- `giftOptionValue(variantId)` / `parseReactivateValue(value)` → `{ restart, giftVariantId }`.
 - `resolveTargetSubscription(admin, workspaceId, customerId)` → the customer's paused sub, else
   their most recently updated cancelled sub, across the linked-account group.
 

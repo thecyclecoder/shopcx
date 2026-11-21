@@ -63,3 +63,8 @@ const { count } = await admin.from("journey_definitions")
 ---
 
 [[../README]] · [[../../CLAUDE]] · [[../../DATABASE]]
+
+## Win-back gift options
+
+The `reactivate-subscription` row carries `config.winback_gifts` = `[{ variant_id (product_variants uuid), label }]`,
+read by [[../libraries/reactivate-journey-builder]] `loadWinbackGifts` (migration `20270121120000_winback_gift_options.sql`).
