@@ -51,13 +51,13 @@ for (const s of subs || []) {
 // Recent orders
 const { data: orders } = await admin
   .from("orders")
-  .select("id, shopify_order_id, order_number, financial_status, fulfillment_status, line_items, total_price_cents, created_at")
+  .select("id, shopify_order_id, order_number, financial_status, fulfillment_status, line_items, total_cents, created_at")
   .eq("customer_id", ticket.customer_id)
   .order("created_at", { ascending: false })
   .limit(3);
 console.log("\nRECENT ORDERS:");
 for (const o of orders || []) {
-  console.log(`  #${o.order_number} shopify=${o.shopify_order_id} financial=${o.financial_status} fulfillment=${o.fulfillment_status} total=$${(o.total_price_cents/100).toFixed(2)} created=${o.created_at}`);
+  console.log(`  #${o.order_number} shopify=${o.shopify_order_id} financial=${o.financial_status} fulfillment=${o.fulfillment_status} total=$${(o.total_cents/100).toFixed(2)} created=${o.created_at}`);
   for (const i of (o.line_items || [])) {
     console.log(`    - ${i.title || i.name} qty=${i.quantity}`);
   }

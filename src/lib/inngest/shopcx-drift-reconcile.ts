@@ -15,7 +15,7 @@ import { inngest } from "./client";
 import { enforceSwitch } from "@/lib/control-tower/enforce-switch";
 import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { reconcileShopcxDrift, findLateSubscriptions } from "@/lib/commerce/shopcx-drift-reconciler";
+import { reconcileShopcxDrift, findLateSubscriptions, isEscalatableLate } from "@/lib/commerce/shopcx-drift-reconciler";
 import { enqueueRepairJob } from "@/lib/repair-agent";
 
 const FN_ID = "shopcx-drift-reconcile-cron";
@@ -65,19 +65,20 @@ export const shopcxDriftReconcileCron = inngest.createFunction(
 
     // ⭐ The cadence check — what drift structurally cannot see.
     const late = await step.run("find-late-subscriptions", async () => {
-      const all: { contractId: string; extraDays: number; inDunning: boolean; inherited: boolean; internal: boolean }[] = [];
+      const all: { contractId: string; extraDays: number; inDunning: boolean; inherited: boolean; internal: boolean; customerScheduled: boolean; escalatable: boolean }[] = [];
       for (const workspaceId of workspaces) {
         for (const l of await findLateSubscriptions(workspaceId)) {
-          all.push({ contractId: l.contractId, extraDays: l.extraDays, inDunning: l.inDunning, inherited: l.inheritedFromAppstle, internal: l.internalAccount });
+          all.push({ contractId: l.contractId, extraDays: l.extraDays, inDunning: l.inDunning, inherited: l.inheritedFromAppstle, internal: l.internalAccount, customerScheduled: Boolean(l.customerScheduled), escalatable: isEscalatableLate(l) });
         }
       }
       return all;
     });
     // A sub held by an OPEN dunning cycle is late on purpose, one that arrived late was already
     // behind when we got it, and an internal test account is the founder's own harness, not a real
-    // money path. Only the remainder is something WE did to a real customer — and only that should
-    // page anyone, or the alert becomes noise and stops being read. Mirrors `isEscalatableLate`.
-    const lateUnexplained = late.filter((l) => !l.inDunning && !l.inherited && !l.internal);
+    // money path, and a date the customer chose (portal date change, pause/resume, reactivation,
+    // Order Now) is theirs. Only the remainder is something WE did to a real customer — and only that
+    // should page anyone, or the alert becomes noise and stops being read. Decided by `isEscalatableLate`.
+    const lateUnexplained = late.filter((l) => l.escalatable);
 
     // ⭐ ESCALATE. Every defect in this subsystem through 2026-09-30 was found because a HUMAN
     // asked "check on things" — the cron logged perfectly and nobody read the logs. A monitor that
@@ -103,7 +104,7 @@ export const shopcxDriftReconcileCron = inngest.createFunction(
       });
     }
 
-    console.log(`[shopcx-drift] checked=${checked} repaired=${repaired} drift=${JSON.stringify(drift)} late=${lateUnexplained.length} (+${late.length - lateUnexplained.length} held by dunning)`);
+    console.log(`[shopcx-drift] checked=${checked} repaired=${repaired} drift=${JSON.stringify(drift)} late=${lateUnexplained.length} (+${late.length - lateUnexplained.length} explained: dunning, inherited, internal or customer-scheduled)`);
 
     await step.run("beat", () =>
       emitCronHeartbeat(FN_ID, {
@@ -114,6 +115,7 @@ export const shopcxDriftReconcileCron = inngest.createFunction(
           lateInDunning: late.filter((l) => l.inDunning).length,
           lateInherited: late.filter((l) => l.inherited && !l.inDunning).length,
           lateInternal: late.filter((l) => l.internal).length,
+          lateCustomerScheduled: late.filter((l) => l.customerScheduled).length,
         },
       }),
     );

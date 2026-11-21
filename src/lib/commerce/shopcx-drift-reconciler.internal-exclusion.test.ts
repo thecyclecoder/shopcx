@@ -55,3 +55,8 @@ test("isEscalatableLate: internal exclusion holds even when all other flags are 
   assert.equal(isEscalatableLate(escalatable), true);
   assert.equal(isEscalatableLate(internal), false);
 });
+
+test("isEscalatableLate: a customer-scheduled date (portal change, pause, Order Now) is NOT escalatable", () => {
+  assert.equal(isEscalatableLate(lateSub({ customerScheduled: true })), false);
+  assert.equal(isEscalatableLate(lateSub({ customerScheduled: false })), true);
+});
