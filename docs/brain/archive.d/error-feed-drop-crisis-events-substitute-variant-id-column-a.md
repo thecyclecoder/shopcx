@@ -1,0 +1,1 @@
+- **Scope out foreign ad-hoc crisis_events.substitute_variant_id missing-column noise from the error feed** · verified 2026-11-20 · → [[../libraries/error-feed]]

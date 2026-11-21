@@ -40,6 +40,7 @@ import {
   isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise,
   isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise,
   isForeignSupabasePostgresMissingPlaybooksStepsDirectRestColumnNoise,
+  isForeignSupabasePostgresMissingSpecPhaseChecksDirectRestColumnNoise,
   isForeignSupabasePostgresMissingWorkerHeartbeatsCreatedAtAdhocNoise,
   isForeignSupabasePostgresMissingSpecsOverallStatusColumnAdhocNoise,
   isForeignSupabasePostgresMissingCouponsStatusColumnAdhocNoise,
@@ -64,6 +65,7 @@ import {
   isForeignSupabasePostgresSubscriptionsLinkedCustomerIdEdgeListNoise,
   isForeignSupabasePostgresMissingLoyaltyRedemptionsLineageColumnNoise,
   isForeignSupabasePostgresMissingCustomerPaymentMethodsCardTypeColumnNoise,
+  isForeignSupabasePostgresMissingCustomerPaymentMethodsLinkGroupIdColumnNoise,
   isForeignSupabasePostgresMissingDashboardNotificationsDismissedAtColumnNoise,
   isForeignSupabasePostgresMissingAgentJobsFinishedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingAgentJobsAttemptsColumnAdhocNoise,
@@ -215,6 +217,7 @@ import {
   isForeignSupabasePostgresMissingCrisisEventsProductTitleColumnNoise,
   isForeignSupabasePostgresMissingCrisisEventsResolvedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingCrisisEventsDefaultSubstituteVariantIdColumnAdhocNoise,
+  isForeignSupabasePostgresMissingCrisisEventsSubstituteVariantIdColumnAdhocNoise,
   isForeignSupabasePostgresMissingProductsIntelligenceColumnsAdhocNoise,
   isForeignSupabasePostgresMissingProductsPricingRuleIdLookupNoise,
   isForeignSupabasePostgresMissingPlaybooksTitleAdhocNoise,
@@ -419,6 +422,17 @@ const LOG_QUERIES: LogQuery[] = [
       // another table, a `playbooks` column rename, a non-SELECT write, or a
       // FATAL/PANIC/constraint violation still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingPlaybooksStepsDirectRestColumnNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: a foreign / stale direct-REST client SELECTed
+      // `check_type` / `config` / `status` from `spec_phase_checks` — columns that bespoke
+      // table has never owned in any migration. The resulting undefined_column ERROR is
+      // repair work for a query we don't own
+      // ([[../specs/error-feed-drop-spec-phase-checks-check-type-direct-rest-noi]], Control
+      // Tower signature `supabase-logs:48783ba83e25f93f`). Narrowly gated to require BOTH the
+      // exact `column spec_phase_checks.<check_type|config|status> does not exist` message AND
+      // the SELECT-lookup shape on `spec_phase_checks` (bare or PostgREST CTE wrapper) — a
+      // real column rename on the table, the same message on another relation, a non-SELECT
+      // write, or a FATAL/PANIC/constraint violation still surfaces / pages on first sighting.
+      if (isForeignSupabasePostgresMissingSpecPhaseChecksDirectRestColumnNoise(message, query)) return null;
       // Drop foreign-app noise at capture: a foreign / stale direct-REST client listed
       // `worker_heartbeats` ordered by a non-existent `created_at` column (the singleton
       // liveness table uses `updated_at` / `started_at` / `last_poll_at`, never `created_at`).
@@ -617,6 +631,16 @@ const LOG_QUERIES: LogQuery[] = [
       // shape on `customer_payment_methods` (bare or PostgREST CTE wrapper) — a different missing
       // column, a non-SELECT write, or a FATAL still pages.
       if (isForeignSupabasePostgresMissingCustomerPaymentMethodsCardTypeColumnNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: a stale external/REST client SELECTs a `link_group_id`
+      // column from `customer_payment_methods` that the table never carried — no ShopCX code path
+      // reads `customer_payment_methods.link_group_id`. The resulting undefined_column ERROR is
+      // repair work for a query we don't own (Control Tower signature
+      // `supabase-logs:c5691c4e16cec7f4`); the card_type filter above only covers the
+      // display-column variant, leaving this one to leak through. Narrowly gated to require BOTH
+      // the exact `column customer_payment_methods.link_group_id does not exist` message AND the
+      // SELECT-lookup shape on `customer_payment_methods` (bare or PostgREST CTE wrapper) — a
+      // different missing column, a non-SELECT write, or a FATAL still pages.
+      if (isForeignSupabasePostgresMissingCustomerPaymentMethodsLinkGroupIdColumnNoise(message, query)) return null;
       // Drop foreign-app noise at capture: a stale external/REST client SELECTs a
       // `dismissed_at` column from `dashboard_notifications` that the table never owned.
       // The resulting undefined_column ERROR is repair work for a query we don't own
@@ -2505,6 +2529,13 @@ const LOG_QUERIES: LogQuery[] = [
       // narrow gate as the resolved_at filter above — a different column/table or a
       // non-SELECT write still pages.
       if (isForeignSupabasePostgresMissingCrisisEventsDefaultSubstituteVariantIdColumnAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: a stale/foreign PostgREST direct-REST read
+      // selecting a non-existent `substitute_variant_id` column off `public.crisis_events`.
+      // The table exists but has never carried that column, so paging Platform on it
+      // (Control Tower signature `supabase-logs:7305ebd53ce69b40`) is repair work for a
+      // query we don't own. Same narrow gate as the default_substitute_variant_id filter
+      // above — a different column/table or a non-SELECT write still pages.
+      if (isForeignSupabasePostgresMissingCrisisEventsSubstituteVariantIdColumnAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
       // against `public.meta_ad_accounts.name`. The `meta_ad_accounts` table exists but
       // has NO bare `name` column — the human-readable account label lives on

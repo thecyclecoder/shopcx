@@ -24,6 +24,7 @@ On NOOP, the Phase-1 re-enqueue **circuit breaker** ([[agent-jobs]] `selfVerifyC
 ## Exports
 
 - `decideSelfVerifySelfHeal(input)` — the pure decision (above).
+- `shouldReenqueueAfterSelfHeal(decision: SelfHealDecision): boolean` — ([[mario-self-heal-fix-phase-append-must-reenqueue-next-build]] Phase 1) the predicate deciding whether to route a decision through `enqueueBuildIfDue` after the self-heal branch runs. Returns `true` iff the decision's `action === "append"` (fix phases were materialized and the promised next build must be enqueued); returns `false` for `action === "noop"` (no fix phases, no re-enqueue — the Phase-1 re-enqueue circuit breaker stays the explicit stop). Called from `scripts/builder-worker.ts` after `appendFixPhases` succeeds.
 - `isDecomposableSelfVerifyCheck(execKind)` — `true` for `grep` (per-anchor positive-absence); `false` for `WHOLE_ARTIFACT_SELF_VERIFY_KINDS` (`unit_test｜build｜tsc`) and unknown/null.
 - `selfVerifyCheckKey(f)` — stable `<kind>:<normalized text>` dedup key.
 - `WHOLE_ARTIFACT_SELF_VERIFY_KINDS`, `SELF_VERIFY_FIX_PHASE_LOOP_GUARD_MAX` — constants.
@@ -32,5 +33,7 @@ On NOOP, the Phase-1 re-enqueue **circuit breaker** ([[agent-jobs]] `selfVerifyC
 ## Wiring + observability
 
 The builder-worker cap-exhaustion branch records ONE `director_activity` row per self-heal, `action_kind='build_self_verify_self_heal'` ([[director-activity]]), discriminated by `metadata.outcome` (`fix_phases_appended` with `appended_positions`, OR `self_heal_noop` with `noop_reason` + `detail`). Best-effort — a self-heal failure never changes the job's `failed` outcome.
+
+**Lane-scoped loop-guard (2026-11-20):** every phase this lane appends is titled with `SELF_VERIFY_FIX_PHASE_TITLE_PREFIX`; `isSelfVerifyFixPhase` identifies them. The builder-worker passes only these as `existingFixPhases`, and [[pre-merge-fix]] excludes them from its own cap, so neither lane's repairs exhaust the other's loop-guard.
 
 **Verification pinned:** `src/lib/self-verify-fix-phase.test.ts` (whole-suite → noop, grep → append-per-anchor, mixed, pending-dedup, shipped-no-dedup, loop-guard, empty).

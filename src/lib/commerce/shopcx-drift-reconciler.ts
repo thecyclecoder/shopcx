@@ -195,7 +195,34 @@ export interface LateSub {
    * are already suppressed.
    */
   internalAccount: boolean;
+  /**
+   * The customer (or the portal on their behalf) moved this date since the last charge: a portal
+   * date change, an agent's change_next_date at their request, a pause/resume, a reactivation, or an Order Now that consumed the upcoming cycle.
+   * A date the customer chose is not drift WE caused, so it is counted but never paged on.
+   *
+   * ⚠️ Measured 2026-11-21: 30 subs read as unexplained-late; 26 of them were customer-chosen dates
+   * (6 portal date changes, 7 Order Now, 7 pause/auto-resume, 4 reactivations). The alert had become
+   * a standing repair job nobody could act on, because "re-pin the date" would override the customer.
+   */
+  customerScheduled?: boolean;
 }
+
+/**
+ * `customer_events` types that mean the customer chose the current next-charge date (matched on
+ * `properties->>shopify_contract_id`, on or after the last charge). Order Now is here because it bills
+ * the upcoming cycle early, so the next date correctly sits one full cadence past that cycle.
+ */
+export const CUSTOMER_SCHEDULING_EVENT_TYPES = [
+  "portal.date.changed",
+  "agent.date.changed",
+  "portal.order_now",
+  "portal.subscription.paused",
+  "portal.subscription.resumed",
+  "portal.subscription.auto_resumed",
+  "portal.subscription.reactivated",
+  "subscription.next-order-date-changed",
+  "subscription.paused",
+] as const;
 
 /**
  * The single source of truth for "should this late sub PAGE anyone". A late sub escalates only when
@@ -204,7 +231,7 @@ export interface LateSub {
  * readable and fires only on real-customer scheduling drift WE caused.
  */
 export function isEscalatableLate(l: LateSub): boolean {
-  return !l.inDunning && !l.inheritedFromAppstle && !l.internalAccount;
+  return !l.inDunning && !l.inheritedFromAppstle && !l.internalAccount && !l.customerScheduled;
 }
 
 function cadenceDays(interval: string | null, count: number | null): number {
@@ -305,12 +332,28 @@ export async function findLateSubscriptions(
           .select("is_internal").eq("id", customerId).maybeSingle();
         customerIsInternal = Boolean((cust as { is_internal?: boolean | null } | null)?.is_internal);
       }
+      // Did the customer pick this date? Any scheduling action on this contract since the last
+      // charge explains the gap — re-pinning it would override their choice.
+      let customerScheduled = false;
+      {
+        let ev = admin
+          .from("customer_events").select("id", { count: "exact", head: true })
+          .eq("workspace_id", workspaceId)
+          // A migrated sub's pre-migration actions are logged under its old Appstle contract id.
+          .in("properties->>shopify_contract_id", [s.shopify_contract_id, oldId].filter(Boolean) as string[])
+          .in("event_type", CUSTOMER_SCHEDULING_EVENT_TYPES as unknown as string[])
+          .gte("created_at", String(last[0].created_at));
+        if (customerId) ev = ev.eq("customer_id", customerId);
+        const { count: evCount } = await ev;
+        customerScheduled = (evCount ?? 0) > 0;
+      }
       out.push({
         contractId: s.shopify_contract_id, cadenceDays: cad, extraDays: extra,
         lastChargedAt: String(last[0].created_at), nextBillingDate: s.next_billing_date,
         inDunning: (count ?? 0) > 0,
         inheritedFromAppstle: inherited,
         internalAccount: Boolean(customerIsInternal || (s as { is_internal?: boolean | null }).is_internal),
+        customerScheduled,
       });
     }
     if (page.length < 200) break;

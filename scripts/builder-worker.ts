@@ -30850,11 +30850,12 @@ async function dispatchJob(job: Job) {
           // the job's `failed` outcome below (the worktree genuinely fails its own checks either way).
           try {
             const { getSpec: getSpecRowForHeal, appendFixPhases } = await import("../src/lib/specs-table");
-            const { decideSelfVerifySelfHeal } = await import("../src/lib/self-verify-fix-phase");
+            const { decideSelfVerifySelfHeal, isSelfVerifyFixPhase, shouldReenqueueAfterSelfHeal } = await import("../src/lib/self-verify-fix-phase");
             const { recordDirectorActivity } = await import("../src/lib/director-activity");
             const originForHeal = await getSpecRowForHeal(job.workspace_id, slug);
             const existingFixPhases = (originForHeal?.phases || [])
-              .filter((p) => p.kind === "fix")
+              // This lane's own phases only — a pre-merge (spec-test / security) Fix N must not exhaust it.
+              .filter((p) => isSelfVerifyFixPhase(p))
               .map((p) => ({ status: p.status as string, build_sha: p.build_sha ?? null, origin_check_keys: p.origin_check_keys ?? [] }));
             const healDecision = decideSelfVerifySelfHeal({
               failing: sv.failing.map((f) => ({ text: f.text, exec_kind: f.exec_kind, evidence: f.evidence })),
@@ -30882,6 +30883,28 @@ async function dispatchJob(job: Job) {
                 },
               });
               console.log(`${tag} preCommitSelfVerify self-heal APPENDED fix phase(s) ${appended.positions.join(",")} for ${slug}`);
+              // ⭐ mario-self-heal-fix-phase-append-must-reenqueue-next-build Phase 1 — the
+              // "the next build addresses them specifically" promise above has no actuator on its own:
+              // re-enqueue only ever happened reactively (sibling completion, blocker clear, deadlock
+              // auto-break), so an otherwise-idle goal left this self-failed member silently deadlocked
+              // until the M3/Mario cron fired 70+ min later. Route the promised next build through the
+              // ONE sanctioned chokepoint (enqueueBuildIfDue) so it materializes immediately — the
+              // self-verify circuit breaker, goal-member admission gate, and blocked_by/auto_build/
+              // shipped gates all still apply, so this can neither loop forever nor jump goal ordering.
+              // Best-effort: wrapped so an enqueue miss never changes the job's `failed` outcome below.
+              // The self_heal_noop branch deliberately does NOT re-enqueue — nothing was appended there,
+              // so the Phase-1 re-enqueue circuit breaker stays the explicit stop.
+              if (shouldReenqueueAfterSelfHeal(healDecision)) {
+                try {
+                  const { enqueueBuildIfDue } = await import("../src/lib/agent-jobs");
+                  const reenqueue = await enqueueBuildIfDue(job.workspace_id, slug);
+                  console.log(
+                    `${tag} preCommitSelfVerify self-heal re-enqueue for ${slug}: ${reenqueue.enqueued ? `enqueued (job ${reenqueue.jobId})` : `skipped (${reenqueue.reason})`}`,
+                  );
+                } catch (e) {
+                  console.warn(`${tag} preCommitSelfVerify self-heal re-enqueue failed (non-fatal):`, e instanceof Error ? e.message : e);
+                }
+              }
             } else {
               await recordDirectorActivity(db, {
                 workspaceId: job.workspace_id,

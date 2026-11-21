@@ -60,7 +60,7 @@ never escalated, matching the dunning/inherited suppressions. See [[../libraries
 
 ### ⚠️ Only OUR lateness pages anyone
 
-`late` is split four ways, and just one of them escalates:
+`late` is split five ways, and just one of them escalates:
 
 - **explained by dunning** — the current cycle went through dunning, so the late date is dunning-owned,
   not scheduling drift; expected, never escalated. This covers both the *open* states
@@ -72,6 +72,9 @@ never escalated, matching the dunning/inherited suppressions. See [[../libraries
 - **internal test accounts** — the owning customer (or the sub) is flagged `is_internal`, meaning it
   is the founder's manually-manipulated test harness, not a real customer money path; counted for visibility
   but never escalated.
+- **customer-scheduled** — the customer moved the date since the last charge (portal date change,
+  pause/resume, reactivation, Order Now); counted in `lateCustomerScheduled`, never escalated. Added
+  2026-11-21 after 26 of 30 "unexplained" late subs turned out to be customer-chosen dates.
 - **caused by us** — everything else. This is the only group that opens a repair job.
 
 Escalating the first three would fire daily forever and train everyone to ignore the alert — and the

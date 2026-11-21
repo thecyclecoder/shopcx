@@ -12,7 +12,7 @@ export async function POST(
 
   const { data: session } = await admin
     .from("journey_sessions")
-    .select("id, workspace_id, ticket_id, current_step, responses, status, token_expires_at")
+    .select("id, workspace_id, ticket_id, customer_id, current_step, responses, status, token_expires_at")
     .eq("token", token)
     .single();
 
@@ -81,6 +81,16 @@ export async function POST(
 
   await admin.from("journey_sessions").update(updates).eq("id", session.id);
 
+  // ── Win-back "restart my subscription" (reactivate-journey-builder) ──
+  // A single-step journey only reaches this route, never /complete — so the restart must happen
+  // HERE, synchronously, and the customer must be told the real result (not "we'll email you").
+  // Same reactivation path as the portal: src/lib/subscription-reactivate.ts.
+  if (stepKey === "reactivate_choice") {
+    const { handleReactivateChoice } = await import("@/lib/winback-reactivate-choice");
+    const result = await handleReactivateChoice(admin, session, responseValue, responses);
+    return NextResponse.json({ success: true, step: stepKey, ...result });
+  }
+
   // Log to ticket
   if (session.ticket_id) {
     await admin.from("ticket_messages").insert({
@@ -94,3 +104,4 @@ export async function POST(
 
   return NextResponse.json({ success: true, step: stepKey });
 }
+
