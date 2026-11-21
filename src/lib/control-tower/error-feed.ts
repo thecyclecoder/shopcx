@@ -4117,6 +4117,73 @@ export function isForeignSupabasePostgresInvalidUuidSyntaxOnOrdersWorkspaceIdAdh
 }
 
 /**
+ * Foreign-app noise — Postgres rejecting a malformed-uuid read on the `orders.id` PRIMARY-KEY column
+ * with `invalid input syntax for type uuid: "<garbage>"`. This is the `orders/id` sibling of
+ * `isForeignSupabasePostgresInvalidUuidSyntaxOnOrdersWorkspaceIdAdhocNoise`: instead of an
+ * `orders.workspace_id` equality lookup, it is a `?id=eq.<non-uuid>` direct-REST (or Supabase Studio
+ * quick-filter) read of `public.orders` where the bound value is a hand-typed non-uuid token (e.g.
+ * the string `"null"`). Postgres rejects the literal at parse/bind time before any row is read, so no
+ * ShopCX code path produces it — every in-tree reader filters `orders.id` with a well-formed uuid.
+ * The resulting ERROR is repair work for a query no code owns (Control Tower signature
+ * `supabase-logs:d9393a3e4f8314e2`, which has paged Platform 305× since 2026-09-26). `orders.id` is
+ * the only equality member of that signature family never wired, so it is the sole remaining reason
+ * the signature keeps recurring.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message, after stripping any leading `ERROR: ` prefix, starts with
+ *      `invalid input syntax for type uuid:`, AND
+ *   2. the `parsed.query` attribute (quote-stripped + lowercased) is a SELECT-shape on `orders` —
+ *      either (a) the bare `select ... from (public.)?orders` shape, OR (b) the PostgREST-generated
+ *      `with pgrst_source as ( select ... from public.orders` CTE wrapper form — AND it contains an
+ *      `id = ` equality marker.
+ *
+ * Narrowly gated so:
+ *   - a malformed-uuid error on ANY OTHER table (a real code bug binding bad uuids elsewhere) still
+ *     pages,
+ *   - the same message attached to a non-SELECT statement on `orders` (INSERT / UPDATE / DELETE /
+ *     DDL — a real code-write shape) still pages,
+ *   - a genuine `orders` read failure with a different message, or one with no `id` equality marker,
+ *     still pages.
+ *
+ * The `id` marker is anchored with a leading `\b` word boundary so `workspace_id = ...` (which ends
+ * in `_id`, no word boundary before `id`) does NOT satisfy it — only the bare primary-key `id`
+ * column does.
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before `keyParts` is
+ * constructed — the mapRow contract treats `null` as `drop, do not record`, so returning null here
+ * fully suppresses the row (no error_event, no loop_alert, no signature). Not a `transient` flag:
+ * this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresInvalidUuidSyntaxOnOrdersIdAdhocNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  if (!stripped.toLowerCase().startsWith("invalid input syntax for type uuid:")) return false;
+  // Quote-stripped + lowercased so `"public"."orders"` collapses to `public.orders` and
+  // `"id" = $1` collapses to `id = $1`, covering both the bare and the double-quoted PostgREST-
+  // wrapper forms with one shape predicate.
+  const q = (query ?? "").trim().toLowerCase().replace(/"/g, "");
+  if (!q) return false;
+  // The uuid primary-key equality marker — the tell that distinguishes the Studio-click/REST
+  // quick-filter equality probe against the uuid `id` column from any other read our own code
+  // issues. The leading `\b` keeps `workspace_id = ...` from matching (no word boundary before the
+  // `id` in `_id`); `$?\d*` tolerates a bound `$1` placeholder or an inline literal; `.id = `
+  // catches the qualified `orders.id = ` form.
+  if (!(/\bid\s*=\s*\$?\d*/.test(q) || q.includes(".id = "))) return false;
+  const bareSelect =
+    /^select\b[\s\S]*\bfrom\s+(?:public\.)?orders\b/.test(q);
+  // PostgREST wraps direct-REST row reads as `WITH pgrst_source AS ( SELECT ... FROM
+  // public.orders ... )` — the branch requires the wrapped op to be a SELECT so a PostgREST
+  // INSERT/UPDATE inside the same envelope (a real code-write) stays captured/paged.
+  const pgrstCte =
+    /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+public\.orders\b/.test(q);
+  return bareSelect || pgrstCte;
+}
+
+/**
  * Foreign-app noise — Postgres rejecting a malformed-uuid EQUALITY read on
  * `qb_manual_inventory.product_id` with `invalid input syntax for type uuid: "<garbage>"`. This is
  * the `qb_manual_inventory/product_id` sibling of
