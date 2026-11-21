@@ -61,17 +61,30 @@ export const journeySessionCompleted = inngest.createFunction(
       }
 
       // ── Win-back reactivation (reactivate-journey-builder) ──────────────────────────────
-      // One-click restart from the crisis win-back email. The session was minted per customer with
-      // its own token, so `session.subscription_id` is unambiguous — no interpretation needed.
+      // One-click restart from a win-back email. The session was minted per customer with its own
+      // token, so the target is unambiguous (session.subscription_id, else the builder's target).
       // Commerce SDK, so the internal-vs-Appstle rail is dispatched for us.
       // Guard-first: re-read LIVE status and only resume something that is actually paused or
       // cancelled; never "resume" a subscription the customer already restarted themselves.
-      if (outcome === "reactivated") {
-        if (session.subscription_id) {
+      // The journey page posts outcome="completed" on its terminal step, so the customer's
+      // `reactivate_choice` answer is the signal (isReactivateChoice). Win-back send scripts mint
+      // customer-only sessions (no subscription_id), so fall back to the SAME target the builder
+      // showed the customer: their most recent cancelled/paused sub across linked accounts.
+      const { isReactivateChoice, resolveTargetSubscription } = await import("@/lib/reactivate-journey-builder");
+      if (isReactivateChoice(outcome, responses)) {
+        let targetSubId: string | null = session.subscription_id ?? null;
+        if (!targetSubId && session.customer_id) {
+          const target = await resolveTargetSubscription(admin, workspace_id, session.customer_id);
+          targetSubId = target?.id ?? null;
+        }
+        if (!targetSubId) {
+          console.error(`[journey-outcomes] reactivate: no target subscription for session ${session.id}`);
+        }
+        if (targetSubId) {
           const { data: subData } = await admin
             .from("subscriptions")
             .select("shopify_contract_id, status")
-            .eq("id", session.subscription_id)
+            .eq("id", targetSubId)
             .single();
           if (subData?.shopify_contract_id) {
             if (subData.status === "active") {
@@ -88,6 +101,17 @@ export const journeySessionCompleted = inngest.createFunction(
               if (!r.success) {
                 console.error(`[journey-outcomes] reactivate FAILED ${subData.shopify_contract_id}: ${r.error}`);
               }
+              // Surface every attempt so a failed click (e.g. needs_payment_method) is visible and
+              // win-back conversions are countable — never a silent console-only failure.
+              const { logCustomerEvent } = await import("@/lib/customer-events");
+              await logCustomerEvent({
+                workspaceId: workspace_id,
+                customerId: session.customer_id ?? null,
+                eventType: r.success ? "winback.reactivated" : "winback.reactivate_failed",
+                source: "journey",
+                summary: r.success ? "Win-back journey: subscription restarted" : `Win-back journey: restart failed — ${r.error}`,
+                properties: { session_id: session.id, subscription_id: targetSubId, contract_id: subData.shopify_contract_id, error: r.success ? null : r.error },
+              });
             }
           }
         }

@@ -37,11 +37,33 @@ function emptyConfig(): BuiltJourneyConfig {
 }
 
 /**
+ * Did the customer choose to restart? True for the explicit `reactivated` outcome AND for the
+ * generic `completed` outcome the code-driven journey page posts on its terminal step when the
+ * `reactivate_choice` answer is `reactivate`.
+ *
+ * ⚠️ The page (`CodeDrivenJourney`) posts `outcome:"completed"` for every multi-step journey, so
+ * gating the resume on `outcome === "reactivated"` alone meant the "Yes, restart" click NEVER
+ * restarted anything (2026-11-21: Mixed Berry win-back sessions completed with outcome=completed,
+ * outcome_action_taken=false, subs still cancelled). The answer, not the outcome label, is the
+ * signal.
+ */
+export function isReactivateChoice(
+  outcome: string | null | undefined,
+  responses: Record<string, { value?: string } | undefined> | null | undefined,
+): boolean {
+  if (outcome === "reactivated") return true;
+  return (responses?.reactivate_choice?.value || "").toLowerCase() === "reactivate";
+}
+
+/**
  * Resolve the subscription this win-back should restart: the customer's most recent CANCELLED sub
  * (that is who we are emailing), else a paused one. Read across the whole linked-account group —
  * a customer whose cancelled sub sits on a sibling profile would otherwise get an empty journey.
+ *
+ * Exported so the outcome processor can resolve the SAME target when the session row was minted
+ * without a `subscription_id` (the win-back send scripts mint customer-only sessions).
  */
-async function resolveTargetSubscription(admin: Admin, workspaceId: string, customerId: string) {
+export async function resolveTargetSubscription(admin: Admin, workspaceId: string, customerId: string) {
   const { data: link } = await admin.from("customer_links")
     .select("group_id").eq("workspace_id", workspaceId).eq("customer_id", customerId).maybeSingle();
   let ids = [customerId];
