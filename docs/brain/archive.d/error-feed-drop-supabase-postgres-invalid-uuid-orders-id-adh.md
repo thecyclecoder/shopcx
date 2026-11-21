@@ -1,0 +1,1 @@
+- **Drop foreign-app noise: invalid-uuid probes on orders.id** · verified 2026-11-21 · → [[../libraries/error-feed]]
