@@ -2037,6 +2037,23 @@ export const directActionHandlers: Record<
         .eq("workspace_id", ctx.workspaceId)
         .eq("shopify_contract_id", p.contract_id!);
     }
+    // Audit the customer-requested move, mirroring the portal's `portal.date.changed`. Without it a
+    // hold an agent set at the customer's request reads as unexplained lateness in the drift monitor
+    // (findLateSubscriptions → CUSTOMER_SCHEDULING_EVENT_TYPES). Logging failure never fails the action.
+    if (r.success) {
+      try {
+        await ctx.admin.from("customer_events").insert({
+          workspace_id: ctx.workspaceId,
+          customer_id: ctx.customerId,
+          event_type: "agent.date.changed",
+          source: "agent",
+          summary: `Next billing date moved to ${date}`,
+          properties: { shopify_contract_id: p.contract_id, nextBillingDate: date, ticket_id: ctx.ticketId },
+        });
+      } catch (e) {
+        console.error(`change_next_date: customer_events insert failed for ${p.contract_id}:`, e);
+      }
+    }
     return { ...r, summary: `Changed next billing date to ${date}` };
   },
 
