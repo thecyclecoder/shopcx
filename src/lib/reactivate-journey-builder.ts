@@ -115,10 +115,21 @@ export async function loadWinbackGifts(admin: Admin, workspaceId: string): Promi
     .order("priority", { ascending: false })
     .limit(1)
     .maybeSingle();
-  const raw = ((data?.config as Record<string, unknown> | null)?.winback_gifts as unknown[]) || [];
+  const cfg = (data?.config as Record<string, unknown> | null) || {};
+  // A limited-time gift offer stops on its stated deadline (config.winback_gifts_ends_at, ISO).
+  // The email says "ends Dec 31", so the page must actually stop offering the gift then.
+  if (!winbackGiftsLive(cfg.winback_gifts_ends_at)) return [];
+  const raw = (cfg.winback_gifts as unknown[]) || [];
   return raw
     .map((g) => g as Partial<WinbackGift>)
     .filter((g): g is WinbackGift => typeof g.variant_id === "string" && typeof g.label === "string" && !!g.variant_id && !!g.label);
+}
+
+/** True while the gift offer is live: no deadline set, or the deadline is still in the future. */
+export function winbackGiftsLive(endsAt: unknown, now: Date = new Date()): boolean {
+  if (typeof endsAt !== "string" || !endsAt) return true;
+  const t = Date.parse(endsAt);
+  return Number.isNaN(t) ? true : now.getTime() < t;
 }
 
 /** Option value for "restart + this gift". Parsed back by `parseReactivateValue`. */

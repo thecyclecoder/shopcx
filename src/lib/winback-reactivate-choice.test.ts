@@ -53,3 +53,11 @@ test("fallback never picks a protection-only sub", () => {
   assert.equal(pickTargetSubscription([protectionOnly, coffee])?.id, "co");
   assert.equal(pickTargetSubscription([protectionOnly]), null);
 });
+
+import { winbackGiftsLive } from "./reactivate-journey-builder";
+test("gift offer stops at its deadline", () => {
+  const ends = "2026-12-01T07:59:59Z";
+  assert.equal(winbackGiftsLive(ends, new Date("2026-11-30T20:00:00Z")), true);
+  assert.equal(winbackGiftsLive(ends, new Date("2026-12-01T08:00:00Z")), false);
+  assert.equal(winbackGiftsLive(undefined), true);
+});
