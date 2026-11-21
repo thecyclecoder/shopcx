@@ -1,0 +1,1 @@
+- **Scope out foreign direct-REST noise for never-existed spec_phase_checks columns** · verified 2026-11-21 · → [[../libraries/error-feed]]
