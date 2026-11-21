@@ -459,7 +459,8 @@
     "test:dunning-charge-shopcx-cycle": "tsx --test src/lib/dunning-charge.shopcx-cycle.test.ts",
     "test:internal-renewal-avalara-void-on-refusal": "tsx --test src/lib/inngest/internal-subscription-renewals.avalara-void-on-refusal.test.ts",
     "test:migrate-detect-drift": "tsx --test src/lib/commerce/migrate-detect-drift.test.ts",
-    "test:remedy-pitch-guard": "tsx --test src/lib/remedy-selector.pitch-guard.test.ts"
+    "test:remedy-pitch-guard": "tsx --test src/lib/remedy-selector.pitch-guard.test.ts",
+    "test:winback-reactivate-choice": "tsx --test src/lib/winback-reactivate-choice.test.ts"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.165",
