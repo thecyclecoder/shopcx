@@ -43,6 +43,8 @@ The 30-day window starts on your **date of purchase** (not delivery).
 
 All products you ordered are eligible for return under the Money-Back Guarantee — including damaged or partially-consumed product. You don't need the original packaging in perfect condition.
 
+Your refund covers what you paid for the product, **including the sales tax** charged on it.
+
 **Not eligible for refund:**
 - Shipping Protection
 - Customer-paid shipping costs
@@ -69,9 +71,9 @@ We honor one return per customer, for life. This applies across any accounts you
 - Once a customer has used their lifetime return, additional returns require agent approval (escalate).
 
 ## Eligible Items / Refund Amount
-- Under MBG: all products eligible (including damaged or consumed). Order subtotal is refunded.
+- Under MBG: all products eligible (including damaged or consumed). Order subtotal PLUS the tax allocated to the returned product is refunded.
 - Excluded from refund: Shipping Protection, customer-paid shipping costs, return label costs.
-- Refund math: net_refund = order_subtotal − label_cost.
+- Refund math: net_refund = order_subtotal + allocated_tax − label_cost. Tax is NOT withheld; only paid shipping and shipping protection are.
 
 ## Who Pays Shipping
 - Standard MBG return: we provide a prepaid EasyPost label. Label cost is deducted from refund.
@@ -93,7 +95,7 @@ We honor one return per customer, for life. This applies across any accounts you
       { id: "returns.additional_one_time_not_eligible", condition: "order.is_first_order = false AND order.source != subscription_contract", action: "deny", reason: "MBG only applies to first order" },
       { id: "returns.fulfilled_required", condition: "order.fulfillment_status != fulfilled", action: "wait_for_delivery" },
       { id: "returns.one_per_customer_lifetime", condition: "linked_customer_group.return_count >= 1", action: "escalate", scope: "across_linked_profiles" },
-      { id: "returns.refund_formula", value: "order_subtotal - label_cost" },
+      { id: "returns.refund_formula", value: "order_subtotal + allocated_tax - label_cost" },
       { id: "returns.refund_excludes", value: ["shipping_protection", "customer_paid_shipping", "label_cost"] },
       { id: "returns.refund_fires_on", trigger: "easypost_delivered_event" },
       { id: "returns.customer_facing_timing", value: "5-10 business days" },

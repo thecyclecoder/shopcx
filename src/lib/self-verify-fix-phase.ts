@@ -31,6 +31,17 @@ export interface SelfVerifyFailure {
 }
 
 /** A `spec_phases` row (the subset this decision needs) for the fix-phase dedup + loop-guard. */
+/** Title prefix of every fix phase this lane appends. The pre-merge-fix lane (spec-test / security) appends
+ *  its own `Fix N — …` phases; each lane must count only its OWN fix phases toward its loop-guard. Before
+ *  this, two self-verify anchor phases on next-order-journey-editor tripped the SECURITY lane's loop-guard
+ *  (cap 2) on its very first real-vuln, so no security fix phase was ever appended and the PR sat held. */
+export const SELF_VERIFY_FIX_PHASE_TITLE_PREFIX = "Fix — materialize self-verify anchor:";
+
+/** True for a fix phase appended by the self-verify self-heal lane (by its title prefix). */
+export function isSelfVerifyFixPhase(p: { kind?: string | null; title?: string | null }): boolean {
+  return p.kind === "fix" && String(p.title ?? "").startsWith(SELF_VERIFY_FIX_PHASE_TITLE_PREFIX);
+}
+
 export interface ExistingFixPhaseRow {
   status: string;
   build_sha: string | null;
@@ -148,7 +159,7 @@ export function decideSelfVerifySelfHeal(input: {
     const key = selfVerifyCheckKey(f);
     const label = (f.text || "").trim().replace(/\s+/g, " ").slice(0, 120);
     return {
-      title: `Fix — materialize self-verify anchor: ${label}`,
+      title: `${SELF_VERIFY_FIX_PHASE_TITLE_PREFIX} ${label}`,
       body: [
         `The pre-commit self-verify check \`${f.text}\` (${f.exec_kind}) FAILED against the build worktree after the in-session repair cap was exhausted.`,
         `This is a positive-absence gap: the spec's Verification bullet asserts this anchor exists, but the build never created it.`,
@@ -163,4 +174,15 @@ export function decideSelfVerifySelfHeal(input: {
   });
 
   return { action: "append", fixes, signature: keySig, decomposableKeys };
+}
+
+/**
+ * mario-self-heal-fix-phase-append-must-reenqueue-next-build Phase 1 — the pure predicate behind the
+ * build lane's self-heal re-enqueue. ONLY the `append` branch materialized fix phases and promised
+ * "the next build addresses them specifically", so ONLY it must route the promised next build through
+ * `enqueueBuildIfDue`. The `noop` branch appended nothing, so it deliberately does NOT re-enqueue —
+ * the Phase-1 re-enqueue circuit breaker stays the explicit stop for a genuinely-unbuildable spec.
+ */
+export function shouldReenqueueAfterSelfHeal(decision: SelfHealDecision): boolean {
+  return decision.action === "append";
 }

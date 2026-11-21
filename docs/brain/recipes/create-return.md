@@ -50,8 +50,9 @@ await sendReturnLabelEmail({ workspaceId, customerId, returnId: result.returnId!
 ## Gotchas
 
 - **`net_refund_cents` is set at creation.** That's the contract — the issue-refund pipeline trusts it forever. Never re-derive at refund time.
-- **`freeLabel: true`** = we eat the EasyPost cost, `label_cost_cents=0`, `net_refund_cents = order_total_cents`.
-- **`freeLabel: false`** = `label_cost_cents = actual EasyPost rate`, `net_refund_cents = order_total - label`.
+- **Refund math** ([[../specs/return-refund-includes-tax]] Phase 1): `net_refund_cents = order_subtotal + allocated_tax − refunds_succeeded − label_cost`. The refund INCLUDES the tax allocated to the returned product (founder rule 2026-11-19 — a refund pays back what the customer paid for the product, including its sales tax); only customer-paid shipping and Shipping Protection are withheld. Order tax resolved internal→`orders.avalara_total_tax_cents`, Shopify→`orders.payment_details.tax_cents`; allocated via `allocateReturnTaxCents` (whole tax on a full return, pro-rata on a partial). A prior succeeded tax refund nets out so nobody is paid twice.
+- **`freeLabel: true`** = we eat the EasyPost cost, `label_cost_cents=0`, `net_refund_cents = order_subtotal + allocated_tax − refunds_succeeded`.
+- **`freeLabel: false`** = `label_cost_cents = actual EasyPost rate`, `net_refund_cents = order_subtotal + allocated_tax − refunds_succeeded − label`.
 - **`*_no_return`** resolutions skip the label entirely. Customer keeps the product, gets full refund or full store credit.
 - **Never set `is_return: true` on EasyPost directly.** That's the from/to swap bug. The helper builds the address pair manually.
 - **Send the label email yourself.** `createFullReturn` does not send. See feedback_return_label_in_reply.

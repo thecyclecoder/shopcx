@@ -10,8 +10,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  isSelfVerifyFixPhase,
+  SELF_VERIFY_FIX_PHASE_TITLE_PREFIX,
   decideSelfVerifySelfHeal,
   isDecomposableSelfVerifyCheck,
+  shouldReenqueueAfterSelfHeal,
   SELF_VERIFY_FIX_PHASE_LOOP_GUARD_MAX,
   type ExistingFixPhaseRow,
 } from "@/lib/self-verify-fix-phase";
@@ -94,4 +97,39 @@ test("build + tsc whole-artifact pair (no grep) → self_heal_noop(all_whole_art
   const d = decideSelfVerifySelfHeal({ failing: [buildCheck, tscCheck], existingFixPhases: [] });
   assert.equal(d.action, "noop");
   if (d.action === "noop") assert.equal(d.reason, "all_whole_artifact");
+});
+
+// ── mario-self-heal-fix-phase-append-must-reenqueue-next-build Phase 1 ──────────────────────────
+// The named failing state: the `append` branch promises "the next build addresses them specifically"
+// but nothing actuated it. shouldReenqueueAfterSelfHeal gates the worker's enqueueBuildIfDue call so
+// ONLY the append path re-enqueues; the noop path must NOT (the re-enqueue circuit breaker stays the
+// explicit stop for a genuinely-unbuildable spec).
+test("append path re-enqueues the next build", () => {
+  const d = decideSelfVerifySelfHeal({ failing: [grepCheck, grepCheck2], existingFixPhases: [] });
+  assert.equal(d.action, "append");
+  assert.equal(shouldReenqueueAfterSelfHeal(d), true);
+});
+
+test("noop path (whole-artifact) does NOT re-enqueue", () => {
+  const d = decideSelfVerifySelfHeal({ failing: [unitSuite], existingFixPhases: [] });
+  assert.equal(d.action, "noop");
+  assert.equal(shouldReenqueueAfterSelfHeal(d), false);
+});
+
+test("noop path (loop_guard) does NOT re-enqueue", () => {
+  const existing: ExistingFixPhaseRow[] = Array.from({ length: SELF_VERIFY_FIX_PHASE_LOOP_GUARD_MAX }, (_v, i) => ({
+    status: "planned",
+    build_sha: null,
+    origin_check_keys: [`grep:old-anchor-${i}`],
+  }));
+  const d = decideSelfVerifySelfHeal({ failing: [grepCheck], existingFixPhases: existing });
+  assert.equal(d.action, "noop");
+  assert.equal(shouldReenqueueAfterSelfHeal(d), false);
+});
+
+// ── each fix lane counts only its own phases toward its loop-guard ──────────────────────────────
+test("isSelfVerifyFixPhase tells this lane's anchor phases apart from pre-merge Fix N phases", () => {
+  assert.equal(isSelfVerifyFixPhase({ kind: "fix", title: `${SELF_VERIFY_FIX_PHASE_TITLE_PREFIX} journey editor dispatches through the shared executors` }), true);
+  assert.equal(isSelfVerifyFixPhase({ kind: "fix", title: "Fix 1 — resolve 1 pre-merge spec-test regression" }), false);
+  assert.equal(isSelfVerifyFixPhase({ kind: "phase", title: `${SELF_VERIFY_FIX_PHASE_TITLE_PREFIX} x` }), false);
 });

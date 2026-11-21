@@ -1,0 +1,1 @@
+- **Control Tower renewal-integrity must not false-page on weekly-deduped no-payment-method holds** · verified 2026-11-20 · → [[../lifecycles/control-tower]]

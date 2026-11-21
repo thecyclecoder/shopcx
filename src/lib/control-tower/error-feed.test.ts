@@ -117,6 +117,7 @@ import {
   isForeignSupabasePostgresMissingProductsIntelligenceColumnsAdhocNoise,
   isForeignSupabasePostgresMissingCrisisEventsProductTitleColumnNoise,
   isForeignSupabasePostgresMissingCrisisEventsResolvedAtColumnAdhocNoise,
+  isForeignSupabasePostgresMissingCrisisEventsSubstituteVariantIdColumnAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsDiscountCodeColumnAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsCancellationReasonColumnAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsCancelReasonColumnAdhocNoise,
@@ -31006,6 +31007,83 @@ test("isForeignSupabasePostgresMissingCrisisEventsResolvedAtColumnAdhocNoise KEE
   assert.equal(
     isForeignSupabasePostgresMissingCrisisEventsResolvedAtColumnAdhocNoise(
       "column crisis_events.resolved_at does not exist",
+      "",
+    ),
+    false,
+  );
+});
+
+// error-feed-drop-crisis-events-substitute-variant-id-column-adhoc-noise spec — Control
+// Tower signature supabase-logs:7305ebd53ce69b40. The `crisis_events` table exists but has
+// NEVER carried a `substitute_variant_id` column; the message surfaces only when a
+// foreign / stale PostgREST read selects it. Drop AT CAPTURE only when BOTH the exact
+// column-missing message AND a SELECT-lookup shape on `crisis_events` (bare OR PostgREST
+// CTE wrapper) are present. Sibling of the default_substitute_variant_id filter.
+test("isForeignSupabasePostgresMissingCrisisEventsSubstituteVariantIdColumnAdhocNoise drops the bare + PostgREST CTE substitute_variant_id direct-REST reads on crisis_events", () => {
+  // Bare SELECT, unqualified message + public.-qualified FROM.
+  assert.equal(
+    isForeignSupabasePostgresMissingCrisisEventsSubstituteVariantIdColumnAdhocNoise(
+      "column crisis_events.substitute_variant_id does not exist",
+      "select id, substitute_variant_id from public.crisis_events where workspace_id = $1",
+    ),
+    true,
+  );
+  // Bare SELECT, unqualified FROM.
+  assert.equal(
+    isForeignSupabasePostgresMissingCrisisEventsSubstituteVariantIdColumnAdhocNoise(
+      "column crisis_events.substitute_variant_id does not exist",
+      "select substitute_variant_id from crisis_events order by created_at desc limit 10",
+    ),
+    true,
+  );
+  // PostgREST CTE wrapper form with double-quoted identifiers.
+  assert.equal(
+    isForeignSupabasePostgresMissingCrisisEventsSubstituteVariantIdColumnAdhocNoise(
+      "column crisis_events.substitute_variant_id does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."crisis_events"."id", "public"."crisis_events"."substitute_variant_id" FROM "public"."crisis_events" LIMIT $1 OFFSET $2 )',
+    ),
+    true,
+  );
+  // public.-qualified message + CTE, with the `ERROR: ` prefix.
+  assert.equal(
+    isForeignSupabasePostgresMissingCrisisEventsSubstituteVariantIdColumnAdhocNoise(
+      "ERROR: column public.crisis_events.substitute_variant_id does not exist",
+      'WITH pgrst_source AS ( SELECT "substitute_variant_id" FROM "public"."crisis_events" )',
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingCrisisEventsSubstituteVariantIdColumnAdhocNoise KEEPS a different column, a different table, and a non-SELECT write (real defects still page)", () => {
+  // A different missing column on crisis_events still pages — the pin covers
+  // substitute_variant_id only (and NOT the sibling default_substitute_variant_id).
+  assert.equal(
+    isForeignSupabasePostgresMissingCrisisEventsSubstituteVariantIdColumnAdhocNoise(
+      "column crisis_events.default_substitute_variant_id does not exist",
+      "select default_substitute_variant_id from public.crisis_events",
+    ),
+    false,
+  );
+  // Same column name but a DIFFERENT table still pages — the pin is crisis_events only.
+  assert.equal(
+    isForeignSupabasePostgresMissingCrisisEventsSubstituteVariantIdColumnAdhocNoise(
+      "column order_refunds.substitute_variant_id does not exist",
+      "select substitute_variant_id from public.order_refunds",
+    ),
+    false,
+  );
+  // A non-SELECT write naming the column is a real code-bug shape — stays captured.
+  assert.equal(
+    isForeignSupabasePostgresMissingCrisisEventsSubstituteVariantIdColumnAdhocNoise(
+      "column crisis_events.substitute_variant_id does not exist",
+      "update public.crisis_events set substitute_variant_id = $1 where id = $2",
+    ),
+    false,
+  );
+  // Empty / nullish query returns false — we need both markers.
+  assert.equal(
+    isForeignSupabasePostgresMissingCrisisEventsSubstituteVariantIdColumnAdhocNoise(
+      "column crisis_events.substitute_variant_id does not exist",
       "",
     ),
     false,

@@ -13,7 +13,8 @@ See [[../specs/eliminate-false-promises-no-claim-ships-until-executed-and-verifi
 
 | Symbol | Signature | Purpose |
 |---|---|---|
-| `RequiredOutcomeStatus` | type: `'pending'\|'done'\|'verified'\|'failed'` | The four-state lifecycle. `verified` is the ONLY closed status. |
+| `RequiredOutcomeStatus` | type: `'pending'\|'done'\|'verified'\|'failed'\|'waived'` | The lifecycle. `verified` AND `waived` are the two terminal-**closed** statuses (see `CLOSED_OUTCOME_STATUSES`). |
+| `CLOSED_OUTCOME_STATUSES` | `ReadonlySet<RequiredOutcomeStatus>` | `{verified, waived}` — the single shared definition of "closed" the gate + reply guard read. |
 | `ExpectedDbState` | type: `Record<string, unknown>` | The DB predicate that would prove the item done. Phase 2 defines how the executor consumes it. |
 | `TicketRequiredOutcome` | interface | Row shape for reads. |
 | `RequiredOutcomeInput` | interface | The `{kind, description, target_ids?, expected_db_state?}` a writer supplies per item. |
@@ -22,7 +23,8 @@ See [[../specs/eliminate-false-promises-no-claim-ships-until-executed-and-verifi
 | `markOutcomeDone(admin, {id, workspace_id, resolution_event_id?})` | CAS `pending → done` | Executor fired the action; DB verify hasn't confirmed yet. Returns `null` on CAS-lost. |
 | `markOutcomeVerified(admin, {id, workspace_id, from?, resolution_event_id?})` | CAS `done → verified` (or `pending → verified` with `from:'pending'`) | The `expected_db_state` predicate holds. Stamps `verified_at`. |
 | `markOutcomeFailed(admin, {id, workspace_id, from?, reason, resolution_event_id?})` | CAS to `failed` | Escalation trigger. Stamps `failed_reason`. |
-| `hasUnverifiedOutcomes(admin, ticket_id, workspace_id)` | read | `true` when at least one row has status ≠ `'verified'`. The Phase-4 completion gate's core predicate; backed by the partial index. |
+| `markOutcomeWaived(admin, {id, workspace_id, from?, reason})` | CAS `failed → waived` (or `pending → waived` with `from:'pending'`) | Completing the outcome is **policy-forbidden** against live state (e.g. a coupon apply onto a paused sub — [[required-outcome-policy]]), so the row is closed as correctly-NOT-done instead of re-fired. Reason stored on `failed_reason`. Never touches a `done`/`verified` row. The loop-breaker for ticket aaf00047. |
+| `hasUnverifiedOutcomes(admin, ticket_id, workspace_id)` | read | `true` when at least one row is NOT terminal-closed (status ∉ `{verified, waived}`). The Phase-4 completion gate's core predicate; backed by the partial index. |
 | `countOutcomesByStatus(admin, ticket_id, workspace_id)` | read | Breakdown by status — the Phase-4 escalation message uses this to name "2 pending, 1 failed". |
 
 ## Callers
@@ -37,7 +39,7 @@ Phase 1 lands the SDK; callers wire in as later phases land:
 ## Invariants
 
 - **CAS on every mutation.** Every status transition includes `.eq('status', <from>)` + `.eq('workspace_id', …)` so a racing writer can't overwrite a fresher terminal state with a stale one (learning #5 — re-assert the read-time predicate in the write, never trust a proxy). A lost CAS returns `null`; the caller re-reads and decides how to react.
-- **`verified` is the only closed status.** `hasUnverifiedOutcomes` returns true for `pending`, `done`, AND `failed`. A `done` row means the action fired but the predicate hasn't been confirmed — the Phase-3 send guard treats it the same as `pending`: not ship-worthy.
+- **`verified` and `waived` are the closed statuses.** `hasUnverifiedOutcomes` returns true for `pending`, `done`, AND `failed`. A `done` row means the action fired but the predicate hasn't been confirmed — the Phase-3 send guard treats it the same as `pending`: not ship-worthy. A `waived` row is a correctly-NOT-done, policy-forbidden outcome (see [[required-outcome-policy]]): closed, non-blocking.
 - **`writeRequiredOutcomes` is batch-only for the same Direction.** N items → one insert call → one bounded write. Downstream corrections author a fresh row and mark the stale one `failed`, never `.update()` a landed predicate in place.
 
 ## Migration + probe
@@ -47,4 +49,4 @@ Phase 1 lands the SDK; callers wire in as later phases land:
 
 ---
 
-[[../README]] · [[../tables/ticket_required_outcomes]] · [[../tables/ticket_directions]] · [[../tables/ticket_resolution_events]] · [[../libraries/action-executor]] · [[../libraries/sol-policy-bait-guard]] · [[../specs/eliminate-false-promises-no-claim-ships-until-executed-and-verified]] · [[../goals/guaranteed-ticket-handling]] · [[../../CLAUDE]]
+[[../README]] · [[../tables/ticket_required_outcomes]] · [[../tables/ticket_directions]] · [[../tables/ticket_resolution_events]] · [[../libraries/action-executor]] · [[../libraries/sol-policy-bait-guard]] · [[required-outcome-policy]] · [[outcome-completion-gate]] · [[../specs/eliminate-false-promises-no-claim-ships-until-executed-and-verified]] · [[../goals/guaranteed-ticket-handling]] · [[../../CLAUDE]]

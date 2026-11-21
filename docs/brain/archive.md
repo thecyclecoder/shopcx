@@ -12,8 +12,15 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Scope out foreign ad-hoc crisis_events.substitute_variant_id missing-column noise from the error feed** · verified 2026-11-20 · → [[../libraries/error-feed]]
+- **Drop foreign customer_payment_methods.link_group_id direct-REST read at capture** · verified 2026-11-20 · → [[../libraries/error-feed]]
+- **Self-verify self-heal must actually enqueue the next build it promises** · verified 2026-11-20 · → [[lifecycles/spec-goal-branch-pm-flow]] · [[libraries/agent-jobs]] · [[libraries/self-verify-fix-phase]]
+- **Control Tower renewal-integrity must not false-page on weekly-deduped no-payment-method holds** · verified 2026-11-20 · → [[../lifecycles/control-tower]]
+- **A return refunds the product's tax too; only paid shipping and shipping protection are withheld** · verified 2026-11-20 · → [[../lifecycles/return-pipeline]]
 - **Renewal-integrity tile: stop red-paging on designed renewal holds (no-payment-method etc.)** · verified 2026-11-19 · → [[../libraries/control-tower]]
 - **Drop foreign 'dunning_cycles.failure_count does not exist' PostgREST noise at capture** · verified 2026-11-19 · → [[../libraries/error-feed]]
+- **Portal "pause 30/60 days" pushes the next renewal back by that many days** · verified 2026-11-19 · → [[../libraries/portal__pause-renewal-date]] + [[../libraries/portal__handlers__pause]] + [[../inngest/portal-auto-resume]]
+- **A policy-forbidden, un-completable required outcome re-escalates the completion gate forever** · verified 2026-11-19 · → [[../lifecycles/ticket-lifecycle]]
 - **Drop foreign-app noise: PostgREST SELECT on coupon_redemptions.code** · verified 2026-11-18 · → [[../libraries/error-feed]]
 - **Drop foreign-app 'column coupons.status does not exist' adhoc-REST noise** · verified 2026-11-18 · → [[../libraries/error-feed]]
 - **Drop foreign PostgREST noise: column coupons.value_cents does not exist** · verified 2026-11-18 · → [[../libraries/error-feed]]
