@@ -33,21 +33,23 @@ Never throws: typed refusals (`needs_payment_method`, `needs_address`) and error
 ## Callers
 
 - [[portal__handlers__reactivate]] — maps `needs_*` to 409, other failures to `handleAppstleError`.
-- `src/app/api/journey/[token]/step/route.ts` `handleReactivateChoice` — the single-step win-back
-  journey ([[reactivate-journey-builder]] / journey `reactivate-subscription`). Runs synchronously
-  on the click, marks the session `completed` with outcome `reactivated` / `declined` /
+- [[winback-reactivate-choice]] `handleReactivateChoice` — the win-back journey's click
+  ([[reactivate-journey-builder]] / journey `reactivate-subscription`), called from BOTH
+  `/api/journey/[token]/complete` (the page posts there whenever the journey has a `steps` array,
+  which the win-back does) and `/step`. Runs synchronously on the click, marks the session `completed` with outcome `reactivated` / `declined` /
   `reactivate_needs_payment_method` / `reactivate_needs_address` / `reactivate_failed`,
   sets `outcome_action_taken: true` (so [[../inngest/journey-outcomes]] does not run it twice),
-  writes `journey_sessions.subscription_id`, a ticket note, a `journey.subscription.reactivated`
-  customer event, and returns the real result message the page shows.
+  writes `journey_sessions.subscription_id`, a ticket note, a `winback.reactivated` /
+  `winback.reactivate_failed` customer event (countable conversions + visible failures), and returns the real result message the page shows.
 - [[../inngest/journey-outcomes]] `outcome === "reactivated"` branch (kept for any multi-step
   caller that emits that outcome).
 
 ## Gotchas
 
-- **2026-11-21 bug this fixed:** the win-back journey is single-step, so the page only called
-  `/step`, which recorded the click and nothing else. No outcome was emitted, and the outcome
-  handler keyed on `session.subscription_id`, which `scripts/winback-mixed-berry.ts` never set.
+- **2026-11-21 bug this fixed:** the page posted `/complete` with outcome `completed`, but the
+  outcome handler only restarted on outcome `reactivated`, and keyed on `session.subscription_id`,
+  which `scripts/winback-mixed-berry.ts` never set. The page then said "All done! We've updated
+  your account."
   Clicks on "Yes, restart" restarted nothing while the page said "we'll email you".
 - A card or address problem is NOT auto-resolved here: the customer is told plainly, and an
   internal ticket note flags it for follow-up (only when the session has a `ticket_id`).

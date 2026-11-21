@@ -14,12 +14,13 @@ The one-click win-back journey (journey slug `reactivate-subscription`, journey 
 
 ## How the click is executed
 
-Single-step, so the page posts to `/api/journey/[token]/step`. That route handles
-`stepKey === "reactivate_choice"` synchronously via [[subscription-reactivate]] (same path as the
-portal Reactivate button) and returns the real result message. First order processes tomorrow.
+The page treats any journey with a `steps` array as multi-step, so it posts `/complete`
+(outcome `completed`). [[winback-reactivate-choice]] handles it there (and on `/step`)
+synchronously via [[subscription-reactivate]] (same path as the portal Reactivate button) and
+returns the real result message. First order processes tomorrow.
 
 ## Gotchas
 
-- Before 2026-11-21 the click was only recorded; nothing restarted (see [[subscription-reactivate]]).
+- Before 2026-11-21 nothing restarted on click (see [[subscription-reactivate]] § Gotchas).
 - The session minted by `scripts/winback-mixed-berry.ts` does not set `subscription_id`; the target
   is resolved at click time from the customer.

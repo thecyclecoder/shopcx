@@ -1117,11 +1117,16 @@ function CodeDrivenJourney({
     // Last step or single-step — submit everything
     let serverMessage: string | null = null;
     if (isMultiStep) {
-      await fetch(`/api/journey/${token}/complete`, {
+      const completeRes = await fetch(`/api/journey/${token}/complete`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ outcome: "completed", responses: stepResponses }),
       });
+      // A journey that ACTS on completion (e.g. the win-back restart) returns the real result.
+      try {
+        const data = await completeRes.json() as { message?: string; outcome?: string };
+        if (data?.message && data?.outcome) serverMessage = data.message;
+      } catch { /* fall back to the generic line */ }
     } else {
       const stepRes = await fetch(`/api/journey/${token}/step`, {
         method: "POST",

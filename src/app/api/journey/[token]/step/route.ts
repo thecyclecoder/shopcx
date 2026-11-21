@@ -86,6 +86,7 @@ export async function POST(
   // HERE, synchronously, and the customer must be told the real result (not "we'll email you").
   // Same reactivation path as the portal: src/lib/subscription-reactivate.ts.
   if (stepKey === "reactivate_choice") {
+    const { handleReactivateChoice } = await import("@/lib/winback-reactivate-choice");
     const result = await handleReactivateChoice(admin, session, responseValue, responses);
     return NextResponse.json({ success: true, step: stepKey, ...result });
   }
@@ -104,82 +105,3 @@ export async function POST(
   return NextResponse.json({ success: true, step: stepKey });
 }
 
-type StepSession = {
-  id: string; workspace_id: string; ticket_id: string | null; customer_id: string | null;
-};
-
-async function handleReactivateChoice(
-  admin: ReturnType<typeof createAdminClient>,
-  session: StepSession,
-  choice: string,
-  responses: Record<string, { value: string; label: string }>,
-): Promise<{ outcome: string; message: string }> {
-  const note = async (body: string) => {
-    if (!session.ticket_id) return;
-    await admin.from("ticket_messages").insert({
-      ticket_id: session.ticket_id, direction: "outbound", visibility: "internal", author_type: "system", body,
-    });
-  };
-  const finish = async (outcome: string, subscriptionId: string | null) => {
-    await admin.from("journey_sessions").update({
-      status: "completed",
-      outcome,
-      responses,
-      completed_at: new Date().toISOString(),
-      // The action already ran here; the outcome processor must not run it a second time.
-      outcome_action_taken: true,
-      ...(subscriptionId ? { subscription_id: subscriptionId } : {}),
-    }).eq("id", session.id);
-  };
-
-  if (choice !== "reactivate") {
-    await finish("declined", null);
-    await note("[Win-back] Customer chose \"Not right now\". No change made.");
-    return { outcome: "declined", message: "No problem. Your subscription stays off, and you can restart it anytime." };
-  }
-
-  if (!session.customer_id) {
-    await note("[Win-back] ⚠ Restart clicked but the session has no customer. Nothing restarted — needs manual follow-up.");
-    return { outcome: "error", message: "We couldn't restart it automatically. Our team will reach out shortly to finish it for you." };
-  }
-
-  const { resolveTargetSubscription } = await import("@/lib/reactivate-journey-builder");
-  const sub = await resolveTargetSubscription(admin, session.workspace_id, session.customer_id);
-  if (!sub?.shopify_contract_id) {
-    await finish("error_no_target_sub", null);
-    await note("[Win-back] ⚠ Restart clicked but no cancelled or paused subscription was found. Nothing restarted — needs manual follow-up.");
-    return { outcome: "error_no_target_sub", message: "We couldn't find a subscription to restart. Our team will reach out shortly to help." };
-  }
-
-  const { reactivateSubscription } = await import("@/lib/subscription-reactivate");
-  const r = await reactivateSubscription(session.workspace_id, String(sub.shopify_contract_id));
-  if (!r.ok) {
-    const needsCard = r.reason === "needs_payment_method";
-    const needsAddress = r.reason === "needs_address";
-    await finish(needsCard ? "reactivate_needs_payment_method" : needsAddress ? "reactivate_needs_address" : "reactivate_failed", sub.id as string);
-    await note(`[Win-back] ⚠ Restart clicked but NOT applied (${r.reason}): ${r.message}. Needs follow-up.`);
-    console.error(`[journey-step] reactivate FAILED contract=${sub.shopify_contract_id} reason=${r.reason}: ${r.message}`);
-    return {
-      outcome: "reactivate_failed",
-      message: needsCard
-        ? "Almost there. We need an updated card before we can restart your subscription. Our team will send you a secure link to update it."
-        : needsAddress
-          ? "Almost there. We need your shipping address before we can restart your subscription. Our team will reach out to confirm it."
-          : "We couldn't restart it automatically. Our team will reach out shortly to finish it for you.",
-    };
-  }
-
-  await finish("reactivated", sub.id as string);
-  const when = new Date(r.nextBillingDate).toLocaleDateString("en-US", { month: "long", day: "numeric", timeZone: "UTC" });
-  await note(`[Win-back] Customer restarted their subscription (contract ${r.contractId}). Next order: ${when}.`);
-  const { logCustomerEvent } = await import("@/lib/customer-events");
-  await logCustomerEvent({
-    workspaceId: session.workspace_id,
-    customerId: session.customer_id,
-    eventType: "journey.subscription.reactivated",
-    source: "journey",
-    summary: "Customer restarted their subscription from the win-back journey",
-    properties: { shopify_contract_id: r.contractId, next_billing_date: r.nextBillingDate, revived_on_shopcx: r.revivedOnShopcx },
-  });
-  return { outcome: "reactivated", message: `You're all set! Your subscription is back on, and your next order processes on ${when}.` };
-}

@@ -22,17 +22,16 @@
  * Single terminal step, single choice. Restarting a subscription is not a decision that benefits
  * from a funnel — every extra screen is a place to lose them. The confirm IS the conversion.
  *
- * The chosen value is executed SYNCHRONOUSLY by the single-step route
- * (`src/app/api/journey/[token]/step/route.ts`, `stepKey === "reactivate_choice"`), and the customer
- * sees the real result on the page:
+ * The chosen value is executed SYNCHRONOUSLY by [[winback-reactivate-choice]] (called from the
+ * journey /complete and /step routes), and the customer sees the real result on the page:
  *   reactivate   → `reactivateSubscription` ([[subscription-reactivate]]), the same path as the
  *                  portal's Reactivate button: resume a paused sub, or revive a cancelled one on
  *                  ShopCX from our mirror at the customer's own price, first order tomorrow. A
  *                  missing card/address is reported honestly + noted on the ticket for follow-up.
  *   not_now      → recorded, no mutation — an honest opt-out beats a dead link
  *
- * 2026-11-21 fix: before this, the single-step journey only RECORDED the click (no outcome was
- * emitted, and the outcome handler keyed on a session.subscription_id the mint never set), so
+ * 2026-11-21 fix: before this, the page posted outcome "completed" but the outcome handler only
+ * acted on "reactivated" and keyed on a session.subscription_id the mint never set, so
  * "Yes, restart" never restarted anything.
  */
 import type { createAdminClient } from "@/lib/supabase/admin";
