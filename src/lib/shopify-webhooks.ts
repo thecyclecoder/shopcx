@@ -808,29 +808,53 @@ export async function handleOrderEvent(workspaceId: string, payload: Record<stri
         }
       } catch { /* metafield lookup failed — fall through to SKU matching */ }
 
-      // FALLBACK: SKU matching
-      if (!matched) {
-        const orderSkus = new Set(lineItems.map((li: { sku: unknown }) => String(li.sku || "")).filter(Boolean));
-        if (orderSkus.size > 0) {
-          const { data: subsWithItems } = await admin
-            .from("subscriptions")
-            .select("id, items")
+      // SECONDARY: the ShopCX renewal worker's cycle-charge claim. Exactly one of the customer's
+      // subs claims a cycle right before the charge creates this order — that is the sub that
+      // renewed, whatever its items look like now (see pickSubscriptionByCycleClaim).
+      const { chooseSubscriptionForRenewalOrder, pickSubscriptionByCycleClaim, RENEWAL_CLAIM_WINDOW_MS } =
+        await import("@/lib/subscription-order-link");
+      const { data: subsWithItems } = await admin
+        .from("subscriptions")
+        .select("id, items")
+        .eq("workspace_id", workspaceId)
+        .eq("shopify_customer_id", shopifyCustomerId)
+        .in("status", ["active", "paused"]);
+      if (!matched && sourceName.includes("subscription") && (subsWithItems?.length ?? 0) > 0) {
+        const orderAt = (payload.created_at as string) || new Date().toISOString();
+        const t = Date.parse(orderAt);
+        const { data: claims } = await admin
+          .from("subscription_cycle_charges")
+          .select("subscription_id, claimed_at")
+          .eq("workspace_id", workspaceId)
+          .in("subscription_id", (subsWithItems ?? []).map((x) => x.id))
+          .gte("claimed_at", new Date(t - RENEWAL_CLAIM_WINDOW_MS).toISOString())
+          .lte("claimed_at", new Date(t + RENEWAL_CLAIM_WINDOW_MS).toISOString());
+        const claimedSubId = pickSubscriptionByCycleClaim(
+          (claims ?? []) as { subscription_id: string; claimed_at: string }[],
+          orderAt,
+        );
+        if (claimedSubId) {
+          await admin.from("orders")
+            .update({ subscription_id: claimedSubId })
             .eq("workspace_id", workspaceId)
-            .eq("shopify_customer_id", shopifyCustomerId)
-            .in("status", ["active", "paused"]);
+            .eq("shopify_order_id", shopifyOrderId);
+          matched = true;
+        }
+      }
 
-          const match = subsWithItems?.find((s) => {
-            const subSkus = (Array.isArray(s.items) ? s.items : [])
-              .map((i: { sku?: string }) => String(i.sku || "")).filter(Boolean);
-            return subSkus.some((sk) => orderSkus.has(sk));
-          });
-          if (match) {
-            await admin.from("orders")
-              .update({ subscription_id: match.id })
-              .eq("workspace_id", workspaceId)
-              .eq("shopify_order_id", shopifyOrderId);
-            matched = true;
-          }
+      // FALLBACK: SKU matching — ranked, ignoring the shared Shipping Protection line, and left
+      // unlinked on a tie (see chooseSubscriptionForRenewalOrder in subscription-order-link.ts).
+      if (!matched) {
+        const match = chooseSubscriptionForRenewalOrder(
+          lineItems as { sku?: unknown; title?: unknown }[],
+          (subsWithItems ?? []) as { id: string; items: unknown }[],
+        );
+        if (match) {
+          await admin.from("orders")
+            .update({ subscription_id: match.id })
+            .eq("workspace_id", workspaceId)
+            .eq("shopify_order_id", shopifyOrderId);
+          matched = true;
         }
 
         // Last resort: single sub assignment

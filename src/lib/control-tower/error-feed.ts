@@ -7108,6 +7108,70 @@ export function isForeignSupabasePostgresMissingCustomerEventsColumnAdhocNoise(
 }
 
 /**
+ * Foreign-app noise — Postgres rejecting a malformed timestamp literal on an ad hoc
+ * SELECT lookup of `customer_events`. The twin of
+ * `isForeignSupabasePostgresMissingCustomerEventsColumnAdhocNoise` for a different failure
+ * class: instead of a missing column, the query carried a `timestamp with time zone`
+ * literal whose `+HH:MM` UTC offset got URL-decoded to ` HH:MM` (a `+` degrading to a
+ * space over PostgREST / a hand-pasted filter), so Postgres rejects it with
+ * `invalid input syntax for type timestamp with time zone: "<value>"`. There is no lever
+ * from ShopCX to make that foreign query parse — ShopCX's own code never issues this read,
+ * and any timestamp literal our code builds is already offset-correct — so paging Platform
+ * on it is noise, exactly like the uuid-syntax and missing-column twins for this table.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message (lowercased, with any leading `ERROR: ` prefix stripped) is Postgres's
+ *      canonical timestamp-syntax shape AND the quoted value is specifically the
+ *      `+`→space degradation — a `YYYY-MM-DDtHH:MM:SS` datetime, then a literal SPACE,
+ *      then an `HH:MM` offset (what a valid `…+HH:MM` becomes once the `+` is decoded to a
+ *      space). A genuinely-random malformed timestamp our own code might emit (missing
+ *      seconds, no offset, garbage text) does NOT match this exact degraded shape and
+ *      still pages, AND
+ *   2. the `parsed.query` attribute is the same ad hoc SELECT-lookup shape on
+ *      `public.customer_events` the missing-column twin gates on — the bare
+ *      `select ... from public.customer_events` form OR the PostgREST-generated
+ *      `WITH pgrst_source AS ( SELECT ... FROM "public"."customer_events" ... )` CTE wrapper
+ *      (reused verbatim).
+ *
+ * Narrowly gated so a malformed-timestamp error on ANY OTHER table, or on a non-SELECT
+ * statement shape (INSERT / UPDATE / DELETE / DDL / JOIN) against customer_events — i.e. a
+ * real in-code timestamp bug — still pages.
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not record`,
+ * so returning null here fully suppresses the row (no error_event, no loop_alert, no
+ * signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresInvalidTimestampCustomerEventsAdhocNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  // Strip an optional leading Postgres `ERROR: ` / `ERROR:  ` prefix — Supabase's logs
+  // surface sometimes carries it, sometimes doesn't — then lowercase so the `T` datetime
+  // separator and any casing in the message normalize.
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim().toLowerCase();
+  // The `+`→space degradation shape ONLY: a `YYYY-MM-DDtHH:MM:SS` datetime, a literal
+  // SPACE (what the `+` offset sign decoded to), then an `HH:MM` offset.
+  if (
+    !/^invalid input syntax for type timestamp with time zone: "\d{4}-\d{2}-\d{2}t\d{2}:\d{2}:\d{2} \d{2}:\d{2}"$/.test(
+      stripped,
+    )
+  ) {
+    return false;
+  }
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  // Reuse the missing-column twin's bareSelect/pgrstCte query gate verbatim — same ad hoc
+  // SELECT-lookup shape on public.customer_events (bare form or PostgREST CTE wrapper).
+  const bareSelect = /^select\b[\s\S]*\bfrom\s+(?:public\.)?customer_events\b/.test(q);
+  const pgrstCte =
+    /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"?(?:public"?\.)?"?customer_events\b/.test(q);
+  return bareSelect || pgrstCte;
+}
+
+/**
  * Foreign-app noise — Postgres reporting a missing column on `error_events` for an ad hoc
  * SELECT lookup. `error_events` DOES exist as a product table, but every column our own
  * code path / migration / view / function / trigger touches is stable and known; a raw
