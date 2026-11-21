@@ -3388,11 +3388,12 @@ export function isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise(
 
 /**
  * Foreign-app noise — Postgres reporting a missing column for a Supabase Studio Table
- * Editor click that lists non-existent columns (`method`, `status_code`) on
+ * Editor click that lists non-existent columns (`method`, `status_code`, `contract_id`) on
  * `public.appstle_api_calls`. The table was created with `request_method` + `response_status`
  * (see `supabase/migrations/20260501130000_appstle_api_calls.sql`), not `method` /
- * `status_code` — no ShopCX code path (src/, scripts/, shopify-extension/, docs/brain/)
- * issues a SELECT on `appstle_api_calls.method` or `appstle_api_calls.status_code`. The
+ * `status_code` / `contract_id` — no ShopCX code path (src/, scripts/, shopify-extension/,
+ * docs/brain/) issues a SELECT on `appstle_api_calls.method`, `appstle_api_calls.status_code`,
+ * or `appstle_api_calls.contract_id`. The
  * message only reaches Supabase's `postgres_logs` feed when a human clicks the Table
  * Editor row on `appstle_api_calls` and the Studio-emitted PostgREST CTE wrapper names a
  * column that doesn't exist (operator-typo / renamed-column confusion). There is no
@@ -3405,15 +3406,17 @@ export function isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise(
  * Sibling of `isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise` — same
  * narrow-gating shape (exact column-missing message + SELECT-lookup shape covering BOTH
  * bare and PostgREST CTE wrapper forms), scoped to the appstle_api_calls `method` /
- * `status_code` typo instead.
+ * `status_code` / `contract_id` typo instead.
  *
  * `true` ONLY when BOTH markers are present:
- *   1. the message is Postgres's canonical column-missing shape for ONE of the two
+ *   1. the message is Postgres's canonical column-missing shape for ONE of the three
  *      confused columns — trimmed equal to one of
  *      `column appstle_api_calls.method does not exist`,
  *      `column public.appstle_api_calls.method does not exist`,
- *      `column appstle_api_calls.status_code does not exist`, or
- *      `column public.appstle_api_calls.status_code does not exist` (any leading
+ *      `column appstle_api_calls.status_code does not exist`,
+ *      `column public.appstle_api_calls.status_code does not exist`,
+ *      `column appstle_api_calls.contract_id does not exist`, or
+ *      `column public.appstle_api_calls.contract_id does not exist` (any leading
  *      `ERROR: ` prefix Postgres includes on the logs surface stripped), AND
  *   2. the `parsed.query` attribute is a SELECT-lookup on `public.appstle_api_calls` —
  *      either (a) the bare `select ... from (public.)?appstle_api_calls` shape, OR (b)
@@ -3451,7 +3454,9 @@ export function isForeignSupabasePostgresMissingAppstleApiCallsColumnAdhocNoise(
     stripped === "column appstle_api_calls.method does not exist" ||
     stripped === "column public.appstle_api_calls.method does not exist" ||
     stripped === "column appstle_api_calls.status_code does not exist" ||
-    stripped === "column public.appstle_api_calls.status_code does not exist";
+    stripped === "column public.appstle_api_calls.status_code does not exist" ||
+    stripped === "column appstle_api_calls.contract_id does not exist" ||
+    stripped === "column public.appstle_api_calls.contract_id does not exist";
   if (!messageMatches) return false;
   const q = (query ?? "").trim().toLowerCase();
   if (!q) return false;
