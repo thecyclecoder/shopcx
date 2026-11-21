@@ -202,6 +202,25 @@ export const RETIRED_KIND_OWNER: Record<string, OwnerFunction> = {
   "spec-review": "platform", // Vale — graduated to the deterministic `assertSpecReviewGate` authoring gate (retire-vale-spec-review-becomes-deterministic-authoring-gate)
 };
 
+/**
+ * Static tool nodes — library/SDK harnesses that are first-class supervised nodes in the org tree
+ * but aren't a MONITORED_LOOPS loop, an agent-kind, or a builder-worker dispatch kind (they run
+ * inline behind a caller). Each declares its OWNER OwnerFunction here so the kill-switch cascade +
+ * Control Tower glance can reach it. The `id` is the canonical `tool:<slug>` node id the SDK passes
+ * to `resolveEffectiveSwitch`.
+ */
+export const STATIC_TOOL_NODES: ReadonlyArray<{ id: string; owner: OwnerFunction; label: string }> = [
+  {
+    // The subscriber-experiment / subscriber-experiments harness ([[../subscriber-experiments]]) —
+    // the person-level sticky 50/50 + holdout lifecycle-experiment spine (subscriber-experiment-harness
+    // spec). Owned by retention; its kill switch halts NEW arm assignments without destroying
+    // existing ones (supervisable-autonomy north star).
+    id: "tool:subscriber-experiment-harness",
+    owner: "retention",
+    label: "Subscriber experiment harness",
+  },
+];
+
 /** The MascotId of a director keyed by function slug (from PERSONAS). */
 function directorMascot(fn: OwnerFunction): MascotId {
   const persona = PERSONAS[fn];
@@ -353,6 +372,23 @@ function buildNodeRegistry(): OrgNode[] {
       owner,
       persona: personaForKind(kind),
       label: `${PERSONAS[kind]?.name ?? kind} (retired)`,
+    });
+  }
+
+  // ── 8. Static tool nodes — library/SDK harnesses that are first-class supervised nodes but
+  // aren't a MONITORED_LOOPS row, an agent-kind, or a builder-worker dispatch (they run inline
+  // behind a caller). Each still needs the north-star trio: an OWNER here, a kill_switches
+  // ancestry, and a heartbeat at its own layer. The subscriber-experiment harness
+  // ([[../subscriber-experiments]]) is the person-level 50/50 lifecycle-experiment spine owned
+  // by `retention`; its kill switch halts new arm assignments (subscriber-experiment-harness). ──
+  for (const tool of STATIC_TOOL_NODES) {
+    addNode({
+      id: tool.id,
+      kind: "tool",
+      parent: parentIdForOwner(tool.owner),
+      owner: tool.owner,
+      persona: directorMascot(tool.owner),
+      label: tool.label,
     });
   }
 
