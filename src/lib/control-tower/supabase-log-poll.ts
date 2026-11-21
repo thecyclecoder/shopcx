@@ -40,6 +40,7 @@ import {
   isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise,
   isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise,
   isForeignSupabasePostgresMissingPlaybooksStepsDirectRestColumnNoise,
+  isForeignSupabasePostgresMissingSpecPhaseChecksDirectRestColumnNoise,
   isForeignSupabasePostgresMissingWorkerHeartbeatsCreatedAtAdhocNoise,
   isForeignSupabasePostgresMissingSpecsOverallStatusColumnAdhocNoise,
   isForeignSupabasePostgresMissingCouponsStatusColumnAdhocNoise,
@@ -421,6 +422,17 @@ const LOG_QUERIES: LogQuery[] = [
       // another table, a `playbooks` column rename, a non-SELECT write, or a
       // FATAL/PANIC/constraint violation still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingPlaybooksStepsDirectRestColumnNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: a foreign / stale direct-REST client SELECTed
+      // `check_type` / `config` / `status` from `spec_phase_checks` — columns that bespoke
+      // table has never owned in any migration. The resulting undefined_column ERROR is
+      // repair work for a query we don't own
+      // ([[../specs/error-feed-drop-spec-phase-checks-check-type-direct-rest-noi]], Control
+      // Tower signature `supabase-logs:48783ba83e25f93f`). Narrowly gated to require BOTH the
+      // exact `column spec_phase_checks.<check_type|config|status> does not exist` message AND
+      // the SELECT-lookup shape on `spec_phase_checks` (bare or PostgREST CTE wrapper) — a
+      // real column rename on the table, the same message on another relation, a non-SELECT
+      // write, or a FATAL/PANIC/constraint violation still surfaces / pages on first sighting.
+      if (isForeignSupabasePostgresMissingSpecPhaseChecksDirectRestColumnNoise(message, query)) return null;
       // Drop foreign-app noise at capture: a foreign / stale direct-REST client listed
       // `worker_heartbeats` ordered by a non-existent `created_at` column (the singleton
       // liveness table uses `updated_at` / `started_at` / `last_poll_at`, never `created_at`).
