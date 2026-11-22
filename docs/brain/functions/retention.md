@@ -19,7 +19,8 @@ Keep every subscriber billed correctly and on-plan — the subscription engine n
 
 ### Churn prevention & win-back
 Reduce voluntary + involuntary churn via the cancel-flow, dunning recovery, and reactivation. (Currently shipped as lifecycles; future specs land here.)
-- **Owns lifecycles:** [[../lifecycles/cancel-flow]], [[../lifecycles/dunning]].
+- **Owns lifecycles:** [[../lifecycles/cancel-flow]], [[../lifecycles/dunning]], [[../lifecycles/pre-renewal-reminder-journey]].
+- **Goal shipped — "Pre-renewal reminders + next-order journey, proven by a self-running 50/50 test"** (CEO-proposed, 2026-11, folded 2026-11-22): a few days before each renewal, treatment subscribers get an email (+ consented SMS) into a [[../journeys/next-order]] mini-site that is the portal's full subscription editor + in-journey cancel at parity (reusing the shared edit executors + save offers — no forked copy), measured as a sticky person-level 50/50 test with a true holdout and a pre-registered verdict, surfaced on the owner-only [[../dashboard/retention-renewal-reminder]] page. All four milestones (M1 journey · M2 reminder sends · M3 harness+metrics · M4 dashboard) landed; full trace → [[../lifecycles/pre-renewal-reminder-journey]]. Residual: the dedicated guardrail/verdict cron (guardrails + verdict are Phase-1 *derived* until it lands).
 
 ### Transactional & lifecycle messaging
 Own the customer-lifecycle emails Klaviyo used to send, now that Klaviyo is sunset — order confirmations, shipping notifications, and the transactional/lifecycle sends that keep customers informed and trusting the brand between purchases. Every send is on-brand (mirrors the in-house storefront template), tracked (we can confirm we sent it), and flood-safe (batches the ~4am renewal wave without hammering Resend).

@@ -1,6 +1,6 @@
 # `src/lib/retention/reminder-results-sdk.ts` — pre-renewal-reminder results lens
 
-The read-only RESULTS surface for the pre-renewal-reminder 50/50 test — the one lens the M4 retention dashboard (and any CLI) reads so no caller hand-rolls the joins or re-derives revenue. Spec: `renewal-reminder-results-dashboard` **Phase 1**. Part of goal [[../goals/pre-renewal-reminder-next-order-journey]] (M4 "Results dashboard"). Mirrors the compose-several-reads, return-a-typed-shape pattern of the Ad Testing results SDK ([[testing-results-sdk]]).
+The read-only RESULTS surface for the pre-renewal-reminder 50/50 test — the one lens the M4 retention dashboard (and any CLI) reads so no caller hand-rolls the joins or re-derives revenue. Spec: `renewal-reminder-results-dashboard` **Phase 1**. Part of the [[../lifecycles/pre-renewal-reminder-journey]] flow (M4 "Results dashboard"). Mirrors the compose-several-reads, return-a-typed-shape pattern of the Ad Testing results SDK ([[testing-results-sdk]]).
 
 ## `getReminderTestResults(admin, workspaceId) → ReminderTestResults`
 
@@ -34,4 +34,4 @@ The dedicated guardrail evaluator + verdict engine (`subscriber-experiment-guard
 
 ## Related
 
-[[subscriber-experiment-metrics]] · [[subscriber-experiments]] · [[pre-renewal-reminders]] · [[testing-results-sdk]] · [[../tables/pre_renewal_reminders]] · [[../tables/journey_step_events]] · [[../tables/order_refunds]] · [[../goals/pre-renewal-reminder-next-order-journey]] · [[../functions/retention]]
+[[subscriber-experiment-metrics]] · [[subscriber-experiments]] · [[pre-renewal-reminders]] · [[testing-results-sdk]] · [[../tables/pre_renewal_reminders]] · [[../tables/journey_step_events]] · [[../tables/order_refunds]] · [[../lifecycles/pre-renewal-reminder-journey]] · [[../functions/retention]]
