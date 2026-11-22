@@ -1,0 +1,1 @@
+- **Drop foreign direct-REST `specs.goal_slug` column-missing noise from the error feed** · verified 2026-11-22 · → [[../libraries/error-feed]], [[../inngest/supabase-log-poll]]
