@@ -1865,6 +1865,39 @@ export interface PhaseContainmentInput {
   status: string;
   build_sha: string | null;
   merge_sha: string | null;
+  /** The spec's slug. Enables the rewritten-branch fallback ([[mergeCarriesSpecBuild]]); omit to disable it. */
+  spec_slug?: string;
+}
+
+/**
+ * Rewritten-branch provenance for a REAL (two-parent) merge on main. A phase's `build_sha` can stop
+ * resolving even though its code shipped through a real merge: the build branch was rebased or rebuilt
+ * after the stamp (serialized goal-member rebase, a hand-rebuilt member), then auto-deleted, so the stamped
+ * commit is an orphan GitHub no longer serves ("not our ref"). The ancestry check then errors forever and
+ * the shipped spec can never fold (workspace-feature-access, subscriber-experiment-harness, 2026-11-22).
+ *
+ * The narrower question we can still answer: did THIS merge bring in a build commit for THIS spec? True only
+ * when `mergeSha` is on origin/main AND a commit introduced by the merge (`mergeSha^1..mergeSha`) carries the
+ * worker's `Spec: <slug>` trailer. Like the squash fallback this proves the spec's build landed via the merge,
+ * not per-phase ancestry. It runs only on the INCONCLUSIVE path (build SHA unresolvable): a build SHA that
+ * resolves and is genuinely not contained still fails, and a NULL build_sha still blocks. Fail-closed on any
+ * git error.
+ */
+export async function mergeCarriesSpecBuild(
+  mergeSha: string | null | undefined,
+  specSlug: string | null | undefined,
+  deps: ResolveBranchRefDeps = { runGitCmd },
+): Promise<boolean> {
+  const m = (mergeSha ?? "").trim();
+  const slug = (specSlug ?? "").trim();
+  if (!m || !HEX_SHA_RE.test(m) || !slug || !/^[a-z0-9][a-z0-9-]*$/.test(slug)) return false;
+  const mainRef = await resolveBranchRefForVerification("main", deps);
+  if (!mainRef.ok) return false;
+  const onMain = await deps.runGitCmd(["merge-base", "--is-ancestor", m, mainRef.ref]);
+  if (onMain.error || onMain.code !== 0) return false;
+  const log = await deps.runGitCmd(["log", "--format=%H", "-n", "1", `--grep=^Spec: ${slug}$`, `${m}^1..${m}`]);
+  if (log.error || log.code !== 0) return false;
+  return (log.stdout || "").trim().length > 0;
 }
 
 /**
@@ -1948,6 +1981,9 @@ export async function verifyPhasesContainedByMerges(
       // after a squash merge. If the merge itself is a squash that landed on main, the ancestry was
       // DISCARDED rather than absent, so accept the merge as the provenance. Otherwise fail-closed.
       if (await mergeIsSquashOnMain(p.merge_sha, deps)) continue;
+      // Real merge whose build branch was rewritten after the stamp: accept when the merge itself
+      // introduced a `Spec: <slug>` build commit (see mergeCarriesSpecBuild).
+      if (p.spec_slug && (await mergeCarriesSpecBuild(p.merge_sha, p.spec_slug, deps))) continue;
       failures.push({
         position: p.position,
         reason: `phase ${p.position} containment check inconclusive (fail-closed): ${res.error}`,
