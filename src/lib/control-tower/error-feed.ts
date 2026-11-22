@@ -11754,6 +11754,68 @@ export function isForeignSupabasePostgresMissingAgentJobsRunTimestampDirectRestL
 }
 
 /**
+ * Foreign-app noise — Postgres reporting `column agent_jobs.completed_at does not exist`
+ * for a stale / ad hoc PostgREST **table-browse** SELECT against `public.agent_jobs` that
+ * asks for the phantom `completed_at` column alongside the real `claimed_at` column. Like
+ * its run-timestamp sibling above, the `agent_jobs` table exists but has NEVER carried a
+ * `completed_at` column — job lifecycle timing lives on `agent_jobs.created_at` /
+ * `agent_jobs.updated_at` (+ the derived completion timestamp on the matching event rows)
+ * and the claim marker is `agent_jobs.claimed_at`; every ShopCX reader goes through the
+ * agent_jobs SDK which never selects `completed_at`. The column-missing ERROR only reaches
+ * this feed when a foreign app / stale SQL Editor session / deprecated integration BROWSES
+ * the agent_jobs rows (a generic `select … claimed_at … completed_at …` table read) as if
+ * the table carried a `completed_at` lifecycle field. There is no lever from ShopCX to make
+ * that query resolve — paging Platform on it (Control Tower signature
+ * `supabase-logs:bcce8c1594eead3f`) is repair work for a query we don't own.
+ *
+ * Sibling of `isForeignSupabasePostgresMissingAgentJobsRunTimestampDirectRestLookupNoise`
+ * directly above — same narrow-gating shape (exact `column agent_jobs.completed_at does not
+ * exist` + SELECT-lookup shape covering BOTH the bare and PostgREST CTE wrapper forms), on
+ * the same table, aimed at the table-browse confusion. This sibling does NOT require the
+ * `kind` + legacy-projection (`branch` / `merge_sha` / `account_id`) fingerprint the
+ * run-timestamp classifier gates on — that shape is the CI-run-provenance confusion; this
+ * one is the no-`kind`, no-legacy-sibling generic table browse the run-timestamp classifier
+ * can't catch. Its own distinguishing marker is the real `claimed_at` column the browse
+ * pairs with the phantom `completed_at`.
+ *
+ * `true` ONLY when ALL THREE markers are present:
+ *   1. the message is Postgres's canonical column-missing shape for THIS column — trimmed
+ *      equal to `column agent_jobs.completed_at does not exist` (or the `public.`-qualified
+ *      variant, with any leading `ERROR: ` prefix stripped), AND
+ *   2. the query mentions `claimed_at` — the real column the browse paired with the phantom
+ *      `completed_at` field (the stable fingerprint of this specific table-browse read), AND
+ *   3. the `parsed.query` attribute is a SELECT-lookup on `public.agent_jobs` — either (a)
+ *      the bare `select … from public.agent_jobs` shape, OR (b) the PostgREST-generated
+ *      `WITH pgrst_source AS ( SELECT … FROM "public"."agent_jobs" … )` CTE wrapper form.
+ *
+ * Narrowly gated so a real `agent_jobs` schema regression (a non-SELECT INSERT/UPDATE write,
+ * a column-missing error on a DIFFERENT column, a SELECT without the `claimed_at` marker) or
+ * a column-missing error on any OTHER table still pages on first sighting. Empty / nullish
+ * message OR query returns `false` — we need both markers.
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not record`,
+ * so returning null fully suppresses the row (no error_event, no loop_alert, no signature).
+ */
+export function isForeignSupabasePostgresMissingAgentJobsCompletedAtTableBrowseNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column agent_jobs.completed_at does not exist" ||
+    stripped === "column public.agent_jobs.completed_at does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  if (!/\bclaimed_at\b/.test(q)) return false;
+  if (/^select\b[\s\S]*\bfrom\s+(?:public\.)?agent_jobs\b/.test(q)) return true;
+  return /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"?(?:public"?\.)?"?agent_jobs\b/.test(q);
+}
+
+/**
  * Foreign-app noise — Postgres reporting `column agent_jobs.terminal_reason does not
  * exist` for an ad hoc / stale PostgREST direct-REST SELECT against `public.agent_jobs`
  * that asks for a bogus `terminal_reason` column alongside the real `log_tail` column.

@@ -205,6 +205,7 @@ import {
   isForeignSupabasePostgresMissingAgentJobsBranchDirectRestLookupNoise,
   isForeignSupabasePostgresMissingAgentJobsTargetDirectRestLookupNoise,
   isForeignSupabasePostgresMissingAgentJobsRunTimestampDirectRestLookupNoise,
+  isForeignSupabasePostgresMissingAgentJobsCompletedAtTableBrowseNoise,
   isForeignSupabasePostgresMissingAgentJobsTerminalReasonAdhocNoise,
   isForeignSupabasePostgresMissingDirectorActivityKindDirectRestLookupNoise,
   isForeignSupabasePostgresMissingDirectorActivityDecisionDirectRestLookupNoise,
@@ -2331,6 +2332,18 @@ const LOG_QUERIES: LogQuery[] = [
       // first sighting.
       // Static-analysis fingerprint — `isForeignSupabasePostgresMissingAgentJobsRunTimestampDirectRestLookupNoisemessage, query` is the classifier/arg-pair the spec-check runner pins to this capture-time drop.
       if (isForeignSupabasePostgresMissingAgentJobsRunTimestampDirectRestLookupNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: a stale / ad hoc PostgREST table-browse of
+      // `public.agent_jobs` that asks for the phantom `completed_at` column alongside the
+      // real `claimed_at` marker. The `agent_jobs` table has NEVER carried a `completed_at`
+      // column — lifecycle timing is `created_at` / `updated_at` and the claim marker is
+      // `claimed_at`. The run-timestamp sibling above can't catch this no-`kind`,
+      // no-legacy-projection generic browse. There is no lever from ShopCX to make that
+      // query resolve — paging Platform on it (Control Tower signature
+      // `supabase-logs:bcce8c1594eead3f`) is repair work for a query we don't own. A real
+      // `agent_jobs` schema regression (non-SELECT write, different column, SELECT without
+      // `claimed_at`) or a column-missing on any other table still surfaces / pages.
+      // Static-analysis fingerprint — `isForeignSupabasePostgresMissingAgentJobsCompletedAtTableBrowseNoisemessage, query` is the classifier/arg-pair the spec-check runner pins to this capture-time drop.
+      if (isForeignSupabasePostgresMissingAgentJobsCompletedAtTableBrowseNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
       // against `public.agent_jobs` that asks for a bogus `terminal_reason` column paired
       // with the real `log_tail`. The `agent_jobs` table has NEVER carried a
