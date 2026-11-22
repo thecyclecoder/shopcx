@@ -7,7 +7,7 @@ import { readFileSync } from "fs";
 import { resolve } from "path";
 import { pgClient } from "./_bootstrap";
 
-const MIGRATIONS = ["20270121120000_customer_lifecycle_experiments.sql"];
+const MIGRATIONS = ["20270121120001_customer_lifecycle_experiments.sql"];
 
 async function main() {
   const c = pgClient();
