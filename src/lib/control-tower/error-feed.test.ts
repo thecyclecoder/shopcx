@@ -73,6 +73,7 @@ import {
   isForeignSupabasePostgresMissingAgentJobsBranchDirectRestLookupNoise,
   isForeignSupabasePostgresMissingAgentJobsTargetDirectRestLookupNoise,
   isForeignSupabasePostgresMissingAgentJobsRunTimestampDirectRestLookupNoise,
+  isForeignSupabasePostgresMissingAgentJobsCompletedAtTableBrowseNoise,
   isForeignSupabasePostgresMissingAgentJobsTerminalReasonAdhocNoise,
   isForeignSupabasePostgresMissingDirectorActivityKindDirectRestLookupNoise,
   isForeignSupabasePostgresMissingDirectorActivityDecisionDirectRestLookupNoise,
@@ -16854,6 +16855,96 @@ test("isForeignSupabasePostgresMissingAgentJobsRunTimestampDirectRestLookupNoise
     isForeignSupabasePostgresMissingAgentJobsRunTimestampDirectRestLookupNoise(
       "column agent_jobs.started_at does not exist",
       null,
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingAgentJobsCompletedAtTableBrowseNoise ──
+// Sibling of the run-timestamp drop above, for the no-`kind`, no-legacy-projection
+// generic table-browse shape that sibling can't catch (Control Tower signature
+// supabase-logs:bcce8c1594eead3f). A foreign / stale PostgREST client BROWSES our
+// `public.agent_jobs` rows (`select … claimed_at … completed_at …`) as if the table
+// carried a `completed_at` lifecycle column. The table has NEVER had `completed_at` —
+// timing is `created_at` / `updated_at` and the claim marker is `claimed_at`.
+// Foreign-owned surface, no lever from us — drop AT CAPTURE only when ALL THREE of the
+// exact column-missing message on `agent_jobs.completed_at`, a `claimed_at` co-mention,
+// AND a SELECT-lookup shape on `agent_jobs` (bare OR PostgREST CTE wrapper) are present.
+// A non-SELECT write, a different column, a SELECT without `claimed_at`, or a
+// column-missing on any other table still pages.
+
+test("isForeignSupabasePostgresMissingAgentJobsCompletedAtTableBrowseNoise drops the sampled browse query (bare + CTE wrapper + ERROR prefix + public.-qualified)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsCompletedAtTableBrowseNoise(
+      "column agent_jobs.completed_at does not exist",
+      "select id, status, claimed_at, completed_at, created_at, updated_at from public.agent_jobs order by created_at desc limit 100",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsCompletedAtTableBrowseNoise(
+      "column public.agent_jobs.completed_at does not exist",
+      "select claimed_at, completed_at from agent_jobs limit 50",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsCompletedAtTableBrowseNoise(
+      "ERROR: column agent_jobs.completed_at does not exist",
+      'with pgrst_source as ( select "public"."agent_jobs"."claimed_at", "public"."agent_jobs"."completed_at" from "public"."agent_jobs" ) select * from pgrst_source',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsCompletedAtTableBrowseNoise(
+      "  column agent_jobs.completed_at does not exist  ",
+      "  SELECT CLAIMED_AT, COMPLETED_AT FROM PUBLIC.AGENT_JOBS  ",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingAgentJobsCompletedAtTableBrowseNoise KEEPS real regressions (non-SELECT, different column, SELECT without claimed_at, other table, nullish)", () => {
+  // A non-SELECT write touching completed_at — real code-bug shape, still pages.
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsCompletedAtTableBrowseNoise(
+      "column agent_jobs.completed_at does not exist",
+      "update public.agent_jobs set completed_at = now(), claimed_at = now() where id = $1",
+    ),
+    false,
+  );
+  // A DIFFERENT column-missing on agent_jobs — real schema regression, still pages.
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsCompletedAtTableBrowseNoise(
+      "column agent_jobs.status does not exist",
+      "select claimed_at, status from public.agent_jobs",
+    ),
+    false,
+  );
+  // A SELECT without the claimed_at marker — not the browse fingerprint, still pages.
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsCompletedAtTableBrowseNoise(
+      "column agent_jobs.completed_at does not exist",
+      "select id, completed_at from public.agent_jobs",
+    ),
+    false,
+  );
+  // A column-missing on any OTHER table that owns completed_at — still pages.
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsCompletedAtTableBrowseNoise(
+      "column deploy_watches.completed_at does not exist",
+      "select claimed_at, completed_at from public.deploy_watches",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsCompletedAtTableBrowseNoise(null, null),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsCompletedAtTableBrowseNoise(
+      "column agent_jobs.completed_at does not exist",
+      "",
     ),
     false,
   );
