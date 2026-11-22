@@ -22,6 +22,12 @@ One row per self-running, person-grain lifecycle experiment — the spine the pr
 | `baseline_cv` | numeric | assumed baseline coefficient of variation of `proxy_metric`, feeding the power calc. |
 | `required_n_per_arm` | integer | the PRE-REGISTERED required sample size per arm (output of the power calc). The downstream verdict reads THIS fixed N — never decides N after seeing data. |
 | `stop_rule` | text | the pre-registered stop rule — when the test ends. |
+| `status_changed_by` | text | who last flipped `status` — operator id / `guardrail` / `ceo`. Written ONLY by [[../libraries/subscriber-experiments]] `setExperimentStatus` (the SDK chokepoint). Audit trail: no silent proxy flip. Migration `20270123120000_customer_lifecycle_experiment_status_verdict.sql`. |
+| `status_changed_reason` | text | why status last changed (e.g. the guardrail trip reason). |
+| `status_changed_at` | timestamptz | when status last changed. |
+| `verdict` | text | persisted terminal verdict on the primary metric — `treatment_wins` \| `holdout_wins` \| `no_difference`. Null until the [[../inngest/subscriber-experiment-guardrails]] cron concludes the test. |
+| `verdict_detail` | jsonb | the numbers behind the verdict (per-arm net merchandise revenue/person, lift, N). |
+| `verdict_at` | timestamptz | when the verdict was recorded. |
 | `created_at` / `updated_at` | timestamptz | |
 
 **Indexes:** `(workspace_id)`; UNIQUE `(workspace_id, slug)`.

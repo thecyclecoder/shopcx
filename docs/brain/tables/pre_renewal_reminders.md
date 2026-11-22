@@ -30,6 +30,7 @@ The send-ledger for the pre-renewal reminder channel. One row per customer **ide
 | `sms_timezone_source` | text | `customer_explicit` \| `address_zip` \| `phone_area_code` \| `fallback` ([[../libraries/marketing-text-timezone]]) |
 | `sms_scheduled_send_at` | timestamptz | the per-recipient local send instant (Twilio SendAt) |
 | `sms_error` | text | failure detail |
+| `previewed_amount_cents` | integer | the EXACT amount the reminder stated the renewal would charge (summed across the group's in-window subs), from [[../libraries/pre-renewal-reminders]] `reminderChargePreview` — the SAME pricing the renewal bills. Null when no amount could be resolved exactly (the reminder then omits it rather than guessing). Stamped so a mismatch with the actual renewal charge can be audited. Migration `20270123120001_pre_renewal_reminders_previewed_amount.sql`. |
 | `created_at` / `updated_at` | timestamptz | — |
 
 ## Who writes it

@@ -15,10 +15,17 @@
  * the harness SDK (`listAssignments`) — never a raw `.from` on the experiment tables (CLAUDE.md
  * raw-`.from` STOP rule, enforced by scripts/_check-subscriber-experiments-sdk-compliance.ts).
  *
- * Net revenue = Σ orders.total_cents ([[../../docs/brain/tables/orders.md]]) over the window
+ * Net MERCHANDISE revenue (CEO requirement, 2026-11-17): the primary metric is item revenue
+ *   after discounts, EXCLUDING tax + shipping, and ONLY from paid orders —
+ *   Σ `netMerchandiseCents(order)` over PAID orders in the window
  *   − Σ order_refunds.amount_cents ([[../../docs/brain/tables/order_refunds.md]]) where
- *     `status ∈ ('succeeded','settled')`. Refunds in `requested`/`failed`/`reversed` are EXCLUDED —
- *     they never moved settled money, so counting them would under-report real net revenue.
+ *     `status ∈ ('succeeded','settled')`. `orders.total_cents` is NOT used: it bundles tax
+ *     (`avalara_total_tax_cents`) + shipping + shipping protection. Merchandise is summed from
+ *     `line_items` (`price_cents * quantity − total_discount_cents`, Shipping-Protection lines
+ *     dropped) because `payment_details` is null on renewals ([[../../docs/brain/tables/orders.md]]).
+ *     Orders whose `financial_status` is not paid/partially_refunded are excluded (no money
+ *     collected). Refunds in `requested`/`failed`/`reversed` are EXCLUDED — they never moved
+ *     settled money, so counting them would under-report real net revenue.
  *
  * The measurement WINDOW is anchored PER GROUP on its `assigned_at` (sticky first-eligibility
  * moment): a group's window is [assigned_at, assigned_at + windowDays). This is the person-level
@@ -48,6 +55,43 @@ export const DEFAULT_WINDOW_DAYS = 90;
 /** Refund statuses that represent settled money leaving — the only ones netted out of revenue. */
 export const NETTED_REFUND_STATUSES = ["succeeded", "settled"] as const;
 
+/** Shipping Protection is not a product — its line never counts toward merchandise revenue. */
+function isShippingProtectionLine(title: string | null | undefined): boolean {
+  const t = (title || "").toLowerCase();
+  return t.includes("shipping protection") || t.includes("shipping insurance") || t.includes("route protection");
+}
+
+/**
+ * Did this order collect money? `financial_status` is mixed-case in prod (both `PAID` and `paid`,
+ * etc. — [[../../docs/brain/tables/orders.md]]). Only paid / partially_refunded orders count toward
+ * the metric; pending / authorized / voided / unpaid / fully-refunded are excluded (a fully-refunded
+ * order nets ~0 anyway). Pure — exported for testing.
+ */
+export function isPaidOrder(order: { financial_status: string | null }): boolean {
+  const s = (order.financial_status || "").toLowerCase();
+  return s === "paid" || s === "partially_refunded";
+}
+
+/**
+ * Net MERCHANDISE revenue for one order, in cents — item revenue after line discounts, EXCLUDING
+ * tax and shipping (CEO requirement, 2026-11-17). `orders.total_cents` bundles tax + shipping +
+ * shipping protection, so we sum the product `line_items` instead
+ * (`price_cents * quantity − total_discount_cents`), dropping Shipping-Protection lines. Handles both
+ * the webhook shape (`price_cents`) and the renewal-writer shape (`unit_cents`). Pure — exported for
+ * testing and reuse by the guardrail/verdict cron.
+ */
+export function netMerchandiseCents(order: { line_items: LineItem[] | null }): number {
+  let cents = 0;
+  for (const li of order.line_items ?? []) {
+    if (isShippingProtectionLine(li?.title)) continue;
+    const unit = li?.price_cents ?? li?.unit_cents ?? 0;
+    const qty = li?.quantity ?? 1;
+    const discount = li?.total_discount_cents ?? 0;
+    cents += unit * qty - discount;
+  }
+  return Math.max(0, cents);
+}
+
 /** customer_events types that count as a VOLUNTARY cancel (portal/self-serve + synced). */
 const VOLUNTARY_CANCEL_EVENT_TYPES = [
   "subscription.cancelled",
@@ -69,9 +113,9 @@ export interface ArmMetrics {
   arm: ExperimentArm;
   /** Number of assigned person-groups in this arm. */
   customerGroups: number;
-  /** Σ net revenue (charges − settled refunds) across every group in the arm, in cents. */
+  /** Σ net merchandise revenue (paid-order merchandise − settled refunds) across the arm, in cents. */
   netRevenueCents: number;
-  /** Σ gross charges (orders.total_cents) across the arm's groups in-window, in cents. */
+  /** Σ merchandise charges (net of line discounts, ex tax/shipping) across the arm in-window, in cents. */
   grossRevenueCents: number;
   /** Σ settled refunds netted out of this arm's revenue, in cents. */
   refundsCents: number;
@@ -211,7 +255,7 @@ export async function computeExperimentMetrics(
   for (const part of chunk(customerIds, IN_CHUNK)) {
     const { data } = await admin
       .from("orders")
-      .select("id, customer_id, total_cents, line_items, created_at")
+      .select("id, customer_id, total_cents, financial_status, line_items, created_at")
       .eq("workspace_id", workspaceId)
       .in("customer_id", part);
     for (const o of (data as OrderRow[] | null) ?? []) {
@@ -221,7 +265,9 @@ export async function computeExperimentMetrics(
       if (!g) continue;
       const t = new Date(o.created_at).getTime();
       if (t < g.windowStart || t >= g.windowEnd) continue;
-      g.chargesCents += o.total_cents ?? 0;
+      // Only paid orders count, and revenue is net MERCHANDISE (ex tax/shipping).
+      if (!isPaidOrder(o)) continue;
+      g.chargesCents += netMerchandiseCents(o);
       g.orderIds.add(o.id);
       orderToGroup.set(o.id, gid);
       for (const li of (o.line_items as LineItem[] | null) ?? []) {
@@ -354,6 +400,7 @@ interface OrderRow {
   id: string;
   customer_id: string;
   total_cents: number | null;
+  financial_status: string | null;
   line_items: LineItem[] | null;
   created_at: string;
 }
@@ -362,6 +409,11 @@ interface LineItem {
   variant_id?: string | null;
   product_id?: string | null;
   title?: string | null;
+  quantity?: number | null;
+  price_cents?: number | null;
+  /** Renewal-writer shape (some internal/shopcx orders use unit_cents). */
+  unit_cents?: number | null;
+  total_discount_cents?: number | null;
 }
 
 interface RefundRow {

@@ -45,5 +45,13 @@ This module performs NO writes. It reads orders, order_refunds, customer_links, 
 ## Status / open work
 
 - ✅ Phase 1 — this module (per-arm net-revenue + secondary-metric rollup).
-- ⏳ Phase 2 — guardrail evaluator auto-pauses the treatment arm + raises one deduped CEO escalation (reads these metrics + the M2 ledger).
-- ⏳ Phase 3 — scheduled verdict engine at pre-registered window close (control-tower `MONITORED_LOOPS`, retention owner, `emitCronHeartbeat`).
+- ✅ Phase 2/3 — guardrail evaluator + scheduled verdict engine shipped as [[../inngest/subscriber-experiment-guardrails]] (`subscriber-experiment-guardrail-cron`, retention-owned `MONITORED_LOOPS`, `emitCronHeartbeat`), logic in [[subscriber-experiment-guardrails]].
+
+## Net MERCHANDISE revenue (launch-readiness Phase 3)
+
+The primary metric is 90-day **net merchandise** revenue per person — item revenue after discounts, EXCLUDING tax + shipping, and only from PAID orders (CEO requirement, 2026-11-17). Two pure exports do this:
+
+- `netMerchandiseCents(order)` — sums the product `line_items` (`price_cents` or `unit_cents` × `quantity` − `total_discount_cents`), dropping Shipping-Protection lines. `orders.total_cents` is NOT used (it bundles `avalara_total_tax_cents` + shipping + SP). Renewal `payment_details` is null, so line_items is the source.
+- `isPaidOrder(order)` — only `paid` / `partially_refunded` count (mixed-case `financial_status`); pending/authorized/voided/fully-refunded excluded.
+
+`computeExperimentMetrics` now charges `netMerchandiseCents` over paid orders only, then nets settled refunds as before.

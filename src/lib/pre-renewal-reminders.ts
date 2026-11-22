@@ -36,12 +36,15 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { errText } from "@/lib/error-text";
 import {
   assignArm,
+  getExperiment,
+  isExperimentRunning,
   PRE_RENEWAL_EXPERIMENT_SLUG,
   type ExperimentArm,
 } from "@/lib/subscriber-experiments";
 import { resolveEffectiveSwitch } from "@/lib/control-tower/kill-switch-resolver";
 import { generateJourneyToken, getJourneyUrl } from "@/lib/journey-tokens";
 import { sendJourneyCTA } from "@/lib/email";
+import { resolveSubscriptionPricing } from "@/lib/pricing";
 import {
   resolveRecipientTimezone,
   computeSendInstant,
@@ -231,6 +234,111 @@ async function resolveGroupIdCached(admin: Admin, customerId: string): Promise<s
 }
 
 /* ------------------------------------------------------------------------------------------------
+ * Phase 2 — exact charge preview (what the renewal will bill, before billing).
+ * --------------------------------------------------------------------------------------------- */
+
+export interface ReminderChargePreviewItem {
+  title: string;
+  quantity: number;
+}
+
+export interface ReminderChargePreview {
+  subscriptionId: string;
+  /** The renewal this preview is for (YYYY-MM-DD or ISO), null if the sub has none. */
+  nextBillingDate: string | null;
+  /** Product items that will renew — Shipping Protection lines excluded (not products). */
+  items: ReminderChargePreviewItem[];
+  /** The exact amount the renewal will charge, in cents — or null when it can't be resolved
+   *  exactly (the reminder then omits the amount rather than showing a guess). */
+  amountCents: number | null;
+}
+
+function isShippingProtectionTitle(title: string): boolean {
+  const t = (title || "").toLowerCase();
+  return t.includes("shipping protection") || t.includes("shipping insurance") || t.includes("route protection");
+}
+
+/**
+ * Resolve, for ONE subscription, exactly what its next renewal will charge — using the SAME pricing
+ * the renewal charge uses for that engine, never a re-implementation (CEO requirement, 2026-11-17).
+ *
+ *   • internal subs → [[pricing]] `resolveSubscriptionPricing` (merchandise after discounts +
+ *     resolved shipping). Tax is added by Avalara AT charge time and can't be resolved exactly
+ *     before billing, so the preview amount is the pre-tax merchandise+shipping the engine computes.
+ *   • other engines → the stored contract-line prices the renewal bills (items[].price × quantity).
+ *
+ * Returns `amountCents: null` when the amount can't be resolved exactly — the reminder omits it
+ * rather than guessing. Read-only.
+ */
+export async function reminderChargePreview(
+  workspaceId: string,
+  subscriptionId: string,
+  admin: Admin = createAdminClient(),
+): Promise<ReminderChargePreview | null> {
+  const { data: sub } = await admin
+    .from("subscriptions")
+    .select("id, items, next_billing_date, is_internal, delivery_price_cents, pricing_offer_id")
+    .eq("workspace_id", workspaceId)
+    .eq("id", subscriptionId)
+    .maybeSingle();
+  if (!sub) return null;
+
+  const rawItems = (Array.isArray(sub.items) ? sub.items : []) as {
+    title?: string; quantity?: number; price?: string | number; variant_id?: string;
+  }[];
+  const productItems = rawItems.filter((i) => !isShippingProtectionTitle(i.title || ""));
+  const items: ReminderChargePreviewItem[] = productItems.map((i) => ({
+    title: i.title || "Item",
+    quantity: i.quantity || 1,
+  }));
+
+  let amountCents: number | null = null;
+  if (sub.is_internal) {
+    try {
+      const pricing = await resolveSubscriptionPricing(workspaceId, {
+        items: sub.items,
+        delivery_price_cents: sub.delivery_price_cents,
+        pricing_offer_id: sub.pricing_offer_id,
+      });
+      amountCents = pricing.product_subtotal_cents + pricing.shipping_cents;
+    } catch {
+      amountCents = null; // couldn't resolve exactly → omit rather than guess
+    }
+  } else {
+    // Other engines bill the stored contract-line prices. Sum them only if every product line
+    // carries a numeric price; a single missing price means we can't state the exact charge.
+    let sum = 0;
+    let resolvable = productItems.length > 0;
+    for (const i of productItems) {
+      const n = typeof i.price === "number" ? i.price : parseFloat(String(i.price ?? ""));
+      if (!Number.isFinite(n)) { resolvable = false; break; }
+      sum += Math.round(n * 100) * (i.quantity || 1);
+    }
+    amountCents = resolvable ? sum : null;
+  }
+
+  return {
+    subscriptionId: sub.id,
+    nextBillingDate: sub.next_billing_date ?? null,
+    items,
+    amountCents,
+  };
+}
+
+/** Format a cents amount as `$12.34`. */
+function fmtMoney(cents: number): string {
+  return `$${(cents / 100).toFixed(2)}`;
+}
+
+/** Format a YYYY-MM-DD / ISO date as a short human date (e.g. "Nov 27"). */
+function fmtDate(d: string | null): string {
+  if (!d) return "soon";
+  const dt = new Date(d.length === 10 ? `${d}T00:00:00Z` : d);
+  if (Number.isNaN(dt.getTime())) return "soon";
+  return dt.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
+}
+
+/* ------------------------------------------------------------------------------------------------
  * Phases 1-3 — per-workspace run: arm → ledger → email → SMS.
  * --------------------------------------------------------------------------------------------- */
 
@@ -246,6 +354,12 @@ export async function runPreRenewalRemindersForWorkspace(
   admin: Admin = createAdminClient(),
 ): Promise<Omit<PreRenewalRunResult, "workspaces">> {
   const out = { groups: 0, treatment: 0, holdout: 0, emailsSent: 0, smsSent: 0, smsSuppressed: 0, skipped: 0 };
+
+  // The experiment status is the real on/off switch (CEO requirement): skip the whole workspace
+  // unless the test is `running`. `draft` sends nothing; `stopped`/`complete` halts all reminders.
+  // Cheap no-op — one experiment read, no subscription scan — and the cron still heartbeats.
+  const experiment = await getExperiment(workspaceId, PRE_RENEWAL_EXPERIMENT_SLUG, admin);
+  if (!isExperimentRunning(experiment)) return out;
 
   const groups = await scanEligibleReminders(workspaceId, now, admin);
   if (groups.length === 0) return out;
@@ -373,8 +487,35 @@ async function sendTreatmentReminder(
   }
 
   const workspaceName = ws?.name || "Support";
-  const leadIn =
-    "Your next order is coming up soon. Take a moment to review it — swap flavors, change quantities, update your delivery date, or adjust anything before we bill.";
+
+  // ── Phase 2: exact charge preview — state the renewal date, items + exact amount, from the
+  // SAME pricing the renewal bills. One preview per in-window sub (group collapse shows each
+  // sub's date + amount). Stamp the previewed total on the ledger so a mismatch with the actual
+  // renewal charge can be audited (null when no amount resolved exactly). ──
+  const previews = (await Promise.all(
+    group.subscriptionIds.map((sid) => reminderChargePreview(workspaceId, sid, admin).catch(() => null)),
+  )).filter((p): p is ReminderChargePreview => !!p);
+
+  update.previewed_amount_cents = previews.reduce<number | null>((acc, p) => {
+    if (p.amountCents == null) return acc;
+    return (acc ?? 0) + p.amountCents;
+  }, null);
+
+  const renewalLines = previews.map((p) => {
+    const itemList = p.items.map((i) => (i.quantity > 1 ? `${i.quantity}x ${i.title}` : i.title)).join(", ");
+    const amountPart = p.amountCents != null ? ` — ${fmtMoney(p.amountCents)}` : "";
+    return `Renews ${fmtDate(p.nextBillingDate)}: ${itemList || "your subscription"}${amountPart}`;
+  });
+
+  const leadIn = renewalLines.length
+    ? `Your next order is coming up. Here's what will renew:\n${renewalLines.join("\n")}\n\nReview it — swap flavors, change quantities, update your delivery date, or adjust anything before we bill.`
+    : "Your next order is coming up soon. Take a moment to review it — swap flavors, change quantities, update your delivery date, or adjust anything before we bill.";
+
+  // Short SMS: date + amount + link (the journey url is appended by maybeSendConsentedSms).
+  const firstPreview = previews[0];
+  const smsLead = firstPreview
+    ? `Your next order renews ${fmtDate(firstPreview.nextBillingDate)}${firstPreview.amountCents != null ? ` — ${fmtMoney(firstPreview.amountCents)}` : ""}. Review or change it before we bill:`
+    : "Your next order is coming up soon. Review or change it before we bill:";
 
   // ── Phase 2: transactional email (goes to every treatment customer). ──
   if (customer?.email && token) {
@@ -417,7 +558,7 @@ async function sendTreatmentReminder(
     workspaceId,
     customer,
     token,
-    leadIn,
+    smsLead,
     now,
   );
   Object.assign(update, smsResult.update);

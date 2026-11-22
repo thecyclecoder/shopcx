@@ -42,6 +42,14 @@ Treatment mints a next-order [[../tables/journey_sessions]] session (slug `next-
 
 For a consented recipient it computes the per-recipient local send instant with `resolveRecipientTimezone` + `computeSendInstant` ([[marketing-text-timezone]]) targeting `PRE_RENEWAL_SMS_LOCAL_HOUR` (11:00) local — a business-hours hour, so quiet hours are never breached. The send goes via [[twilio]] `sendSMS` with Twilio `SendAt` when the window is ≥16 min out, else immediately. Same journey CTA link as the email (plain text + URL). The ledger records `channel='sms'`, the resolved timezone + source, and the scheduled instant.
 
+## Exact charge preview (launch-readiness Phase 2)
+
+`reminderChargePreview(workspaceId, subscriptionId)` → `{ nextBillingDate, items[], amountCents | null }`, using the SAME pricing the renewal bills (internal → [[pricing]] `resolveSubscriptionPricing` merchandise + shipping; other engines → stored contract-line prices). `amountCents` is null when it can't be resolved exactly — the reminder then OMITS the amount rather than guessing. `sendTreatmentReminder` builds one preview per in-window sub (group collapse shows each sub's date + amount), renders them into the email `contextMessage` and a short SMS (date + amount + link), and stamps the summed `previewed_amount_cents` on the ledger row for later charge-vs-preview audit.
+
+## Status is the on/off switch (launch-readiness Phase 4)
+
+`runPreRenewalRemindersForWorkspace` fetches the experiment once and returns early unless `isExperimentRunning` ([[subscriber-experiments]]) — a `draft`/`stopped`/`complete` workspace is a cheap no-op (no subscription scan), and the cron still heartbeats.
+
 ## Node completeness
 
 Owner `retention` in [[control-tower-node-registry]] / `MONITORED_LOOPS`; kill switch resolved via ancestry and honoured in `runPreRenewalReminders`; heartbeat every tick from the [[../inngest/pre-renewal-reminders]] cron.
