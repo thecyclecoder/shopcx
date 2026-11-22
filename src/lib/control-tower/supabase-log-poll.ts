@@ -38,6 +38,7 @@ import {
   isForeignSupabasePostgresAdhocMonthlyRevenueSnapshotsToCharTextNoise,
   isForeignSupabasePostgresMissingControlTowerEventsLookupNoise,
   isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise,
+  isForeignSupabasePostgresMissingProductsTemplateSuffixLookupNoise,
   isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise,
   isForeignSupabasePostgresMissingPlaybooksStepsDirectRestColumnNoise,
   isForeignSupabasePostgresMissingSpecPhaseChecksDirectRestColumnNoise,
@@ -397,6 +398,18 @@ const LOG_QUERIES: LogQuery[] = [
       // column-missing on a different relation, or a FATAL/PANIC/constraint violation
       // still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: a Shopify-shaped foreign client that selects the
+      // nonexistent `template_suffix` column against `products` — `select handle,
+      // template_suffix from products …`. `template_suffix` is a Shopify-native storefront
+      // field ShopCX has never stored and no code path selects
+      // ([[../specs/error-feed-drop-products-template-suffix-adhoc-noise]], Control Tower
+      // signature `supabase-logs:0e3379f172768a91`). Twin of the `loop_alerts` column-lookup
+      // drop above, scoped to the `products.template_suffix` miss. Narrowly gated to require
+      // BOTH the exact quoted `column "template_suffix" does not exist` message AND the bare
+      // SELECT-lookup shape on `products` — a different missing column on `products`, the same
+      // column-missing on a different relation, or a non-SELECT statement still surfaces /
+      // pages on first sighting.
+      if (isForeignSupabasePostgresMissingProductsTemplateSuffixLookupNoise(message, query)) return null;
       // Drop foreign-app noise at capture: a stale Supabase Studio / direct-REST client
       // reading `loop_alerts?select=...closed_at...` — a column `loop_alerts` has never
       // owned (lifecycle is tracked via `status` + `resolved_at`). PostgREST wraps the

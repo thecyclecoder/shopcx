@@ -1156,6 +1156,64 @@ export function isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise(
 }
 
 /**
+ * Foreign-app noise — Postgres reporting a missing COLUMN `template_suffix` on a SELECT
+ * against `public.products`. `template_suffix` is a Shopify-native storefront field (the
+ * theme-template suffix on a product) that ShopCX has NEVER stored and no code path ever
+ * selects — grep confirms zero references across `src/`, and no migration adds the column.
+ * The error only reaches Supabase's `postgres_logs` feed when a FOREIGN / stale client (a
+ * Shopify-shaped sync tool, a bookmarked PostgREST URL, an abandoned external integration)
+ * runs `select handle, template_suffix from products …`. There is no lever from ShopCX to
+ * make that query resolve — paging Platform on it
+ * ([[../specs/error-feed-drop-products-template-suffix-adhoc-noise]], Control Tower
+ * signature `supabase-logs:0e3379f172768a91`) is repair work for a query no code owns.
+ *
+ * Direct twin of `isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise` above —
+ * same narrow-gating shape (exact quoted `column "<name>" does not exist` message + bare
+ * SELECT-lookup shape), scoped to the `products.template_suffix` miss.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message, with any leading `ERROR: ` prefix stripped, is trimmed-equal to the
+ *      canonical column-missing shape `column "template_suffix" does not exist`, AND
+ *   2. the `parsed.query` attribute is a SELECT whose FROM clause names `products` (with
+ *      or without the `public.` schema qualifier) — any trailing WHERE / LIMIT / ORDER BY
+ *      tail is fine.
+ *
+ * Narrowly gated so:
+ *   - the SAME `template_suffix`-missing message on any OTHER relation still pages (a real
+ *     schema regression on a table that legitimately carries the column),
+ *   - a DIFFERENT column-missing on `products` (a real column that got renamed, breaking a
+ *     live ShopCX query) still pages — the pin covers `template_suffix` only,
+ *   - a `products` error attached to a NON-SELECT statement (INSERT / UPDATE / DELETE / DDL)
+ *     still pages — the pin is the bare SELECT-lookup shape only,
+ *   - a FATAL / PANIC / constraint violation on `products` is untouched (different message).
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not record`,
+ * so returning null here fully suppresses the row (no error_event, no loop_alert, no
+ * signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresMissingProductsTemplateSuffixLookupNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  // Strip an optional leading Postgres `ERROR: ` / `ERROR:  ` prefix — Supabase's logs
+  // surface sometimes carries it, sometimes doesn't. The column-missing message itself
+  // has a stable quoted shape: `column "template_suffix" does not exist`.
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  if (stripped !== 'column "template_suffix" does not exist') return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  // Bare SELECT-lookup on the table — allow any trailing WHERE/LIMIT/ORDER BY, but the
+  // statement MUST start with `select` and its FROM clause MUST name products (with or
+  // without the `public.` schema qualifier). Any non-SELECT / different-FROM statement
+  // fails this pin — a real query against products that references a missing column is a
+  // code bug we DO want to page on, not the Shopify-shaped foreign read this drop targets.
+  return /^select\b[\s\S]*\bfrom\s+(?:public\.)?products\b/.test(q);
+}
+
+/**
  * Foreign-app noise — Postgres reporting a missing COLUMN on `public.loop_alerts` for an
  * ad hoc / stale direct-REST SELECT. The `loop_alerts` monitoring table has never owned
  * `closed_at`, `error_signature`, or `loop_key` — its lifecycle is tracked via `status` +
