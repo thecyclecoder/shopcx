@@ -30,6 +30,10 @@
  *                  missing card/address is reported honestly + noted on the ticket for follow-up.
  *   not_now      → recorded, no mutation — an honest opt-out beats a dead link
  *
+ * 2026-11-22: a line under an ACTIVE crisis (out of stock) is named on the page ("X is out of stock
+ * right now, so we'll send Y instead and switch you back as soon as it's restocked"), swapped on
+ * restart and switched back on Resolve — see [[crisis-restart-swap]].
+ *
  * 2026-11-21 fix: before this, the page posted outcome "completed" but the outcome handler only
  * acted on "reactivated" and keyed on a session.subscription_id the mint never set, so
  * "Yes, restart" never restarted anything.
@@ -167,6 +171,9 @@ export async function buildReactivateSteps(
   const what = describeItems(sub.items);
   const wasPaused = sub.status === "paused";
   const gifts = await loadWinbackGifts(admin, workspaceId);
+  // Out-of-stock flavors (active crisis) are swapped on restart; say so BEFORE they click.
+  const { crisisSwapsForItems, crisisNotice } = await import("@/lib/crisis-restart-swap");
+  const notice = crisisNotice(await crisisSwapsForItems(admin, workspaceId, sub.items));
   const options = gifts.length
     ? [
         ...gifts.map((g) => ({ value: giftOptionValue(g.variant_id), label: `Restart + free ${g.label}` })),
@@ -186,9 +193,10 @@ export async function buildReactivateSteps(
       question: wasPaused
         ? `Ready to restart your subscription? We'll pick it right back up with ${what}.`
         : `Want your subscription back? We'll restart it with ${what}.`,
-      subtitle: gifts.length
+      subtitle: (gifts.length
         ? "Pick your free bag and you're set: same items, same price you had before, and the gift ships free in your first order, which processes tomorrow."
-        : "One click and you're set: same items, same price you had before. Your next order processes tomorrow.",
+        : "One click and you're set: same items, same price you had before. Your next order processes tomorrow.")
+        + (notice ? ` ${notice}` : ""),
       options,
       isTerminal: true,
     }],

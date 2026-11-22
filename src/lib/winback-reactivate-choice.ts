@@ -136,8 +136,11 @@ export async function handleReactivateChoice(
       }
     }
   }
+  const { crisisSwapNote } = await import("@/lib/crisis-restart-swap");
+  const swapNote = crisisSwapNote(r.crisisSwaps);
   await note(`[Win-back] Customer restarted their subscription (contract ${r.contractId}). Next order: ${when}.`
     + (giftLabel ? ` Free gift added: ${giftLabel}.` : "")
+    + (swapNote ? ` ${swapNote}` : "")
     + (giftError ? ` ⚠ Free gift NOT added (${giftError}) — add it manually.` : ""));
   if (giftError) console.error(`[winback-reactivate] gift FAILED contract=${r.contractId} variant=${parsed.giftVariantId}: ${giftError}`);
   const { logCustomerEvent } = await import("@/lib/customer-events");
@@ -147,9 +150,14 @@ export async function handleReactivateChoice(
     eventType: "winback.reactivated",
     source: "journey",
     summary: "Customer restarted their subscription from the win-back journey",
-    properties: { session_id: session.id, subscription_id: sub.id, gift_variant_id: parsed.giftVariantId, gift_added: !!giftLabel, gift_error: giftError, shopify_contract_id: r.contractId, next_billing_date: r.nextBillingDate, revived_on_shopcx: r.revivedOnShopcx },
+    properties: { session_id: session.id, subscription_id: sub.id, crisis_swaps: r.crisisSwaps.map((x) => ({ crisis_id: x.crisisId, from: x.fromLabel, to: x.toLabel, ok: x.ok, error: x.error ?? null })), gift_variant_id: parsed.giftVariantId, gift_added: !!giftLabel, gift_error: giftError, shopify_contract_id: r.contractId, next_billing_date: r.nextBillingDate, revived_on_shopcx: r.revivedOnShopcx },
   });
-  return {
+  // Out-of-stock flavors swapped on restart (the page already warned them; confirm it here).
+  const swapped = r.crisisSwaps.filter((x) => x.ok);
+  const swapLine = swapped.length
+    ? ` Since ${swapped.map((x) => x.fromLabel).join(" and ")} ${swapped.length > 1 ? "are" : "is"} out of stock, we're sending ${swapped.map((x) => x.toLabel).join(" and ")} for now and will switch you back when it's restocked.`
+    : "";
+  const done = {
     outcome: "reactivated",
     message: giftLabel
       ? `You're all set! Your subscription is back on, and your free ${giftLabel} ships with your next order on ${when}.`
@@ -157,6 +165,7 @@ export async function handleReactivateChoice(
         ? `You're all set! Your subscription is back on, and your next order processes on ${when}. We'll add your free gift to it.`
         : `You're all set! Your subscription is back on, and your next order processes on ${when}.`,
   };
+  return { ...done, message: done.message + swapLine };
 }
 
 /**

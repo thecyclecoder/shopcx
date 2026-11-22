@@ -82,6 +82,8 @@ export const journeySessionCompleted = inngest.createFunction(
               const r = await reactivateSubscription(workspace_id, subData.shopify_contract_id);
               if (!r.ok) {
                 console.error(`[journey-outcomes] reactivate FAILED ${subData.shopify_contract_id}: ${r.reason} ${r.message}`);
+              } else if (r.crisisSwaps.some((x) => !x.ok || x.error)) {
+                console.error(`[journey-outcomes] reactivate crisis swap issue ${subData.shopify_contract_id}: ${JSON.stringify(r.crisisSwaps)}`);
               }
             }
           }

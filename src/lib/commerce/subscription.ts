@@ -704,7 +704,11 @@ export async function subscriptionUpdateNextBillingDate(
 export type ReactivateFailureReason = "needs_payment_method" | "needs_address" | "appstle_not_configured" | "error";
 
 export type ReactivateResult =
-  | { ok: true; contractId: string; nextBillingDate: string; revivedOnShopcx: boolean }
+  | {
+      ok: true; contractId: string; nextBillingDate: string; revivedOnShopcx: boolean;
+      /** Out-of-stock lines swapped to the crisis default on restart ([[crisis-restart-swap]]). */
+      crisisSwaps: import("@/lib/crisis-restart-swap").CrisisSwapResult[];
+    }
   | { ok: false; reason: ReactivateFailureReason; message: string; details?: unknown };
 
 /** Default first-charge date for a restart: tomorrow (+15 min so it never lands in the past). */
@@ -728,6 +732,8 @@ export function defaultReactivationDate(): string {
  *      internal-aware `subscriptionUpdateNextBillingDate` dispatches to the Appstle vendor
  *      wrapper; never a hand-rolled subscription-admin.appstle.com PUT.
  *   4. Resume through `subscriptionAction` (internal-aware), then the local row is stamped active.
+ *   5. Any line under an active crisis is swapped to the crisis default and enrolled with
+ *      auto_swap_back ([[crisis-restart-swap]]), so a restart never bills an out-of-stock flavor.
  */
 export async function reactivateSubscription(
   workspaceId: string,
@@ -798,7 +804,18 @@ export async function reactivateSubscription(
     .eq("workspace_id", workspaceId)
     .eq("shopify_contract_id", contractId);
 
-  return { ok: true, contractId, nextBillingDate, revivedOnShopcx };
+  // A restarted sub must never bill a flavor under an active crisis (CEO 2026-11-22). Swap it to
+  // the crisis default now and record the crisis row so Resolve swaps it back. Here, in the shared
+  // restart path, so the portal and the win-back journey behave the same. Never fails the restart.
+  let crisisSwaps: import("@/lib/crisis-restart-swap").CrisisSwapResult[] = [];
+  try {
+    const { applyCrisisSwapsAfterRestart } = await import("@/lib/crisis-restart-swap");
+    crisisSwaps = await applyCrisisSwapsAfterRestart(workspaceId, contractId);
+  } catch (e) {
+    console.error(`[reactivate] crisis swap check failed contract=${contractId}:`, e);
+  }
+
+  return { ok: true, contractId, nextBillingDate, revivedOnShopcx, crisisSwaps };
 }
 
 // ── Payment method ──────────────────────────────────────────────────

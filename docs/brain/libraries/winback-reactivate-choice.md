@@ -39,3 +39,5 @@ plus `customers.portal_banned`. `handleReactivateChoice` checks it before any re
 click ends the session with outcome `blocked_fraud_gate`, writes an internal ticket note, restarts
 nothing, adds no gift. Win-back send scripts must call the same function so the audience filter and
 the click gate can't diverge (CEO: never send restart offers to banned, fraud or chargeback customers).
+
+**2026-11-22:** the success message and ticket note include any out-of-stock swap made on restart ([[crisis-restart-swap]]).
