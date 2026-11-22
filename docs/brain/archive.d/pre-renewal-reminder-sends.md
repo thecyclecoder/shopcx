@@ -1,0 +1,1 @@
+- **Pre-renewal reminder sends (email + consented SMS)** · verified 2026-11-22 · → [[../libraries/pre-renewal-reminders]]
