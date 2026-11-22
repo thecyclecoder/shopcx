@@ -1,6 +1,6 @@
 # libraries/journey-step-builder
 
-Switch that delegates to per-journey builders (cancel, discount, crisis tiers, shipping-address, missing-items, select-subscription, account-linking).
+Switch that delegates to per-journey builders (next-order, cancel, discount, crisis tiers, shipping-address, missing-items, select-subscription, account-linking).
 
 **File:** `src/lib/journey-step-builder.ts`
 
@@ -27,6 +27,7 @@ async function buildJourneySteps(workspaceId: string, journeyType: string, custo
 
 ## Callers
 
+- `src/lib/next-order-journey-builder.ts`
 - `src/lib/crisis-journey-builder.ts`
 - `src/lib/missing-items-journey-builder.ts`
 - `src/lib/select-subscription-journey-builder.ts`
