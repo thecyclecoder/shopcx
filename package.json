@@ -63,6 +63,7 @@
     "test:support-mode": "tsx --test src/lib/support-mode.test.ts",
     "test:subscriber-experiments": "tsx --test src/lib/subscriber-experiments.test.ts",
     "test:pre-renewal-reminders": "tsx --test src/lib/pre-renewal-reminders.test.ts",
+    "test:reminder-results-sdk": "tsx --test src/lib/retention/reminder-results-sdk.test.ts",
     "test:workspace-features": "tsx --test src/lib/workspace-features.test.ts",
     "test:widget-identity": "tsx --test src/lib/widget-identity.test.ts",
     "test:shopgrowth-support": "tsx --test src/lib/shopgrowth-support.test.ts",
