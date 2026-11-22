@@ -1,0 +1,1 @@
+- **Filter Supabase Realtime 'no partition of messages' authorize errors out of the postgres error feed** · verified 2026-11-22 · → [[../libraries/error-feed]]
