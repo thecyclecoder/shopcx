@@ -501,14 +501,22 @@ export async function shopcxAddOneTimeLine(
     // already-BILLED or skipped cycle and reports success, but that order has shipped (or won't),
     // so the customer never receives what a retention flow just promised them — the worst shape of
     // failure: the save offer is recorded as honoured and silently isn't.
-    const { withBillingCycleDraft, getBillingCycleForDate } = await import("@/lib/commerce/shopify-subscription-client");
+    const { withBillingCycleDraft, getBillingCycleForDate, resolveChargeableCycle } = await import("@/lib/commerce/shopify-subscription-client");
     const cyc = await getBillingCycleForDate(workspaceId, contractId, date);
     if (!cyc.success || !cyc.cycle) return { success: false, error: cyc.error ?? "cycle_unresolvable" };
     if (cyc.cycle.status === "BILLED") return { success: false, error: "next cycle already billed — gift would never ship" };
     if (cyc.cycle.skipped) return { success: false, error: "next cycle is skipped — gift would never ship" };
 
+    // ⭐ Put the gift on the cycle the NEXT CHARGE bills, not the cycle that contains the date.
+    // The renewal worker (and Order Now / dunning) bill `resolveChargeableCycle` — the first
+    // unbilled, unskipped cycle by index — which can be an EARLIER cycle than the date's own
+    // (seen 2026-11-22: next date 11-23 sat in cycle 3, expected 12-08, while an earlier cycle was
+    // the chargeable one). An edit on the wrong cycle ships the gift an order late, or never.
+    const ch = await resolveChargeableCycle(workspaceId, contractId);
+    const selector = ch.success && ch.index != null ? { index: ch.index } : { date };
+
     const bare = String(variantId).replace("gid://shopify/ProductVariant/", "");
-    return withBillingCycleDraft(workspaceId, contractId, { date }, (draftId) =>
+    return withBillingCycleDraft(workspaceId, contractId, selector, (draftId) =>
       shopifyAddDraftLine(workspaceId, draftId, bare, quantity, (priceCents / 100).toFixed(2)),
     );
   } catch (err) { return { success: false, error: errText(err) }; }
