@@ -10128,6 +10128,88 @@ export function isForeignSupabasePostgresMissingSpecsMergedAtAdhocNoise(
 }
 
 /**
+ * Foreign-app noise — Postgres reporting `column specs.goal_slug does not exist` for
+ * an ad hoc / stale PostgREST direct-REST SELECT against `public.specs.goal_slug`.
+ * The `specs` table exists (see `supabase/migrations/20260713120001_specs_and_spec_phases.sql`
+ * and its follow-ons) but has NEVER had a `goal_slug` column — a spec's goal linkage is
+ * modeled on `public.specs.milestone_id` / `goal_branch_sha` ([[../tables/specs]]), not on
+ * a slug string on the row — and every ShopCX reader goes through the
+ * [[../libraries/specs-table]] SDK, which never selects `goal_slug`. The column-missing
+ * ERROR only reaches this feed when a foreign app / stale SQL Editor session / deprecated
+ * integration issues a direct-REST lookup that types `goal_slug` on `public.specs`
+ * (`/rest/v1/specs?select=slug,status,goal_slug,...`, observed both as a bare SELECT and
+ * as the PostgREST-wrapped `WITH pgrst_source AS ( SELECT ... FROM "public"."specs" ... )`
+ * CTE form). There is no lever from ShopCX to make that query resolve — adding a fake
+ * `goal_slug` column would make the data model worse since goal linkage is already modeled
+ * on `milestone_id` / `goal_branch_sha` — so paging Platform on it (Control Tower signature
+ * `supabase-logs:089b48e5daedc132`,
+ * [[../specs/error-feed-drop-specs-goal-slug-direct-rest-noise]]) is repair work for a
+ * query we don't own.
+ *
+ * Sibling of `isForeignSupabasePostgresMissingSpecsMergedAtAdhocNoise` and
+ * `isForeignSupabasePostgresMissingSpecsMergeShaDirectRestLookupNoise` — the same
+ * narrow-gating shape (exact `column <table>.<name> does not exist` + SELECT-lookup shape
+ * covering BOTH bare and PostgREST CTE wrapper forms), aimed at a different foreign caller
+ * on the same `specs` table but a different phantom column.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical column-missing shape for THIS column —
+ *      trimmed equal to `column specs.goal_slug does not exist` (or the `public.`
+ *      qualified variant, with any leading `ERROR: ` prefix Postgres includes on the
+ *      logs surface stripped), AND
+ *   2. the `parsed.query` attribute is a SELECT-lookup on `public.specs` — either
+ *      (a) the bare `select ... from public.specs` shape, OR (b) the PostgREST-
+ *      generated `WITH pgrst_source AS ( SELECT ... FROM "public"."specs" ... )`
+ *      CTE wrapper form with double-quoted identifiers. Both forms are the same
+ *      foreign-owned read.
+ *
+ * Narrowly gated so a column-missing error for any OTHER table, a DIFFERENT column on
+ * `specs` (a real rename — `status`, `slug`, `workspace_id`), or a `specs.goal_slug`
+ * error attached to a non-SELECT statement (INSERT / UPDATE / DELETE / DDL, a JOIN across
+ * `spec_phases`) all still page. Empty / nullish message OR query returns `false`.
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not
+ * record`, so returning null there fully suppresses the row (no error_event, no
+ * loop_alert, no signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresMissingSpecsGoalSlugAdhocNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  // Strip an optional leading Postgres `ERROR: ` / `ERROR:  ` prefix — Supabase's logs
+  // surface sometimes carries it, sometimes doesn't. The column-missing message itself
+  // has a stable shape: `column <table>.<name> does not exist`, pinned here to
+  // `specs.goal_slug` (with or without the `public.` qualifier).
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column specs.goal_slug does not exist" ||
+    stripped === "column public.specs.goal_slug does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  // Bare SELECT-lookup on the table — allow any trailing WHERE/LIMIT/ORDER BY, but the
+  // statement MUST start with `select` and its FROM clause MUST name `specs` (with or
+  // without the `public.` schema qualifier). A JOIN / UNION / non-SELECT stays
+  // captured — a caller that actually writes to specs with a bogus `goal_slug` column
+  // is a code bug we DO want to page on, not the ad hoc direct-REST read this drop
+  // targets. `\b` around `specs` keeps the anchor from matching sibling tables like
+  // `spec_phases` / `spec_status_history`.
+  if (/^select\b[\s\S]*\bfrom\s+(?:public\.)?specs\b/.test(q)) return true;
+  // PostgREST direct-REST wraps the same lookup as `WITH pgrst_source AS ( SELECT ...
+  // FROM "public"."specs" ... )` with double-quoted identifiers. Same foreign-owned
+  // read, different rendering — the plain SELECT regex above misses it because the
+  // statement starts with `with` and the FROM clause carries the quoted
+  // `"public"."specs"` shape. Guarded so the CTE branch requires the wrapped op to be
+  // a SELECT (a PostgREST INSERT/UPDATE inside the same wrapper — e.g.
+  // `WITH pgrst_source AS (INSERT INTO "public"."specs"("goal_slug") ...)` — is a real
+  // code-write and stays captured/paged).
+  return /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"?(?:public"?\.)?"?specs\b/.test(q);
+}
+
+/**
  * Foreign-app noise — Postgres reporting `column specs.merge_sha does not exist` for
  * an ad hoc / stale PostgREST direct-REST SELECT against `public.specs.merge_sha`.
  * The `specs` table exists (see `supabase/migrations/20260713120001_specs_and_spec_phases.sql`

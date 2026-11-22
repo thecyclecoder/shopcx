@@ -188,6 +188,7 @@ import {
   isForeignSupabasePostgresMissingSpecsCurrentPhaseAdhocNoise,
   isForeignSupabasePostgresMissingSpecsPhaseAdhocNoise,
   isForeignSupabasePostgresMissingSpecsMergedAtAdhocNoise,
+  isForeignSupabasePostgresMissingSpecsGoalSlugAdhocNoise,
   isForeignSupabasePostgresMissingSpecsMergeShaDirectRestLookupNoise,
   isForeignSupabasePostgresMissingSpecsReviewStatusAdhocNoise,
   isForeignSupabasePostgresMissingSpecsFlagsAdhocNoise,
@@ -2004,6 +2005,16 @@ const LOG_QUERIES: LogQuery[] = [
       // through `spec_phases`, or on `specs` via a non-SELECT statement (real code-bug
       // shape) still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingSpecsMergedAtAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
+      // against `public.specs.goal_slug`. The `specs` table exists but has NEVER had a
+      // `goal_slug` column — a spec's goal linkage is modeled on `specs.milestone_id` /
+      // `goal_branch_sha`, not a slug string on the row, and every ShopCX reader goes
+      // through the specs-table SDK (which never selects `goal_slug`). Pinned to the exact
+      // column-missing message AND a SELECT-on-specs shape (bare OR PostgREST CTE wrapper)
+      // — a column-missing on any other table, a different column on `specs`, a JOIN
+      // through `spec_phases`, or a non-SELECT write still pages (Control Tower signature
+      // `supabase-logs:089b48e5daedc132`).
+      if (isForeignSupabasePostgresMissingSpecsGoalSlugAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
       // against `public.specs.merge_sha`. The `specs` table exists but has NEVER had a
       // `merge_sha` column — the shipped-with merge SHA is modeled per-phase on
