@@ -12,6 +12,10 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Scope out Studio Table-Editor appstle_api_calls.contract_id missing-column noise** · verified 2026-11-21 · → [[../libraries/error-feed]]
+- **Drop foreign ad-hoc customer_events timestamp-syntax errors from the Control Tower feed** · verified 2026-11-21 · → [[../libraries/error-feed]]
+- **Scope out foreign direct-REST noise for never-existed spec_phase_checks columns** · verified 2026-11-21 · → [[../libraries/error-feed]]
+- **Drop foreign-app noise: invalid-uuid probes on orders.id** · verified 2026-11-21 · → [[../libraries/error-feed]]
 - **Scope out foreign ad-hoc crisis_events.substitute_variant_id missing-column noise from the error feed** · verified 2026-11-20 · → [[../libraries/error-feed]]
 - **Drop foreign customer_payment_methods.link_group_id direct-REST read at capture** · verified 2026-11-20 · → [[../libraries/error-feed]]
 - **Self-verify self-heal must actually enqueue the next build it promises** · verified 2026-11-20 · → [[lifecycles/spec-goal-branch-pm-flow]] · [[libraries/agent-jobs]] · [[libraries/self-verify-fix-phase]]
