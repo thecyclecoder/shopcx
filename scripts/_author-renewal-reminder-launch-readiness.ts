@@ -40,7 +40,7 @@ async function main() {
       parent: '[[../functions/retention]] — "Churn prevention & win-back" mandate: makes the shipped pre-renewal reminder safe to launch.',
       blocked_by: [],
       human_review:
-        "Before launch, Dylan previews a test reminder email + the next-order page on his own account and confirms the amount shown matches what his next renewal will charge.",
+        "Before launch, Dylan previews a test reminder email + the next-order page on his own account and confirms the amount shown matches what his next renewal will charge. Also open a next-order journey for a test customer: Shipping Protection, Strawberry Lemonade Tabs and Cocoa Instant Coffee are not offered, prices match the Portal, and a frequency change leaves a sane next bill date.",
       phases: [
         {
           title: "Phase 1 — Next-order journey at Portal parity (catalog, prices, guards, frequency, failed-edit ticket)",
@@ -84,7 +84,6 @@ async function main() {
             grep(6, "journey applies the selectability guard", "assertNewVariantsSelectable", "src/app/api/journey/[token]/edit/route.ts"),
             grep(7, "journey applies the failed-payment guard", "shouldBlockForFailedPayment", "src/app/api/journey/[token]/edit/route.ts"),
             grep(8, "failed edits get a follow-up ticket", "ensureJourneyFollowUpTicket", "src/app/api/journey/[token]/edit/route.ts"),
-            human(9, "Open a next-order journey for a test customer: Shipping Protection, Strawberry Lemonade Tabs and Cocoa Instant Coffee are not offered, prices match the Portal, and a frequency change leaves a sane next bill date."),
           ],
         },
         {
