@@ -282,6 +282,30 @@ export async function getArm(
 }
 
 /**
+ * List EVERY sticky assignment for an experiment — the read surface the measurement engines
+ * ([[subscriber-experiment-metrics]]) bucket by. Reads the assignments table through the SDK so
+ * no downstream consumer hand-rolls a raw `.from('customer_lifecycle_experiment_assignments')`
+ * (CLAUDE.md raw-`.from` STOP rule; this is the sanctioned read chokepoint). Returns [] when the
+ * experiment doesn't exist for the workspace. Each row carries the person `group_id`, its permanent
+ * `arm`, and `assigned_at` (the anchor for a per-person measurement window).
+ */
+export async function listAssignments(
+  workspaceId: string,
+  experimentSlug: string,
+  admin: Admin = createAdminClient(),
+): Promise<ExperimentAssignmentRow[]> {
+  const experiment = await getExperiment(workspaceId, experimentSlug, admin);
+  if (!experiment) return [];
+  const { data, error } = await admin
+    .from("customer_lifecycle_experiment_assignments")
+    .select("*")
+    .eq("workspace_id", workspaceId)
+    .eq("experiment_id", experiment.id);
+  if (error) throw new Error(`listAssignments(${experimentSlug}): ${error.message}`);
+  return (data as ExperimentAssignmentRow[] | null) ?? [];
+}
+
+/**
  * Assign (or read) a customer's permanent arm for an experiment — the harness's core call.
  *
  *   1. Resolve the customer's full linked-account GROUP (`resolveGroupId`) so all of a person's
