@@ -14730,14 +14730,19 @@ async function runSpecTestJob(job: Job) {
     {
       let specCheckRepoRoot = REPO_DIR;
       let branchWt: string | null = null;
-      if (isPreMerge && branch) {
+      // POST-MERGE runs read a fresh origin/main worktree too. REPO_DIR only advances on the idle self-update,
+      // so on a busy box it can sit commits behind main and a just-merged spec's greps read as "no match"
+      // (next-order-journey-editor, 2026-11-22: verdict 'issues' on code that was on main, which then
+      // blocked its fold). Falls back to REPO_DIR if the worktree can't be added (the old behavior).
+      const checkRef = isPreMerge && branch ? branch : "main";
+      {
         try {
           branchWt = join(BUILDS_DIR, `spectest-${job.id}`);
           removeWorktreeDir(branchWt); // idempotent — clear a stale slot from a prior reaped run
-          sh("git", ["fetch", "origin", branch]);
-          const add = sh("git", ["worktree", "add", "--detach", branchWt, `origin/${branch}`]);
+          sh("git", ["fetch", "origin", checkRef]);
+          const add = sh("git", ["worktree", "add", "--detach", branchWt, `origin/${checkRef}`]);
           if (add.code !== 0) {
-            console.warn(`${tag} branch worktree add failed → running checks against main (branch-only code may under-verify): ${((add.err || add.out) ?? "").slice(-300)}`);
+            console.warn(`${tag} ${checkRef} worktree add failed → running checks against REPO_DIR (may under-verify): ${((add.err || add.out) ?? "").slice(-300)}`);
             removeWorktreeDir(branchWt);
             branchWt = null;
           } else {
