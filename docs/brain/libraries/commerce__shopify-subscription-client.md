@@ -428,3 +428,7 @@ lines (`readPendingCycleEdits`: edited-cycle lines whose id is not on the base c
 edits, retries the op, and if the contract is still ACTIVE re-adds the lines on the cycle the next charge
 bills (`resolveChargeableCycle`). Cancel/pause drop the gift on purpose. Any other error passes through
 untouched. A failed re-add is logged (`[cycle-edit-lock]`).
+Live-verified on contract 36020289709 (2026-11-22): cancel and pause hit the lock;
+`subscriptionContractSetNextBillingDate` does NOT (it succeeds with a cycle edit present).
+`readPendingCycleEdits` must start its `subscriptionBillingCycles` range at the contract's `createdAt`
+(+1s): Shopify rejects an earlier start with "Billing cycle start date out of range".

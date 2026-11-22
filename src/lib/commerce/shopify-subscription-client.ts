@@ -138,7 +138,11 @@ export async function readPendingCycleEdits(
   const base = await getSubscriptionContract(workspaceId, contractId);
   if (!base.success || !base.contract) return { success: false, error: base.error ?? "contract unreadable", editedCycles: [], lines: [] };
   const baseIds = new Set(base.contract.lines.map((l) => l.id));
-  const start = new Date(Date.now() - 400 * 24 * 3600 * 1000).toISOString();
+  // ⚠️ Shopify rejects a range that starts before the contract's createdAt ("Billing cycle start
+  // date out of range") — the first live test failed exactly that way and the wrapper silently
+  // passed the lock error through. Start at createdAt + 1s (same clamp as shopcxAddOneTimeLine).
+  const createdMs = base.contract.createdAt ? new Date(base.contract.createdAt).getTime() : NaN;
+  const start = new Date(Number.isFinite(createdMs) ? createdMs + 1000 : Date.now()).toISOString();
   const end = new Date(Date.now() + 400 * 24 * 3600 * 1000).toISOString();
   const env = await gql<{ subscriptionBillingCycles?: { edges: { node: {
     cycleIndex: number; edited: boolean;
