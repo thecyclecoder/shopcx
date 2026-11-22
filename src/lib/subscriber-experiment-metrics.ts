@@ -71,6 +71,12 @@ export interface ArmMetrics {
   customerGroups: number;
   /** Σ net revenue (charges − settled refunds) across every group in the arm, in cents. */
   netRevenueCents: number;
+  /** Σ gross charges (orders.total_cents) across the arm's groups in-window, in cents. */
+  grossRevenueCents: number;
+  /** Σ settled refunds netted out of this arm's revenue, in cents. */
+  refundsCents: number;
+  /** Number of groups with ≥1 settled refund in-window — the numerator of the arm's refund rate. */
+  refundedCustomerGroups: number;
   /** Mean net revenue per person-group, in cents (0 when the arm has no groups). */
   netRevenuePerCustomerCents: number;
   /** Fraction of groups with ≥1 voluntary cancel event in-window. */
@@ -111,6 +117,9 @@ function emptyArm(arm: ExperimentArm): ArmMetrics {
     arm,
     customerGroups: 0,
     netRevenueCents: 0,
+    grossRevenueCents: 0,
+    refundsCents: 0,
+    refundedCustomerGroups: 0,
     netRevenuePerCustomerCents: 0,
     voluntaryCancelRate: 0,
     skipRate: 0,
@@ -305,18 +314,27 @@ export async function computeExperimentMetrics(
       continue;
     }
     let net = 0;
+    let gross = 0;
+    let refunds = 0;
+    let refundedGroups = 0;
     let cancels = 0;
     let skips = 0;
     let swaps = 0;
     let distinctSum = 0;
     for (const g of gs) {
       net += g.chargesCents - g.refundsCents;
+      gross += g.chargesCents;
+      refunds += g.refundsCents;
+      if (g.refundsCents > 0) refundedGroups += 1;
       if (g.cancelled) cancels += 1;
       if (g.skipped) skips += 1;
       if (g.swappedOrAdded) swaps += 1;
       distinctSum += g.distinctVariants.size;
     }
     m.netRevenueCents = net;
+    m.grossRevenueCents = gross;
+    m.refundsCents = refunds;
+    m.refundedCustomerGroups = refundedGroups;
     m.netRevenuePerCustomerCents = net / n;
     m.voluntaryCancelRate = cancels / n;
     m.skipRate = skips / n;

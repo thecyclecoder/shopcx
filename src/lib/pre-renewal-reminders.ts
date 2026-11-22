@@ -34,7 +34,11 @@
  */
 import { createAdminClient } from "@/lib/supabase/admin";
 import { errText } from "@/lib/error-text";
-import { assignArm, PRE_RENEWAL_EXPERIMENT_SLUG } from "@/lib/subscriber-experiments";
+import {
+  assignArm,
+  PRE_RENEWAL_EXPERIMENT_SLUG,
+  type ExperimentArm,
+} from "@/lib/subscriber-experiments";
 import { resolveEffectiveSwitch } from "@/lib/control-tower/kill-switch-resolver";
 import { generateJourneyToken, getJourneyUrl } from "@/lib/journey-tokens";
 import { sendJourneyCTA } from "@/lib/email";
@@ -95,6 +99,45 @@ export interface PreRenewalRunResult {
 /** YYYY-MM-DD in UTC — stable, timezone-free dedupe key for a renewal date. */
 function toDateKey(d: Date): string {
   return d.toISOString().slice(0, 10);
+}
+
+/* ------------------------------------------------------------------------------------------------
+ * Read surface — the ledger's single read chokepoint (all `.from("pre_renewal_reminders")`
+ * access lives in this module, CLAUDE.md raw-`.from` rule). The M4 results SDK
+ * ([[../../docs/brain/libraries/reminder-results-sdk]]) reads send/suppression counts through here
+ * rather than hand-rolling the query.
+ * --------------------------------------------------------------------------------------------- */
+
+/** One reminder-ledger row, as the results lens reads it (read-only projection). */
+export interface ReminderLedgerRow {
+  group_id: string;
+  customer_id: string;
+  experiment_arm: ExperimentArm;
+  status: string;
+  channels: string[] | null;
+  journey_session_id: string | null;
+  email_status: string | null;
+  sms_status: string | null;
+  sms_suppression_reason: string | null;
+}
+
+/**
+ * Every reminder-ledger row for a workspace, arm-stamped — the read surface the M4 results
+ * dashboard rolls up into per-arm send/suppression counts. Pure read, mutates nothing. Returns []
+ * when the workspace has no reminders yet.
+ */
+export async function listReminderLedger(
+  workspaceId: string,
+  admin: Admin = createAdminClient(),
+): Promise<ReminderLedgerRow[]> {
+  const { data, error } = await admin
+    .from("pre_renewal_reminders")
+    .select(
+      "group_id, customer_id, experiment_arm, status, channels, journey_session_id, email_status, sms_status, sms_suppression_reason",
+    )
+    .eq("workspace_id", workspaceId);
+  if (error) throw new Error(`listReminderLedger(${workspaceId}): ${error.message}`);
+  return (data as ReminderLedgerRow[] | null) ?? [];
 }
 
 /* ------------------------------------------------------------------------------------------------
