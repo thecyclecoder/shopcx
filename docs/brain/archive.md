@@ -12,6 +12,17 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Scope out foreign agent_jobs.completed_at table-browse noise from the Control Tower feed** · verified 2026-11-22 · → [[../libraries/error-feed]]
+- **Scope out foreign `products.template_suffix` column-missing noise from the Supabase-logs feed** · verified 2026-11-22 · → [[../libraries/error-feed]]
+- **Filter Supabase Realtime 'no partition of messages' authorize errors out of the postgres error feed** · verified 2026-11-22 · → [[../libraries/error-feed]]
+- **Drop foreign direct-REST `specs.goal_slug` column-missing noise from the error feed** · verified 2026-11-22 · → [[../libraries/error-feed]], [[../inngest/supabase-log-poll]]
+- **Next-order journey with in-journey subscription editor** · verified 2026-11-22 · → [[../lifecycles/pre-renewal-reminder-journey]]
+- **Pre-renewal reminder sends (email + consented SMS)** · verified 2026-11-22 · → [[../libraries/pre-renewal-reminders]]
+- **Renewal reminder launch readiness** · verified 2026-11-22 · → [[lifecycles/pre-renewal-reminder-journey]]
+- **Renewal-reminder results dashboard** · verified 2026-11-22 · → [[../dashboard/retention-renewal-reminder]]
+- **Self-running guardrails + verdict engine** · verified 2026-11-22 · → [[../libraries/subscriber-experiment-metrics]]
+- **Subscriber lifecycle-experiment harness (sticky customer-level 50/50 + holdout)** · verified 2026-11-22 · → [[../lifecycles/pre-renewal-reminder-journey]]
+- **Workspace feature access: hide sidebar items until the workspace is given access** · verified 2026-11-22 · → [[../libraries/workspace-features]]
 - **Scope out Studio Table-Editor appstle_api_calls.contract_id missing-column noise** · verified 2026-11-21 · → [[../libraries/error-feed]]
 - **Drop foreign ad-hoc customer_events timestamp-syntax errors from the Control Tower feed** · verified 2026-11-21 · → [[../libraries/error-feed]]
 - **Scope out foreign direct-REST noise for never-existed spec_phase_checks columns** · verified 2026-11-21 · → [[../libraries/error-feed]]
@@ -1467,6 +1478,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 - **Ticket handling — guaranteed, observable, self-running** · folded 2026-07-07 · → [[lifecycles/ticket-lifecycle]]
 - **Mario — reactive pipeline-plumbing agent + spec timecards** · folded 2026-07-09 · → [[lifecycles/mario-pipeline-plumbing]]
 - **[TEST] Goal-path v2 — clean hands-off validation** · folded 2026-06-29 · → [[recipes/pipeline-validation-tests]]
+- **Pre-renewal reminders + next-order journey, proven by a self-running 50/50 test** · folded 2026-11-22 · → [[../lifecycles/pre-renewal-reminder-journey]]
 - **ShopGrowth merchant support on ShopCX (software mode)** · folded 2026-11-16 · → [[../lifecycles/ticket-lifecycle]]
 - **Sol: set the ticket's direction once (box session), then run it cheap (API) — re-session on drift** · folded 2026-07-08 · → [[lifecycles/ticket-lifecycle]]
 - **v3 Ad Creative Engine** · folded 2026-07-22 · → [[lifecycles/quant-desk-reweight-loop]]
