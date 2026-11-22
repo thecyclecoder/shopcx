@@ -267,3 +267,30 @@ test("a legacy shim (no `outcome` field on the result) still lands as a plain fa
   assert.doesNotMatch(verdict.reason, /unresolvable/i);
   assert.doesNotMatch(verdict.reason, /git error/i);
 });
+
+test("a self-verify fix phase is verified by the sibling anchor check it names", async () => {
+  const anchor = "cron registered in control-tower MONITORED_LOOPS";
+  const phase: PhaseFlagsForVerify = {
+    id: "fix-4", status: "planned", build_sha: null, kind: "fix",
+    title: `Fix — materialize self-verify anchor: ${anchor}`,
+  };
+  const grep: GrepCheckParams = { pattern: "pre.?renewal|preRenewal", path: "src/lib/control-tower/registry.ts", expect: "present" };
+  const asked: string[] = [];
+  const pass = makeDeps({
+    loadPhaseFlags: async () => phase,
+    loadAnchorGrepChecks: async (_w, _s, d) => { asked.push(d); return [{ description: anchor, params: grep }]; },
+    runGitGrepOnBranch: async () => ({ ok: true, evidence: "match", outcome: "match" }),
+  });
+  assert.equal((await verifyPhaseAccumulatedOnBranch(WS, SLUG, 4, BRANCH, pass)).accumulated, true);
+  assert.deepEqual(asked, [anchor]);
+  const fail = makeDeps({
+    loadPhaseFlags: async () => phase,
+    loadAnchorGrepChecks: async () => [{ description: anchor, params: grep }],
+    runGitGrepOnBranch: async () => ({ ok: false, evidence: "no match", outcome: "no-match" }),
+  });
+  assert.equal((await verifyPhaseAccumulatedOnBranch(WS, SLUG, 4, BRANCH, fail)).accumulated, false);
+  // A plain (non-fix) phase with no grep checks keeps the terminal-flag fallback.
+  const plain = makeDeps({ loadPhaseFlags: async () => ({ id: "p", status: "planned", build_sha: null, kind: "phase", title: "Phase 1" }),
+    loadAnchorGrepChecks: async () => { throw new Error("must not be called"); } });
+  assert.equal((await verifyPhaseAccumulatedOnBranch(WS, SLUG, 1, BRANCH, plain)).accumulated, false);
+});

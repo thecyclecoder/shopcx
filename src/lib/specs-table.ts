@@ -1562,6 +1562,9 @@ export interface PhaseFlagsForVerify {
   id: string;
   status: Phase;
   build_sha: string | null;
+  /** Optional so injected test doubles keep compiling; the default loader fills both. */
+  kind?: string | null;
+  title?: string | null;
 }
 
 /**
@@ -1609,6 +1612,16 @@ export interface VerifyPhaseDeps {
     branchRef: string,
     params: GrepCheckParams,
   ) => Promise<GrepOnBranchResult>;
+  /**
+   * A self-verify fix phase ("Fix — materialize self-verify anchor: <check>") carries only a
+   * needs_human check; its real evidence is the named grep check on a sibling phase. Returns that
+   * sibling's grep check(s) by description. Optional so existing test doubles keep compiling.
+   */
+  loadAnchorGrepChecks?: (
+    workspaceId: string,
+    slug: string,
+    anchorDescription: string,
+  ) => Promise<Array<{ description: string; params: GrepCheckParams }>>;
 }
 
 async function defaultLoadPhaseFlags(
@@ -1620,7 +1633,25 @@ async function defaultLoadPhaseFlags(
   if (!spec) return null;
   const phase = (spec.phases ?? []).find((p) => p.position === position);
   if (!phase) return null;
-  return { id: phase.id, status: phase.status, build_sha: phase.build_sha };
+  return { id: phase.id, status: phase.status, build_sha: phase.build_sha, kind: phase.kind, title: phase.title };
+}
+
+async function defaultLoadAnchorGrepChecks(
+  workspaceId: string,
+  slug: string,
+  anchorDescription: string,
+): Promise<Array<{ description: string; params: GrepCheckParams }>> {
+  const spec = await getSpec(workspaceId, slug);
+  const out: Array<{ description: string; params: GrepCheckParams }> = [];
+  for (const p of spec?.phases ?? []) {
+    if (p.kind === "fix") continue;
+    for (const c of await defaultLoadPhaseGrepChecks(p.id)) {
+      // The fix-phase title carries the check text whitespace-collapsed and cut at 120 chars.
+      const norm = c.description.trim().replace(/\s+/g, " ");
+      if (norm.startsWith(anchorDescription.trim())) out.push(c);
+    }
+  }
+  return out;
 }
 
 async function defaultLoadPhaseGrepChecks(
@@ -2012,6 +2043,7 @@ async function defaultRunGitGrepOnBranch(
 export const defaultVerifyPhaseDeps: VerifyPhaseDeps = {
   loadPhaseFlags: defaultLoadPhaseFlags,
   loadPhaseGrepChecks: defaultLoadPhaseGrepChecks,
+  loadAnchorGrepChecks: defaultLoadAnchorGrepChecks,
   runGitGrepOnBranch: defaultRunGitGrepOnBranch,
 };
 
@@ -2030,7 +2062,17 @@ export async function verifyPhaseAccumulatedOnBranch(
     if (!phase) {
       return { accumulated: false, reason: `phase position ${phasePosition} not found — fail closed` };
     }
-    const checks = await deps.loadPhaseGrepChecks(phase.id);
+    let checks = await deps.loadPhaseGrepChecks(phase.id);
+    // A self-verify fix phase has no grep of its own — verify it by the sibling anchor it names, so
+    // a build that materialized the anchor is not deferred forever on a phase nothing can stamp
+    // (subscriber-experiment-harness, 2026-11-21: "3/6 phase(s) not verified … no grep checks").
+    if (checks.length === 0 && deps.loadAnchorGrepChecks) {
+      const { isSelfVerifyFixPhase, SELF_VERIFY_FIX_PHASE_TITLE_PREFIX } = await import("@/lib/self-verify-fix-phase");
+      if (isSelfVerifyFixPhase(phase)) {
+        const anchor = String(phase.title ?? "").slice(SELF_VERIFY_FIX_PHASE_TITLE_PREFIX.length).trim();
+        if (anchor) checks = await deps.loadAnchorGrepChecks(workspaceId, slug, anchor);
+      }
+    }
     if (checks.length === 0) {
       // No code-presence signal available. Fall back to the phase's terminal flag as best effort during the
       // migration window — a phase authored WITHOUT grep checks (legacy) still trusts the flag. The wedge
