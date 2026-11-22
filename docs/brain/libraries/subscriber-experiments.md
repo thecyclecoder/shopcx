@@ -23,6 +23,7 @@ Grain is the PERSON, not the account. One real person can hold several linked ac
 | `getExperiment(workspaceId, slug, admin?)` | `Promise<row \| null>` | resolve an experiment by slug. |
 | `getArm(workspaceId, slug, customerId, admin?)` | `Promise<ExperimentArm \| null>` | read a group's STORED arm without ever minting a new one. |
 | `assignArm(workspaceId, slug, customerId, admin?)` | `Promise<ExperimentArm \| null>` | assign (or read) the permanent arm — the core call. |
+| `listAssignments(workspaceId, slug, admin?)` | `Promise<ExperimentAssignmentRow[]>` | EVERY sticky assignment (group_id · arm · assigned_at) — the sanctioned READ chokepoint the measurement engines ([[subscriber-experiment-metrics]]) bucket by; `[]` when the experiment doesn't exist. |
 
 ## `assignArm` — sticky per-customer 50/50 + true holdout
 
