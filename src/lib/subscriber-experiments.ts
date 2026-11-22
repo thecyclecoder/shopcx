@@ -34,6 +34,15 @@ type Admin = ReturnType<typeof createAdminClient>;
 /** The canonical node id for the harness in the control-tower node registry (owner: retention). */
 export const SUBSCRIBER_EXPERIMENT_NODE_ID = "tool:subscriber-experiment-harness";
 
+/**
+ * Canonical experiment slug for the pre-renewal reminder test (M2/M3). The daily
+ * pre-renewal reminder cron ([[pre-renewal-reminders]]) assigns subscribers to this
+ * experiment at first eligibility and only reminds the treatment arm. Dormant until
+ * the experiment row is created for the workspace — `assignArm` returns null, so the
+ * reminder cron is a no-op until the test is launched.
+ */
+export const PRE_RENEWAL_EXPERIMENT_SLUG = "pre-renewal-reminder";
+
 /** The two permanent arms. `holdout` gets nothing new; `treatment` gets the reminder. */
 export type ExperimentArm = "treatment" | "holdout";
 

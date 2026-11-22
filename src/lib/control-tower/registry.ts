@@ -541,6 +541,16 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     livenessWindowMs: 30 * HOUR,
   },
   {
+    id: "pre-renewal-reminder-cron",
+    kind: "cron",
+    owner: "retention",
+    label: "Pre-renewal reminders",
+    description: "Daily scan ~5 days before each subscription's next billing date (both live engines): dedupes to one reminder per customer identity group, excludes paused/dunning/just-edited subs, consults the subscriber-experiment harness so ONLY the treatment arm is reminded (holdout gets nothing new), and for treatment mints a next-order journey session + sends a transactional email and a consented, quiet-hours-respecting SMS. Every intended + actual send is written to pre_renewal_reminders stamped with the arm. Dormant until the pre-renewal-reminder experiment is created for the workspace.",
+    expectedCadence: "daily (0 13 * * *)",
+    livenessWindowMs: 30 * HOUR,
+    registeredAt: "2026-11-22T00:00:00Z",
+  },
+  {
     id: "shopcx-drift-reconcile-cron",
     kind: "cron",
     owner: "retention",
