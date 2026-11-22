@@ -1,0 +1,1 @@
+- **Drop foreign ad-hoc customer_events timestamp-syntax errors from the Control Tower feed** · verified 2026-11-21 · → [[../libraries/error-feed]]

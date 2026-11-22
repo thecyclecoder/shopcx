@@ -196,3 +196,76 @@ export async function linkOriginatingOrder(
     return { linked: false, reason: "error", candidatesConsidered: 0 };
   }
 }
+
+/** A renewal-order line or sub item, as far as renewal matching needs it. */
+export interface RenewalMatchLine {
+  sku?: unknown;
+  title?: unknown;
+}
+
+/** Shipping protection is a shared add-on line, so it never identifies WHICH sub renewed. */
+function isProtectionLine(l: RenewalMatchLine): boolean {
+  return String(l.title ?? "").toLowerCase().includes("shipping protection");
+}
+
+/**
+ * Choose which of a customer's subscriptions a RENEWAL order belongs to, from SKUs alone. PURE.
+ *
+ * Used only when the order carries no contract id (ShopCX-billed renewals have no Appstle
+ * metafield). The old rule took the FIRST sub sharing ANY SKU, and Shipping Protection's SKU is on
+ * most subs, so a customer with two subs got the renewal pinned to the wrong one: 2026-11-20
+ * SC142618 (Coffee Pods + protection) landed on their Superfood Tabs + protection sub, and
+ * 2026-11-12 SC142137 on a pods-only sibling. Each sub that actually renewed then read as a month
+ * late in the drift monitor and lost the order from its history.
+ *
+ * Ranking: most overlapping NON-protection SKUs, then most overlapping SKUs overall, then an exact
+ * SKU-set match. A sub with no non-protection overlap never matches. A tie at the top stays
+ * unlinked, because a wrong `subscription_id` is worse than a null one.
+ */
+export function chooseSubscriptionForRenewalOrder<S extends { id: string; items: unknown }>(
+  orderLines: RenewalMatchLine[],
+  subs: S[],
+): S | null {
+  const skuOf = (l: RenewalMatchLine) => String(l.sku ?? "").trim();
+  const orderAll = new Set(orderLines.map(skuOf).filter(Boolean));
+  const orderCore = new Set(orderLines.filter((l) => !isProtectionLine(l)).map(skuOf).filter(Boolean));
+  if (orderCore.size === 0) return null;
+  const scored = subs.map((s) => {
+    const items = (Array.isArray(s.items) ? s.items : []) as RenewalMatchLine[];
+    const all = new Set(items.map(skuOf).filter(Boolean));
+    const core = new Set(items.filter((i) => !isProtectionLine(i)).map(skuOf).filter(Boolean));
+    const coreHits = [...core].filter((k) => orderCore.has(k)).length;
+    const allHits = [...all].filter((k) => orderAll.has(k)).length;
+    const exact = all.size === orderAll.size && allHits === orderAll.size ? 1 : 0;
+    return { s, key: [coreHits, allHits, exact] as const };
+  }).filter((x) => x.key[0] > 0);
+  if (scored.length === 0) return null;
+  const cmp = (a: readonly number[], b: readonly number[]) => b[0] - a[0] || b[1] - a[1] || b[2] - a[2];
+  scored.sort((a, b) => cmp(a.key, b.key));
+  if (scored.length > 1 && cmp(scored[0].key, scored[1].key) === 0) return null;
+  return scored[0].s;
+}
+
+/** How close a renewal order lands to the cycle-charge claim that produced it. */
+export const RENEWAL_CLAIM_WINDOW_MS = 20 * 60_000;
+
+/**
+ * The strongest renewal signal for a ShopCX-billed sub: the renewal worker claims a
+ * `subscription_cycle_charges` row for exactly one subscription right before the charge creates the
+ * order. PURE. Returns the one sub whose claim falls within `RENEWAL_CLAIM_WINDOW_MS` of the order,
+ * or null when none or more than one does. Preferred over SKUs because a customer can edit a sub's
+ * items after the order, which makes a later SKU comparison point at the wrong sibling.
+ */
+export function pickSubscriptionByCycleClaim(
+  claims: { subscription_id: string; claimed_at: string }[],
+  orderCreatedAtIso: string,
+): string | null {
+  const t = Date.parse(orderCreatedAtIso);
+  if (!Number.isFinite(t)) return null;
+  const ids = new Set(
+    claims
+      .filter((c) => Math.abs(Date.parse(c.claimed_at) - t) <= RENEWAL_CLAIM_WINDOW_MS)
+      .map((c) => c.subscription_id),
+  );
+  return ids.size === 1 ? [...ids][0] : null;
+}

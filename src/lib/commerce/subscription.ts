@@ -699,6 +699,108 @@ export async function subscriptionUpdateNextBillingDate(
   return appstleUpdateNextBillingDate(workspaceId, contractId, nextBillingDate);
 }
 
+// ── Reactivate (restart a cancelled / paused subscription) ───────────
+
+export type ReactivateFailureReason = "needs_payment_method" | "needs_address" | "appstle_not_configured" | "error";
+
+export type ReactivateResult =
+  | { ok: true; contractId: string; nextBillingDate: string; revivedOnShopcx: boolean }
+  | { ok: false; reason: ReactivateFailureReason; message: string; details?: unknown };
+
+/** Default first-charge date for a restart: tomorrow (+15 min so it never lands in the past). */
+export function defaultReactivationDate(): string {
+  return new Date(Date.now() + 24 * 60 * 60 * 1000 + 15 * 60 * 1000).toISOString();
+}
+
+/**
+ * The ONE reactivation path shared by the portal (`portal/handlers/reactivate.ts`) and the
+ * win-back journey (`reactivate-journey-builder.ts` → `journey-outcomes.ts`). Engine dispatch
+ * lives HERE, in the commerce SDK — the only layer allowed to resolve `billing_source` and
+ * branch across internal | appstle | shopcx (check-vendor-dispatch-in-sdk). Callers import it
+ * via `@/lib/subscription-reactivate`, which re-exports this symbol.
+ *
+ * Behaviour:
+ *   1. Never-migrated Appstle sub → revived ON SHOPCX from our mirror via `ensureShopcxEngine`
+ *      (born ACTIVE on the chosen date, customer's own price). Typed refusals
+ *      `needs_payment_method` / `needs_address` are returned, not thrown.
+ *   2. ShopCX contract → next billing date set on the contract through this SDK.
+ *   3. Legacy Appstle path (only while the appstle_retired switch is off) → the SDK's
+ *      internal-aware `subscriptionUpdateNextBillingDate` dispatches to the Appstle vendor
+ *      wrapper; never a hand-rolled subscription-admin.appstle.com PUT.
+ *   4. Resume through `subscriptionAction` (internal-aware), then the local row is stamped active.
+ */
+export async function reactivateSubscription(
+  workspaceId: string,
+  contractIdIn: string,
+  opts: { nextBillingDate?: string } = {},
+): Promise<ReactivateResult> {
+  let contractId = String(contractIdIn);
+  let nextBillingDate = opts.nextBillingDate || defaultReactivationDate();
+  let revivedOnShopcx = false;
+
+  try {
+    let engine = await resolveBillingSource(workspaceId, contractId);
+
+    if (engine === "appstle") {
+      const ens = await ensureShopcxEngine(workspaceId, contractId, "resume", { nextBillingDate });
+      if (!ens.ok) {
+        if (ens.reason === "needs_payment_method" || ens.reason === "needs_address") {
+          return { ok: false, reason: ens.reason, message: ens.error };
+        }
+        return { ok: false, reason: "error", message: ensureFailureText(ens) };
+      }
+      if (ens.engine === "shopcx") {
+        contractId = ens.contractId;
+        engine = "shopcx";
+        revivedOnShopcx = ens.built;
+      }
+    }
+
+    if (engine === "shopcx" && !revivedOnShopcx) {
+      const d = await subscriptionUpdateNextBillingDate(workspaceId, contractId, nextBillingDate);
+      if (!d.success) return { ok: false, reason: "error", message: d.error || "Could not set next billing date" };
+    }
+
+    if (engine === "appstle") {
+      // Still-on-Appstle contract (legacy path while the appstle_retired switch is off).
+      // Keep the typed `appstle_not_configured` refusal, but set the date through this SDK's
+      // internal-aware chokepoint — which resolves this contract to the Appstle vendor wrapper
+      // (appstleUpdateNextBillingDate) — never a hand-rolled subscription-admin.appstle.com PUT.
+      const admin = createAdminClient();
+      const { data: ws } = await admin.from("workspaces").select("appstle_api_key_encrypted").eq("id", workspaceId).single();
+      if (!ws?.appstle_api_key_encrypted) return { ok: false, reason: "appstle_not_configured", message: "Appstle not configured" };
+      const d = await subscriptionUpdateNextBillingDate(workspaceId, contractId, nextBillingDate);
+      if (!d.success) return { ok: false, reason: "error", message: d.error || "Could not set next billing date" };
+    }
+
+    if (revivedOnShopcx) {
+      await applySubscriptionStatusTruth(workspaceId, contractId, "resume");
+      // The build rolls a lapsed date forward; report the date actually on the contract.
+      const { data: row } = await createAdminClient().from("subscriptions").select("next_billing_date")
+        .eq("workspace_id", workspaceId).eq("shopify_contract_id", contractId).maybeSingle();
+      if (row?.next_billing_date) nextBillingDate = String(row.next_billing_date);
+    } else {
+      const result = await subscriptionAction(workspaceId, contractId, "resume");
+      if (!result.success) return { ok: false, reason: "error", message: result.error || "Resume failed" };
+    }
+  } catch (e) {
+    const err = e as { message?: string; details?: unknown };
+    return { ok: false, reason: "error", message: err?.message || "Unknown error", details: err?.details };
+  }
+
+  await createAdminClient().from("subscriptions")
+    .update({
+      status: "active",
+      next_billing_date: nextBillingDate,
+      pause_resume_at: null,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("workspace_id", workspaceId)
+    .eq("shopify_contract_id", contractId);
+
+  return { ok: true, contractId, nextBillingDate, revivedOnShopcx };
+}
+
 // ── Payment method ──────────────────────────────────────────────────
 
 export async function subscriptionSwitchPaymentMethod(

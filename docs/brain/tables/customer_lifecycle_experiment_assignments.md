@@ -1,6 +1,6 @@
 # `customer_lifecycle_experiment_assignments` — one persisted arm per customer group per experiment
 
-Exactly one persisted arm assignment per customer identity GROUP per experiment. Keyed on the [[customer_links]] `group_id` — one real person = one group across all their linked accounts = ONE arm, so every account of a person shares the same arm. The UNIQUE `(experiment_id, group_id)` constraint is what makes assignment **sticky, idempotent, and fixed at first eligibility**: an arm can never be duplicated or silently flipped once written. Written + read ONLY through [[../libraries/subscriber-experiments]] (`assignArm` / `getArm`). Parent experiment: [[customer_lifecycle_experiments]]. Migration `20270121120000_customer_lifecycle_experiments.sql`. RLS: service-role only. Spec: `subscriber-experiment-harness`.
+Exactly one persisted arm assignment per customer identity GROUP per experiment. Keyed on the [[customer_links]] `group_id` — one real person = one group across all their linked accounts = ONE arm, so every account of a person shares the same arm. The UNIQUE `(experiment_id, group_id)` constraint is what makes assignment **sticky, idempotent, and fixed at first eligibility**: an arm can never be duplicated or silently flipped once written. Written + read ONLY through [[../libraries/subscriber-experiments]] (`assignArm` / `getArm`). Parent experiment: [[customer_lifecycle_experiments]]. Migration `20270121120001_customer_lifecycle_experiments.sql`. RLS: service-role only. Spec: `subscriber-experiment-harness`.
 
 **Primary key:** `id`
 

@@ -80,6 +80,7 @@ import {
   shopifySubscriptionRenewalCron,
   shopifySubscriptionRenewalAttempt,
 } from "@/lib/inngest/shopify-subscription-renewals";
+import { preRenewalReminderCron } from "@/lib/inngest/pre-renewal-reminders";
 import {
   shopcxContractIngest,
   shopcxContractSync,
@@ -278,6 +279,7 @@ export const registeredInngestFunctions = [
   internalSubscriptionRenewalAttempt,
   shopifySubscriptionRenewalCron,
   shopifySubscriptionRenewalAttempt,
+  preRenewalReminderCron,
   shopcxContractIngest,
   shopcxContractSync,
   shopcxDriftReconcileCron,
