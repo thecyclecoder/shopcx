@@ -1,0 +1,1 @@
+- **Self-running guardrails + verdict engine** · verified 2026-11-22 · → [[../libraries/subscriber-experiment-metrics]]
