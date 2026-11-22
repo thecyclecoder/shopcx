@@ -5,6 +5,7 @@ import {
   subscriptionAction,
   subscriptionAddItem,
 } from "@/lib/commerce/subscription";
+import { subSwapVariant, subUpdateLineItemPrice } from "@/lib/subscription-items";
 
 // GET — single crisis detail with full stats
 export async function GET(
@@ -234,7 +235,7 @@ export async function POST(
     const { data: rows, error: rowsErr } = await admin
       .from("crisis_customer_actions")
       .select(
-        "id, subscription_id, paused_at, auto_resume, removed_item_at, auto_readd, cancelled, original_item, subscriptions:subscription_id ( id, shopify_contract_id, status )",
+        "id, subscription_id, paused_at, auto_resume, removed_item_at, auto_readd, auto_swap_back, tier1_swapped_to, cancelled, original_item, subscriptions:subscription_id ( id, shopify_contract_id, status )",
       )
       .eq("crisis_id", crisisId)
       .eq("workspace_id", workspaceId);
@@ -247,8 +248,10 @@ export async function POST(
       auto_resume: boolean | null;
       removed_item_at: string | null;
       auto_readd: boolean | null;
+      auto_swap_back: boolean | null;
+      tier1_swapped_to: { variantId?: string } | null;
       cancelled: boolean | null;
-      original_item: { variant_id?: string | number; quantity?: number } | null;
+      original_item: { variant_id?: string | number; quantity?: number; price_override_cents?: number } | null;
       subscriptions: { id: string; shopify_contract_id: string | null; status: string | null } | null;
     };
 
@@ -258,6 +261,7 @@ export async function POST(
     const readded: { row_id: string; contract_id: string; variant_id: string; ok: boolean; error?: string }[] = [];
     const skippedAlreadyActive: string[] = [];
     const skippedAlreadyReadded: string[] = [];
+    const swappedBack: { row_id: string; contract_id: string; variant_id: string; ok: boolean; error?: string }[] = [];
 
     for (const a of actions) {
       // Guard-first (per director coaching): each mutation gates on a
@@ -282,6 +286,45 @@ export async function POST(
           });
         } else {
           skippedAlreadyActive.push(a.id);
+        }
+      }
+
+      // Swap back: rows created when a customer RESTARTED onto the crisis default
+      // (crisis-restart-swap) were promised their original flavor on restock. Compare-and-set on
+      // the live row: only while the sub still carries the swap and not already the original, so
+      // a Resolve re-fire never double-swaps and a customer who changed flavor is left alone.
+      if (a.auto_swap_back === true && a.tier1_swapped_to?.variantId && a.original_item?.variant_id
+        && (sub.status === "active" || sub.status === "paused")) {
+        const origId = String(a.original_item.variant_id);
+        const swapId = String(a.tier1_swapped_to.variantId);
+        const { data: subRow } = await admin
+          .from("subscriptions")
+          .select("items")
+          .eq("id", a.subscription_id!)
+          .eq("workspace_id", workspaceId)
+          .maybeSingle();
+        const { resolveVariant } = await import("@/lib/internal-subscription");
+        const swapResolved = await resolveVariant(workspaceId, swapId);
+        const origResolved = await resolveVariant(workspaceId, origId);
+        const swapKeys = new Set([swapId, swapResolved?.id].filter(Boolean) as string[]);
+        const origKeys = new Set([origId, origResolved?.id].filter(Boolean) as string[]);
+        const items = (subRow?.items as { variant_id?: string | number; quantity?: number }[] | null) || [];
+        const swapLine = items.find((it) => swapKeys.has(String(it.variant_id)));
+        const hasOriginal = items.some((it) => origKeys.has(String(it.variant_id)));
+        if (swapLine && !hasOriginal) {
+          const r = await subSwapVariant(
+            workspaceId, sub.shopify_contract_id, String(swapLine.variant_id), origId,
+            Math.max(1, Number(swapLine.quantity ?? a.original_item.quantity ?? 1)),
+          );
+          if (r.success && a.original_item.price_override_cents === 0) {
+            await subUpdateLineItemPrice(workspaceId, sub.shopify_contract_id, origId, 0, r.newLineGid);
+          }
+          if (r.success) {
+            await admin.from("crisis_customer_actions")
+              .update({ auto_swap_back: false, updated_at: new Date().toISOString() })
+              .eq("id", a.id).eq("workspace_id", workspaceId);
+          }
+          swappedBack.push({ row_id: a.id, contract_id: sub.shopify_contract_id, variant_id: origId, ok: r.success, error: r.error });
         }
       }
 
@@ -331,14 +374,15 @@ export async function POST(
     // list so the operator can retry — flipping status on partial
     // failure is the "not-clean → looks-clean" invariant break the
     // coaching flagged.
-    const failed = [...resumed.filter((r) => !r.ok), ...readded.filter((r) => !r.ok)];
+    const failed = [...resumed.filter((r) => !r.ok), ...readded.filter((r) => !r.ok), ...swappedBack.filter((r) => !r.ok)];
     if (failed.length > 0 && !body.force_resolve) {
       return NextResponse.json(
         {
           error: "partial_side_effects_failure",
-          summary: `${resumed.filter((r) => r.ok).length} resumed, ${readded.filter((r) => r.ok).length} re-added, ${failed.length} failed — retry or pass force_resolve=true`,
+          summary: `${resumed.filter((r) => r.ok).length} resumed, ${readded.filter((r) => r.ok).length} re-added, ${swappedBack.filter((r) => r.ok).length} swapped back, ${failed.length} failed — retry or pass force_resolve=true`,
           resumed,
           readded,
+          swapped_back: swappedBack,
           skipped_already_active: skippedAlreadyActive,
           skipped_already_readded: skippedAlreadyReadded,
           failed,
@@ -366,6 +410,7 @@ export async function POST(
       side_effects: {
         resumed_count: resumed.filter((r) => r.ok).length,
         readded_count: readded.filter((r) => r.ok).length,
+        swapped_back_count: swappedBack.filter((r) => r.ok).length,
         skipped_already_active: skippedAlreadyActive.length,
         skipped_already_readded: skippedAlreadyReadded.length,
         failed_count: failed.length,

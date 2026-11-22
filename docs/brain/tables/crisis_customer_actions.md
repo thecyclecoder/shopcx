@@ -29,6 +29,7 @@ Per-customer state in a crisis campaign — segment, current tier, responses, sw
 | `auto_resume` | `bool` | ✓ | default: `false` |
 | `removed_item_at` | `timestamptz` | ✓ |  |
 | `auto_readd` | `bool` | ✓ | default: `false` |
+| `auto_swap_back` | `bool` | — | default: `false` · set by [[../libraries/crisis-restart-swap]] on a restart swap; Resolve swaps the row back to `original_item` |
 | `cancelled` | `bool` | ✓ | default: `false` |
 | `cancel_date` | `timestamptz` | ✓ |  |
 | `ticket_id` | `uuid` | ✓ |  |
