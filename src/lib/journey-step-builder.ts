@@ -55,6 +55,9 @@ export async function buildJourneySteps(
     case "cancellation":
     case "cancel_subscription":
       return buildCancelSteps(admin, workspaceId, customerId, ticketId);
+    case "next_order":
+    case "next-order":
+      return buildNextOrderSteps(admin, workspaceId, customerId, ticketId);
     case "shipping_address":
     case "address_change": {
       const { buildShippingAddressSteps } = await import("@/lib/shipping-address-journey-builder");
@@ -111,4 +114,24 @@ async function buildCancelSteps(
     steps: result.steps as JourneyStep[],
     metadata: result.metadata as unknown as Record<string, unknown>,
   } as BuiltJourneyConfig & { cancelJourney: boolean };
+}
+
+// ── Next-Order Journey Steps ──
+// Delegates to next-order-journey-builder.ts — single source of truth. The
+// mini-site renders an interactive editor off the metadata and dispatches
+// every edit through the shared portal/commerce executors.
+
+async function buildNextOrderSteps(
+  _admin: Admin, workspaceId: string, customerId: string, ticketId?: string,
+): Promise<BuiltJourneyConfig & { nextOrderJourney: boolean }> {
+  const { buildNextOrderJourneySteps } = await import("@/lib/next-order-journey-builder");
+  const result = await buildNextOrderJourneySteps(workspaceId, customerId, ticketId || "");
+
+  return {
+    codeDriven: true,
+    nextOrderJourney: true,
+    multiStep: result.steps.length > 1,
+    steps: result.steps as unknown as JourneyStep[],
+    metadata: result.metadata as unknown as Record<string, unknown>,
+  } as BuiltJourneyConfig & { nextOrderJourney: boolean };
 }
