@@ -1,0 +1,1 @@
+- **Scope out foreign `products.template_suffix` column-missing noise from the Supabase-logs feed** · verified 2026-11-22 · → [[../libraries/error-feed]]
