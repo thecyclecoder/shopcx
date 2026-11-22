@@ -38,6 +38,7 @@ import {
   isForeignSupabasePostgresAdhocMonthlyRevenueSnapshotsToCharTextNoise,
   isForeignSupabasePostgresMissingControlTowerEventsLookupNoise,
   isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise,
+  isForeignSupabasePostgresMissingProductsTemplateSuffixLookupNoise,
   isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise,
   isForeignSupabasePostgresMissingPlaybooksStepsDirectRestColumnNoise,
   isForeignSupabasePostgresMissingSpecPhaseChecksDirectRestColumnNoise,
@@ -131,6 +132,7 @@ import {
   isForeignSupabasePostgresMissingTicketAnalysesIntentsColumnAdhocNoise,
   isForeignSupabasePostgresMissingErrorEventsMetadataAdhocNoise,
   isForeignSupabasePostgresMissingCustomerEventsColumnAdhocNoise,
+  isForeignSupabasePostgresInvalidTimestampCustomerEventsAdhocNoise,
   isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise,
   isForeignSupabasePostgresMissingErrorEventsCoalesceSearchNoise,
   isForeignSupabasePostgresMissingErrorEventsUnqualifiedColumnAdhocNoise,
@@ -163,6 +165,7 @@ import {
   isForeignSupabasePostgresInvalidUuidSyntaxOnTicketsIdAdhocNoise,
   isForeignSupabasePostgresInvalidUuidSyntaxOnReturnsIdAdhocNoise,
   isForeignSupabasePostgresInvalidUuidSyntaxOnOrdersWorkspaceIdAdhocNoise,
+  isForeignSupabasePostgresInvalidUuidSyntaxOnOrdersIdAdhocNoise,
   isForeignSupabasePostgresInvalidUuidSyntaxOnQbManualInventoryProductIdAdhocNoise,
   isForeignSupabasePostgresInvalidUuidSyntaxOnMigrationAuditsSubscriptionIdAdhocNoise,
   isForeignSupabasePostgresInvalidUuidSyntaxOnSubscriptionsIdAdhocNoise,
@@ -203,6 +206,7 @@ import {
   isForeignSupabasePostgresMissingAgentJobsBranchDirectRestLookupNoise,
   isForeignSupabasePostgresMissingAgentJobsTargetDirectRestLookupNoise,
   isForeignSupabasePostgresMissingAgentJobsRunTimestampDirectRestLookupNoise,
+  isForeignSupabasePostgresMissingAgentJobsCompletedAtTableBrowseNoise,
   isForeignSupabasePostgresMissingAgentJobsTerminalReasonAdhocNoise,
   isForeignSupabasePostgresMissingDirectorActivityKindDirectRestLookupNoise,
   isForeignSupabasePostgresMissingDirectorActivityDecisionDirectRestLookupNoise,
@@ -394,6 +398,18 @@ const LOG_QUERIES: LogQuery[] = [
       // column-missing on a different relation, or a FATAL/PANIC/constraint violation
       // still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: a Shopify-shaped foreign client that selects the
+      // nonexistent `template_suffix` column against `products` — `select handle,
+      // template_suffix from products …`. `template_suffix` is a Shopify-native storefront
+      // field ShopCX has never stored and no code path selects
+      // ([[../specs/error-feed-drop-products-template-suffix-adhoc-noise]], Control Tower
+      // signature `supabase-logs:0e3379f172768a91`). Twin of the `loop_alerts` column-lookup
+      // drop above, scoped to the `products.template_suffix` miss. Narrowly gated to require
+      // BOTH the exact quoted `column "template_suffix" does not exist` message AND the bare
+      // SELECT-lookup shape on `products` — a different missing column on `products`, the same
+      // column-missing on a different relation, or a non-SELECT statement still surfaces /
+      // pages on first sighting.
+      if (isForeignSupabasePostgresMissingProductsTemplateSuffixLookupNoise(message, query)) return null;
       // Drop foreign-app noise at capture: a stale Supabase Studio / direct-REST client
       // reading `loop_alerts?select=...closed_at...` — a column `loop_alerts` has never
       // owned (lifecycle is tracked via `status` + `resolved_at`). PostgREST wraps the
@@ -1387,6 +1403,15 @@ const LOG_QUERIES: LogQuery[] = [
       // the same column on any other table, or on customer_events via a non-SELECT
       // statement (real code-bug shape), still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingCustomerEventsColumnAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: the twin of the missing-column drop above, but
+      // for a malformed `timestamp with time zone` literal whose `+HH:MM` offset degraded to
+      // ` HH:MM` (a `+` URL-decoded to a space) on an ad hoc SELECT lookup of
+      // customer_events. ShopCX's own code never issues this read and every timestamp literal
+      // it builds is offset-correct, so the parse rejection is repair work for a foreign
+      // query we don't own. Narrowly gated to the `+`→space degraded value AND the
+      // SELECT-lookup shape — a malformed-timestamp error on any other table, or on a
+      // non-SELECT customer_events statement (real in-code timestamp bug), still pages.
+      if (isForeignSupabasePostgresInvalidTimestampCustomerEventsAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc `select ... <column> ... from
       // public.error_events` lookup by an external tool / stale exploratory query. The
       // `error_events` table exists and its live column set is stable and known; a raw
@@ -1696,6 +1721,11 @@ const LOG_QUERIES: LogQuery[] = [
       // direct-REST / Studio quick-filter) rejected by Postgres with `invalid input syntax for type
       // uuid`. No ShopCX code binds a bad uuid to orders.workspace_id. Signature `supabase-logs:d9393a3e4f8314e2`.
       if (isForeignSupabasePostgresInvalidUuidSyntaxOnOrdersWorkspaceIdAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: the orders/id sibling of the orders.workspace_id probe —
+      // a malformed-uuid `orders.id = $1` read (a `?id=eq.<non-uuid>` direct-REST / Studio
+      // quick-filter, e.g. value 'null') rejected by Postgres with `invalid input syntax for type
+      // uuid`. No ShopCX code binds a bad uuid to orders.id. Signature `supabase-logs:d9393a3e4f8314e2`.
+      if (isForeignSupabasePostgresInvalidUuidSyntaxOnOrdersIdAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: the qb_manual_inventory/product_id sibling of the
       // tickets.id / orders.workspace_id probes — a malformed-uuid `qb_manual_inventory.product_id = $1`
       // read (a `?product_id=eq.<non-uuid>` direct-REST / Studio quick-filter, e.g. value 'SKIP')
@@ -2315,6 +2345,18 @@ const LOG_QUERIES: LogQuery[] = [
       // first sighting.
       // Static-analysis fingerprint — `isForeignSupabasePostgresMissingAgentJobsRunTimestampDirectRestLookupNoisemessage, query` is the classifier/arg-pair the spec-check runner pins to this capture-time drop.
       if (isForeignSupabasePostgresMissingAgentJobsRunTimestampDirectRestLookupNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: a stale / ad hoc PostgREST table-browse of
+      // `public.agent_jobs` that asks for the phantom `completed_at` column alongside the
+      // real `claimed_at` marker. The `agent_jobs` table has NEVER carried a `completed_at`
+      // column — lifecycle timing is `created_at` / `updated_at` and the claim marker is
+      // `claimed_at`. The run-timestamp sibling above can't catch this no-`kind`,
+      // no-legacy-projection generic browse. There is no lever from ShopCX to make that
+      // query resolve — paging Platform on it (Control Tower signature
+      // `supabase-logs:bcce8c1594eead3f`) is repair work for a query we don't own. A real
+      // `agent_jobs` schema regression (non-SELECT write, different column, SELECT without
+      // `claimed_at`) or a column-missing on any other table still surfaces / pages.
+      // Static-analysis fingerprint — `isForeignSupabasePostgresMissingAgentJobsCompletedAtTableBrowseNoisemessage, query` is the classifier/arg-pair the spec-check runner pins to this capture-time drop.
+      if (isForeignSupabasePostgresMissingAgentJobsCompletedAtTableBrowseNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
       // against `public.agent_jobs` that asks for a bogus `terminal_reason` column paired
       // with the real `log_tail`. The `agent_jobs` table has NEVER carried a

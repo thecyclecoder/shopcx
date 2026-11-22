@@ -73,6 +73,11 @@ test("grepModeOf defaults an unset mode to 'literal' and honors an explicit mode
   assert.equal(grepModeOf({ pattern: "isFoo(x)", expect: "present" }), "literal");
   assert.equal(grepModeOf({ pattern: "isFoo(x)", expect: "present", mode: "literal" }), "literal");
   assert.equal(grepModeOf({ pattern: "a.*b", expect: "present", mode: "regex" }), "regex");
+  // An unset mode on an unmistakable regex runs as one (2026-11-21 reminder-goal jam).
+  assert.equal(grepModeOf({ pattern: "pre.?renewal|preRenewal", expect: "present" }), "regex");
+  assert.equal(grepModeOf({ pattern: "linkedIds|group_id", expect: "present" }), "regex");
+  assert.equal(grepModeOf({ pattern: "linkedIds|group_id", expect: "present", mode: "literal" }), "literal");
+  assert.equal(grepModeOf({ pattern: "a || b", expect: "present" }), "literal");
 });
 
 test("validateExecutableCheck rejects an invalid grep.mode", () => {
@@ -680,10 +685,13 @@ test("validateLiteralGrepIsNotRegex rejects escaped metacharacters and wildcards
 test("authoring rejects the toolset's regex-in-literal check and accepts it in regex mode", () => {
   const specText = "Phase 1: buildToolDefinitions takes the support mode.";
   const params = { pattern: "buildToolDefinitions\\(.*mode", path: "src/lib/sonnet-orchestrator-v2.ts", expect: "present" };
-  const lit = validateExecutableCheck({ exec_kind: "grep", params }, { specText });
+  // An UNSET mode on this regex-shaped pattern now resolves to regex (grepModeOf), so it is accepted
+  // and runs as intended; only an EXPLICIT literal mode is still rejected at author time.
+  assert.equal(validateExecutableCheck({ exec_kind: "grep", params }, { specText }).valid, true);
+  const lit = validateExecutableCheck({ exec_kind: "grep", params: { ...params, mode: "literal" } }, { specText });
   assert.equal(lit.valid, false);
   assert.match((lit as { reason: string }).reason, /grep\.mode:'regex'/);
   assert.equal(validateExecutableCheck({ exec_kind: "grep", params: { ...params, mode: "regex" } }, { specText }).valid, true);
   // The runner path (no specText) never retroactively fails an authored check.
-  assert.equal(validateExecutableCheck({ exec_kind: "grep", params }).valid, true);
+  assert.equal(validateExecutableCheck({ exec_kind: "grep", params: { ...params, mode: "literal" } }).valid, true);
 });

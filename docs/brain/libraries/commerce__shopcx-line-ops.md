@@ -141,3 +141,13 @@ removed `$52.47`. Exact round trip. Gift: cycle 2 `editedContract` carried the p
 [[commerce__shopcx-discount-ops]] · [[commerce__shopify-subscription-client]] ·
 [[commerce__shopify-subscription-migrate]] · [[commerce__subscription]] · [[subscription-items]] ·
 [[../lifecycles/shopcx-subscriptions]]
+
+## One-time line cycle selection (2026-11-22)
+
+`shopcxAddOneTimeLine` now targets the cycle the next charge will bill (`resolveChargeableCycle` index —
+the same selection the renewal worker, Order Now and dunning use), falling back to the date-selected
+cycle. Selecting by `nextBillingDate` could land the gift on a LATER cycle than the one billed next
+(seen 2026-11-22: date 11-23 resolved to cycle 3, expected 12-08), so the gift shipped an order late.
+The pending cycle edit locks the contract; see [[commerce__shopify-subscription-client]] § Billing-cycle edit lock.
+`shopcxAddOneTimeLine` is idempotent: if the same variant at the same price is already a one-time line on
+the target cycle it returns success without adding a second one (a repeat call stacked two free bags live).

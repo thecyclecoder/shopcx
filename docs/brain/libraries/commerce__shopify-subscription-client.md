@@ -412,3 +412,25 @@ A stranded sub is not always fixable by walking the date forward: if the followi
 out (one was at +104 days on a 56-day cadence), the walk never reaches it. Pin that cycle back
 instead — its window starts at the spent cycle's date, so `last charge + one cadence` is usually
 inside it and restores the customer's real rhythm.
+
+## Billing-cycle edit lock (2026-11-22)
+
+Shopify refuses every contract update (cancel, pause, resume, `subscriptionContractSetNextBillingDate`,
+`subscriptionContractProductChange`, any `subscriptionContractUpdate` draft) while a billing cycle carries
+a contract edit: *"Subscription contract cannot be updated if there is a current or upcoming billing
+cycle contract edit."* One-time gifts are cycle edits (`withBillingCycleDraft`), so a customer who took a
+gift was locked out of cancel/pause/swap/date changes until that order billed. Found live on the CEO's
+win-back test (contract 36020289709).
+
+`withCycleEditLockCleared(ws, contractId, op)` wraps `withDraft`, `shopifySubscriptionAction`,
+`shopifySetNextBillingDate` and `shopifySwapProduct`. On that error only, it reads the pending one-time
+lines (`readPendingCycleEdits`: edited-cycle lines whose id is not on the base contract), deletes the cycle
+edits, retries the op, and if the contract is still ACTIVE re-adds the lines on the cycle the next charge
+bills (`resolveChargeableCycle`). Cancel/pause drop the gift on purpose. Any other error passes through
+untouched. A failed re-add is logged (`[cycle-edit-lock]`).
+Live-verified on contract 36020289709 (2026-11-22): cancel and pause hit the lock;
+`subscriptionContractSetNextBillingDate` does NOT (it succeeds with a cycle edit present).
+`readPendingCycleEdits` must start its `subscriptionBillingCycles` range at the contract's `createdAt`
+(+1s): Shopify rejects an earlier start with "Billing cycle start date out of range".
+`readPendingCycleEdits` returns only UNBILLED edited cycles: an edit left on a billed cycle does not block
+updates and cannot be deleted ("The index provided is invalid").

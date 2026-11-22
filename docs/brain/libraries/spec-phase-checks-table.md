@@ -74,6 +74,15 @@ Ground-truth incident (2026-11-09): error-feed-drop-* specs each failed self-ver
 a grep check `isForeign…AdhocNoise(message, query)` because both lanes read it as a regex and the
 literal call site could never match; the two specs sat 10–16 days before this fix.
 
+**Unset mode + unmistakable regex → regex (2026-11-22).** The literal default kept failing the
+opposite way: planner-authored checks like `pre.?renewal|preRenewal` and `linkedIds|group_id` (no
+`mode`) could never match as fixed strings, so correct builds failed self-verify twice and jammed the
+pre-renewal reminder goal (a sweep found 7 such checks across its 4 members). `grepModeOf` now
+resolves an UNSET mode to `'regex'` when `validateLiteralGrepIsNotRegex(pattern)` flags it (bare
+`a|b` alternation, `.*` / `.+`, an escaped metachar); an explicit `mode:'literal'` is always honored.
+Since both lanes read `grepModeOf`, the runner and the merge gate agree, and the author-time lint
+now only rejects an EXPLICIT literal regex.
+
 ### Grep is smart-case: shouldGrepCaseInsensitively
 
 [[../specs/spec-phase-check-grep-is-smart-case]] Phase 1 — this module exports the ONE

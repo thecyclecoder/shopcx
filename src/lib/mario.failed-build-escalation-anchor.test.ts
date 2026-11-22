@@ -143,8 +143,12 @@ test("(c) escalation superseded by later escorted_init → KEPT (the human resol
       const isEscalated = chain.some(
         ([m, k, v]) => m === "eq" && k === "action_kind" && v === "escalated",
       );
+      // The supersede read uses `.in("action_kind", ["escorted_init", "escorted_goal"])`, not an
+      // `.eq` — match that shape so the escorted row is actually returned (an `.eq` matcher silently
+      // never fired, leaving the slug owned → the build was dropped instead of resurfacing).
       const isEscorted = chain.some(
-        ([m, k, v]) => m === "eq" && k === "action_kind" && v === "escorted_init",
+        ([m, k, v]) =>
+          m === "in" && k === "action_kind" && Array.isArray(v) && v.includes("escorted_init"),
       );
       if (isEscalated) return [{ spec_slug: slug, created_at: OLD_ESC_AT }];
       if (isEscorted) return [{ spec_slug: slug, created_at: ESCORTED_AT }];

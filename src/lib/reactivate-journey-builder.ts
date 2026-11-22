@@ -43,12 +43,33 @@ function emptyConfig(): BuiltJourneyConfig {
   return { codeDriven: true, multiStep: false, steps: [] };
 }
 
+/** Shipping-protection lines (SKU "Insure01", title "Shipping Protection") are add-ons, not products. */
+export function isProtectionLine(i: { sku?: unknown; title?: unknown }): boolean {
+  return /^insure/i.test(String(i.sku ?? "")) || /shipping protection/i.test(String(i.title ?? ""));
+}
+
+/** True when a sub carries at least one real product (not only protection / $0 lines). */
+export function hasRealItems(items: unknown): boolean {
+  const list = (items as { sku?: string; title?: string; price_cents?: number }[] | null) || [];
+  return list.some((i) => !isProtectionLine(i) && Number(i.price_cents ?? 1) !== 0);
+}
+
 /**
- * Resolve the subscription this win-back should restart: the customer's most recent CANCELLED sub
- * (that is who we are emailing), else a paused one. Read across the whole linked-account group —
- * a customer whose cancelled sub sits on a sibling profile would otherwise get an empty journey.
+ * Resolve the subscription this win-back should restart.
+ *
+ * 1. The session's own `subscription_id` (the sub the email/SMS was minted for) wins, as long as it
+ *    is still cancelled/paused and belongs to this customer's linked-account group. Without this the
+ *    page could name and restart a DIFFERENT sub than the email (Dylan's 11/21 test: email said
+ *    Creatine, page restarted a paused Shipping-Protection-only sub).
+ * 2. Otherwise: a paused sub with real items, else the most recently updated cancelled sub with real
+ *    items. A protection-only sub is never picked.
+ *
+ * Read across the whole linked-account group — a customer whose cancelled sub sits on a sibling
+ * profile would otherwise get an empty journey.
  */
-export async function resolveTargetSubscription(admin: Admin, workspaceId: string, customerId: string) {
+export async function resolveTargetSubscription(
+  admin: Admin, workspaceId: string, customerId: string, preferredSubscriptionId?: string | null,
+) {
   const { data: link } = await admin.from("customer_links")
     .select("group_id").eq("workspace_id", workspaceId).eq("customer_id", customerId).maybeSingle();
   let ids = [customerId];
@@ -62,14 +83,74 @@ export async function resolveTargetSubscription(admin: Admin, workspaceId: strin
     .eq("workspace_id", workspaceId).in("customer_id", ids)
     .in("status", ["cancelled", "paused"])
     .order("updated_at", { ascending: false });
-  const paused = (subs || []).find((s) => s.status === "paused");
-  return paused ?? (subs || [])[0] ?? null;
+  return pickTargetSubscription(subs || [], preferredSubscriptionId);
+}
+
+/** Pure selection rule behind `resolveTargetSubscription` (exported for tests). */
+export function pickTargetSubscription<T extends { id: string; status: string; items: unknown }>(
+  subs: T[], preferredSubscriptionId?: string | null,
+): T | null {
+  if (preferredSubscriptionId) {
+    const bound = subs.find((s) => s.id === preferredSubscriptionId);
+    if (bound) return bound;
+  }
+  const real = subs.filter((s) => hasRealItems(s.items));
+  return real.find((s) => s.status === "paused") ?? real[0] ?? null;
+}
+
+export interface WinbackGift { variant_id: string; label: string }
+
+/**
+ * Free-gift options for the restart, DB-driven: `journey_definitions.config.winback_gifts` on the
+ * workspace's win-back journey (seeded by migration 20270121120000). Each entry is a
+ * product_variants UUID + the label the customer sees. Empty/absent → no gift, plain restart.
+ * The click handler re-reads this list and only honours a variant that is on it.
+ */
+export async function loadWinbackGifts(admin: Admin, workspaceId: string): Promise<WinbackGift[]> {
+  const { data } = await admin.from("journey_definitions")
+    .select("config")
+    .eq("workspace_id", workspaceId)
+    .in("trigger_intent", ["reactivate_subscription", "reactivate", "win_back"])
+    .eq("is_active", true)
+    .order("priority", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  const cfg = (data?.config as Record<string, unknown> | null) || {};
+  // A limited-time gift offer stops on its stated deadline (config.winback_gifts_ends_at, ISO).
+  // The email says "ends Dec 31", so the page must actually stop offering the gift then.
+  if (!winbackGiftsLive(cfg.winback_gifts_ends_at)) return [];
+  const raw = (cfg.winback_gifts as unknown[]) || [];
+  return raw
+    .map((g) => g as Partial<WinbackGift>)
+    .filter((g): g is WinbackGift => typeof g.variant_id === "string" && typeof g.label === "string" && !!g.variant_id && !!g.label);
+}
+
+/** True while the gift offer is live: no deadline set, or the deadline is still in the future. */
+export function winbackGiftsLive(endsAt: unknown, now: Date = new Date()): boolean {
+  if (typeof endsAt !== "string" || !endsAt) return true;
+  const t = Date.parse(endsAt);
+  return Number.isNaN(t) ? true : now.getTime() < t;
+}
+
+/** Option value for "restart + this gift". Parsed back by `parseReactivateValue`. */
+export function giftOptionValue(variantId: string): string {
+  return `reactivate:${variantId}`;
+}
+
+/** `reactivate` → plain restart; `reactivate:<variant uuid>` → restart + that gift; else not a restart. */
+export function parseReactivateValue(value: string): { restart: boolean; giftVariantId: string | null } {
+  if (value === "reactivate") return { restart: true, giftVariantId: null };
+  if (value.startsWith("reactivate:")) {
+    const id = value.slice("reactivate:".length).trim();
+    return { restart: true, giftVariantId: id || null };
+  }
+  return { restart: false, giftVariantId: null };
 }
 
 /** Human-readable item summary, e.g. "Superfood Tabs — Mixed Berry ×2". */
 function describeItems(items: unknown): string {
   const list = (items as { title?: string; variant_title?: string; quantity?: number; sku?: string; price_cents?: number }[] | null) || [];
-  const real = list.filter((i) => !String(i.sku ?? "").startsWith("insure") && Number(i.price_cents ?? 1) !== 0);
+  const real = list.filter((i) => !isProtectionLine(i) && Number(i.price_cents ?? 1) !== 0);
   if (!real.length) return "your subscription";
   return real
     .map((i) => `${i.title ?? i.sku ?? "item"}${i.variant_title ? ` — ${i.variant_title}` : ""}${(i.quantity ?? 1) > 1 ? ` ×${i.quantity}` : ""}`)
@@ -78,12 +159,23 @@ function describeItems(items: unknown): string {
 
 export async function buildReactivateSteps(
   admin: Admin, workspaceId: string, customerId: string, ticketId: string,
+  subscriptionId?: string | null,
 ): Promise<BuiltJourneyConfig> {
-  const sub = await resolveTargetSubscription(admin, workspaceId, customerId);
+  const sub = await resolveTargetSubscription(admin, workspaceId, customerId, subscriptionId);
   if (!sub) return emptyConfig();
 
   const what = describeItems(sub.items);
   const wasPaused = sub.status === "paused";
+  const gifts = await loadWinbackGifts(admin, workspaceId);
+  const options = gifts.length
+    ? [
+        ...gifts.map((g) => ({ value: giftOptionValue(g.variant_id), label: `Restart + free ${g.label}` })),
+        { value: "not_now", label: "Not right now" },
+      ]
+    : [
+        { value: "reactivate", label: "Yes, restart my subscription" },
+        { value: "not_now", label: "Not right now" },
+      ];
 
   return {
     codeDriven: true,
@@ -94,11 +186,10 @@ export async function buildReactivateSteps(
       question: wasPaused
         ? `Ready to restart your subscription? We'll pick it right back up with ${what}.`
         : `Want your subscription back? We'll restart it with ${what}.`,
-      subtitle: "One click and you're set: same items, same price you had before. Your next order processes tomorrow.",
-      options: [
-        { value: "reactivate", label: "Yes, restart my subscription" },
-        { value: "not_now", label: "Not right now" },
-      ],
+      subtitle: gifts.length
+        ? "Pick your free bag and you're set: same items, same price you had before, and the gift ships free in your first order, which processes tomorrow."
+        : "One click and you're set: same items, same price you had before. Your next order processes tomorrow.",
+      options,
       isTerminal: true,
     }],
     metadata: {

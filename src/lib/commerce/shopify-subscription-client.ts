@@ -114,6 +114,108 @@ function toResult(env: GqlResult<Record<string, { userErrors?: { message: string
   return { success: true };
 }
 
+// ── billing-cycle edit lock ────────────────────────────────────────────────────────────────
+
+/**
+ * Shopify refuses EVERY contract update (cancel, pause, resume, date change, swap, any draft) while
+ * a billing cycle carries a contract edit: "Subscription contract cannot be updated if there is a
+ * current or upcoming billing cycle contract edit." Our one-time gifts ARE cycle edits (see
+ * `withBillingCycleDraft`), so before this wrapper a customer who took a free gift could not cancel,
+ * pause, swap or move dates until that order billed (found 2026-11-22 on the CEO's win-back test).
+ */
+export const CYCLE_EDIT_LOCK_RE = /billing cycle contract edit/i;
+
+export interface PendingOneTimeLine { cycleIndex: number; variantId: string; quantity: number; price: string }
+
+/**
+ * The one-time lines sitting in edited billing cycles: lines on a cycle's edited contract whose id
+ * is not on the base contract (i.e. added by a cycle edit, not recurring).
+ */
+export async function readPendingCycleEdits(
+  workspaceId: string,
+  contractId: string,
+): Promise<{ success: boolean; error?: string; editedCycles: number[]; lines: PendingOneTimeLine[] }> {
+  const base = await getSubscriptionContract(workspaceId, contractId);
+  if (!base.success || !base.contract) return { success: false, error: base.error ?? "contract unreadable", editedCycles: [], lines: [] };
+  const baseIds = new Set(base.contract.lines.map((l) => l.id));
+  // ⚠️ Shopify rejects a range that starts before the contract's createdAt ("Billing cycle start
+  // date out of range") — the first live test failed exactly that way and the wrapper silently
+  // passed the lock error through. Start at createdAt + 1s (same clamp as shopcxAddOneTimeLine).
+  const createdMs = base.contract.createdAt ? new Date(base.contract.createdAt).getTime() : NaN;
+  const start = new Date(Number.isFinite(createdMs) ? createdMs + 1000 : Date.now()).toISOString();
+  const end = new Date(Date.now() + 400 * 24 * 3600 * 1000).toISOString();
+  const env = await gql<{ subscriptionBillingCycles?: { edges: { node: {
+    cycleIndex: number; edited: boolean; status: string;
+    editedContract?: { lines?: { edges: { node: { id: string; variantId: string | null; quantity: number; currentPrice?: { amount: string } } }[] } } | null;
+  } }[] } }>(
+    workspaceId,
+    `query($id:ID!,$s:DateTime!,$e:DateTime!){
+       subscriptionBillingCycles(contractId:$id, first:50, billingCyclesDateRangeSelector:{ startDate:$s, endDate:$e }){
+         edges { node { cycleIndex edited status
+           editedContract { lines(first:50){ edges { node { id variantId quantity currentPrice { amount } } } } } } } } }`,
+    { id: contractGid(contractId), s: start, e: end },
+  );
+  if (env.errors?.length) return { success: false, error: env.errors.map((e) => e.message).join("; "), editedCycles: [], lines: [] };
+  const editedCycles: number[] = [];
+  const lines: PendingOneTimeLine[] = [];
+  for (const { node } of env.data?.subscriptionBillingCycles?.edges ?? []) {
+    // Only UNBILLED cycles: an edit on an already-billed cycle neither blocks updates nor can be
+    // deleted (Shopify: "The index provided is invalid"), seen live on 2026-11-22.
+    if (!node.edited || node.status !== "UNBILLED") continue;
+    editedCycles.push(node.cycleIndex);
+    for (const { node: l } of node.editedContract?.lines?.edges ?? []) {
+      if (baseIds.has(l.id) || !l.variantId) continue;
+      lines.push({ cycleIndex: node.cycleIndex, variantId: l.variantId, quantity: l.quantity, price: l.currentPrice?.amount ?? "0.00" });
+    }
+  }
+  return { success: true, editedCycles, lines };
+}
+
+/**
+ * Run a contract update; if Shopify refuses it because of a pending billing-cycle edit, lift the
+ * edit, run the update again, and — if the contract is still ACTIVE afterwards — put the one-time
+ * lines back on the cycle the next charge will bill (`resolveChargeableCycle`, the same cycle the
+ * renewal worker bills). A cancel or pause drops them on purpose: nothing ships, nothing to gift.
+ * The original error is returned untouched when the lock is not the cause.
+ */
+export async function withCycleEditLockCleared(
+  workspaceId: string,
+  contractId: string,
+  op: () => Promise<SubscriptionActionResult>,
+): Promise<SubscriptionActionResult> {
+  const first = await op();
+  if (first.success || !CYCLE_EDIT_LOCK_RE.test(first.error ?? "")) return first;
+
+  const pending = await readPendingCycleEdits(workspaceId, contractId);
+  if (!pending.success || !pending.editedCycles.length) return first;
+  for (const index of pending.editedCycles) {
+    const del = await shopifyDeleteBillingCycleEdit(workspaceId, contractId, { index });
+    if (!del.success) return { success: false, error: `${first.error} (could not lift cycle ${index} edit: ${del.error})` };
+  }
+
+  const retry = await op();
+
+  if (pending.lines.length) {
+    const live = await getSubscriptionContract(workspaceId, contractId);
+    if (live.success && live.contract?.status === "ACTIVE") {
+      const ch = await resolveChargeableCycle(workspaceId, contractId);
+      const readd = ch.success && ch.index != null
+        ? await withBillingCycleDraft(workspaceId, contractId, { index: ch.index }, async (draftId) => {
+            for (const l of pending.lines) {
+              const r = await shopifyAddDraftLine(workspaceId, draftId, l.variantId, l.quantity, l.price);
+              if (!r.success) return r;
+            }
+            return { success: true };
+          })
+        : { success: false, error: ch.error ?? "no chargeable cycle" };
+      if (!readd.success) {
+        console.warn(`[cycle-edit-lock] ${contractId}: one-time line(s) could not be restored after update: ${readd.error}`);
+      }
+    }
+  }
+  return retry;
+}
+
 /**
  * Run draft-based edits inside one open/commit envelope.
  *
@@ -122,6 +224,14 @@ function toResult(env: GqlResult<Record<string, { userErrors?: { message: string
  * abandoned. There is no explicit discard mutation and none is needed.
  */
 export async function withDraft(
+  workspaceId: string,
+  contractId: string,
+  mutate: (draftId: string) => Promise<SubscriptionActionResult>,
+): Promise<SubscriptionActionResult> {
+  return withCycleEditLockCleared(workspaceId, contractId, () => withDraftRaw(workspaceId, contractId, mutate));
+}
+
+async function withDraftRaw(
   workspaceId: string,
   contractId: string,
   mutate: (draftId: string) => Promise<SubscriptionActionResult>,
@@ -202,12 +312,14 @@ export async function shopifySubscriptionAction(
   action: "pause" | "cancel" | "resume",
 ): Promise<SubscriptionActionResult> {
   const [field, arg] = STATUS_MUTATION[action];
-  const env = await gql(
-    workspaceId,
-    `mutation($id:ID!){ ${field}(${arg}:$id){ contract { id status } userErrors { message } } }`,
-    { id: contractGid(contractId) },
-  );
-  const direct = toResult(env as never, field);
+  const direct = await withCycleEditLockCleared(workspaceId, contractId, async () => {
+    const env = await gql(
+      workspaceId,
+      `mutation($id:ID!){ ${field}(${arg}:$id){ contract { id status } userErrors { message } } }`,
+      { id: contractGid(contractId) },
+    );
+    return toResult(env as never, field);
+  });
   if (direct.success || action !== "resume") return direct;
 
   // Only a CANCELLED contract needs the draft route; anything else is a real failure.
@@ -244,12 +356,14 @@ export async function shopifySetNextBillingDate(
   const iso = /^\d{4}-\d{2}-\d{2}$/.test(nextBillingDate)
     ? `${nextBillingDate}T12:00:00Z`
     : nextBillingDate;
-  const env = await gql(
-    workspaceId,
-    `mutation($id:ID!,$d:DateTime!){ subscriptionContractSetNextBillingDate(contractId:$id, date:$d){ contract { id nextBillingDate } userErrors { message } } }`,
-    { id: contractGid(contractId), d: iso },
-  );
-  return toResult(env as never, "subscriptionContractSetNextBillingDate");
+  return withCycleEditLockCleared(workspaceId, contractId, async () => {
+    const env = await gql(
+      workspaceId,
+      `mutation($id:ID!,$d:DateTime!){ subscriptionContractSetNextBillingDate(contractId:$id, date:$d){ contract { id nextBillingDate } userErrors { message } } }`,
+      { id: contractGid(contractId), d: iso },
+    );
+    return toResult(env as never, "subscriptionContractSetNextBillingDate");
+  });
 }
 
 /** Mirrors `appstleUpdateBillingInterval`. Draft-based — the policy lives on the draft. */
@@ -453,14 +567,16 @@ export async function shopifySwapProduct(
   lineId: string,
   newVariantId: string,
 ): Promise<SubscriptionActionResult> {
-  const env = await gql(
-    workspaceId,
-    `mutation($c:ID!,$l:ID!,$in:SubscriptionContractProductChangeInput!){
-       subscriptionContractProductChange(subscriptionContractId:$c, lineId:$l, input:$in){
-         lineUpdated { id } userErrors { message } } }`,
-    { c: contractGid(contractId), l: lineId, in: { productVariantId: variantGid(newVariantId) } },
-  );
-  return toResult(env as never, "subscriptionContractProductChange");
+  return withCycleEditLockCleared(workspaceId, contractId, async () => {
+    const env = await gql(
+      workspaceId,
+      `mutation($c:ID!,$l:ID!,$in:SubscriptionContractProductChangeInput!){
+         subscriptionContractProductChange(subscriptionContractId:$c, lineId:$l, input:$in){
+           lineUpdated { id } userErrors { message } } }`,
+      { c: contractGid(contractId), l: lineId, in: { productVariantId: variantGid(newVariantId) } },
+    );
+    return toResult(env as never, "subscriptionContractProductChange");
+  });
 }
 
 /**
