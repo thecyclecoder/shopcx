@@ -1,0 +1,1 @@
+- **Scope out foreign agent_jobs.completed_at table-browse noise from the Control Tower feed** · verified 2026-11-22 · → [[../libraries/error-feed]]
