@@ -13,6 +13,10 @@ Owner-only, **read-only** page: the live view of the pre-renewal-reminder 50/50 
 
 `GET /api/workspaces/[id]/analytics/renewal-reminder` → [[../libraries/reminder-results-sdk]] `getReminderTestResults` (composes the harness experiment row + metrics, the M2 reminder send ledger, and the M1 next-order journey events). Auth: Supabase session; **owner-gated** in the route (`workspace_members.role === 'owner'`) and in the sidebar (`ownerOnly`). READ-ONLY — never mutates the experiment, ledger, or journey rows.
 
+## Persisted guardrails + verdict (launch-readiness Phase 5)
+
+The guardrail strip + verdict banner now read the PERSISTED state the [[../inngest/subscriber-experiment-guardrails]] cron writes, falling back to the derived labels only before the first evaluation. [[../libraries/reminder-results-sdk]] `overlayPersisted` overlays: `guardrails.tripped` + `trippedReason` when the cron auto-paused (status `stopped` by `guardrail`), and the persisted `verdict` label (`derived: false`, `concluded: true`) once recorded. The CEO is notified only on a guardrail trip or the verdict — the dashboard reflects the same persisted state.
+
 ## Related
 
-[[../libraries/reminder-results-sdk]] · [[../libraries/subscriber-experiment-metrics]] · [[../libraries/pre-renewal-reminders]] · [[ad-testing|Analytics → Ad Testing]] · [[../lifecycles/pre-renewal-reminder-journey]] · [[../functions/retention]]
+[[../libraries/reminder-results-sdk]] · [[../libraries/subscriber-experiment-metrics]] · [[../libraries/subscriber-experiment-guardrails]] · [[../inngest/subscriber-experiment-guardrails]] · [[../libraries/pre-renewal-reminders]] · [[ad-testing|Analytics → Ad Testing]] · [[../lifecycles/pre-renewal-reminder-journey]] · [[../functions/retention]]

@@ -10,8 +10,14 @@ import { subAddItem } from "@/lib/subscription-items";
 import {
   subscriptionSkipNextOrder,
   subscriptionUpdateNextBillingDate,
-  subscriptionUpdateBillingInterval,
 } from "@/lib/commerce/subscription";
+// ⭐ Portal-parity guards + shared executors (CEO rule, 2026-11-22): the journey must
+// run the SAME catalog/price/guard/frequency logic as the Portal, through shared
+// helpers both surfaces call — not a forked second copy.
+import { changeSubscriptionFrequency } from "@/lib/subscription-frequency";
+import { canMutateSubscription, assertNewVariantsSelectable } from "@/lib/portal/mutation-guard";
+import { shouldBlockForFailedPayment } from "@/lib/portal/failed-payment-guard";
+import { isSwappableConsumable, resolveVariantSwapContexts } from "@/lib/portal/editable-catalog";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -35,7 +41,7 @@ type EditBody = {
   interval_count?: number;
 };
 
-type ResolvedSub = { id: string; contractId: string };
+type ResolvedSub = { id: string; contractId: string; isInternal: boolean; lastPaymentStatus: string | null };
 
 /**
  * Resolve the subscription the customer is editing and PROVE it belongs to this
@@ -60,24 +66,24 @@ async function resolveOwnedSubscription(
   const targetId = requestedSubId || sessionSubscriptionId || undefined;
   if (targetId && /^[0-9a-f-]{36}$/i.test(targetId)) {
     const { data: row } = await admin.from("subscriptions")
-      .select("id, shopify_contract_id, customer_id")
+      .select("id, shopify_contract_id, customer_id, is_internal, last_payment_status")
       .eq("id", targetId)
       .eq("workspace_id", workspaceId)
       .maybeSingle();
     if (row?.shopify_contract_id && row.customer_id && allowedIds.includes(row.customer_id)) {
-      return { id: row.id, contractId: row.shopify_contract_id };
+      return { id: row.id, contractId: row.shopify_contract_id, isInternal: !!row.is_internal, lastPaymentStatus: row.last_payment_status ?? null };
     }
     return null;
   }
 
   // No explicit target — auto-pick the customer's lone active/paused sub.
   const { data: liveSubs } = await admin.from("subscriptions")
-    .select("id, shopify_contract_id")
+    .select("id, shopify_contract_id, is_internal, last_payment_status")
     .in("customer_id", allowedIds)
     .eq("workspace_id", workspaceId)
     .in("status", ["active", "paused"]);
   if (liveSubs?.length === 1 && liveSubs[0].shopify_contract_id) {
-    return { id: liveSubs[0].id, contractId: liveSubs[0].shopify_contract_id };
+    return { id: liveSubs[0].id, contractId: liveSubs[0].shopify_contract_id, isInternal: !!liveSubs[0].is_internal, lastPaymentStatus: liveSubs[0].last_payment_status ?? null };
   }
   return null;
 }
@@ -121,7 +127,17 @@ export async function POST(
   const sub = await resolveOwnedSubscription(admin, wsId, session.customer_id, session.subscription_id, body.subscription_id);
 
   if (!sub) {
-    return failUnresolved(admin, session.id, session.ticket_id, wsId, action);
+    return failUnresolved(admin, session, action);
+  }
+
+  // ── Portal-parity guards (CEO rule, 2026-11-22) ──
+  // The journey must apply the SAME checks the Portal does BEFORE dispatch, and
+  // surface a customer-safe validation message (NOT a "team will handle it" failure)
+  // when a guard blocks. A blocked guard is the customer's to fix — it never opens a
+  // ticket or raises an alert.
+  const guardFailure = await runPortalParityGuards(wsId, sub, body);
+  if (guardFailure) {
+    return NextResponse.json({ success: false, validationError: guardFailure.code, message: guardFailure.message });
   }
 
   // ── Dispatch through the shared executors ──
@@ -175,8 +191,10 @@ export async function POST(
       }
       case "change_frequency": {
         if (!body.interval || !body.interval_count) { result = { success: false, validationError: "missing_frequency", savedAction: "" }; break; }
-        const r = await subscriptionUpdateBillingInterval(wsId, sub.contractId, body.interval, body.interval_count);
-        result = { ...r, savedAction: "updated your delivery frequency" };
+        // Shared sequence: engine write → roll next_billing_date forward → display sync
+        // (same as the Portal frequency handler). See [[subscription-frequency]].
+        const r = await changeSubscriptionFrequency(wsId, sub.contractId, body.interval, body.interval_count);
+        result = { success: r.success, error: r.error, savedAction: "updated your delivery frequency" };
         break;
       }
       default:
@@ -195,7 +213,7 @@ export async function POST(
     }
     // A real executor failure: never claim the change landed. Leave the ticket
     // open for a human + raise it, and tell the customer the team will apply it.
-    await raiseFailedEdit(admin, session.id, session.ticket_id, wsId, action, result.error);
+    await raiseFailedEdit(admin, session, action, result.error);
     return NextResponse.json({
       success: false,
       message: "We couldn't apply that change automatically — our team has been notified and will take care of it for you shortly.",
@@ -229,30 +247,131 @@ export async function POST(
   });
 }
 
+type SessionRow = {
+  id: string;
+  workspace_id: string;
+  ticket_id: string | null;
+  customer_id: string;
+  subscription_id: string | null;
+};
+
+/**
+ * Collect the NEW target variant ids a mutating edit selects INTO (swap/add), so the
+ * Portal-parity selectability + consumable guards run against the same set the Portal
+ * guards in replace-variants.
+ */
+function newVariantTargets(body: EditBody): string[] {
+  const ids: string[] = [];
+  if (body.action === "swap_variant" && body.new_variant_id) ids.push(String(body.new_variant_id));
+  if (body.action === "swap_product" && body.new_variant_id) ids.push(String(body.new_variant_id));
+  if (body.action === "add_item" && body.variant_id) ids.push(String(body.variant_id));
+  return ids;
+}
+
+/**
+ * Apply the SAME checks the Portal applies before a subscription mutation. Returns a
+ * customer-safe `{ code, message }` when a guard blocks, or null when every guard
+ * passes. A block is the customer's to fix — it never opens a ticket or alerts.
+ */
+async function runPortalParityGuards(
+  workspaceId: string,
+  sub: ResolvedSub,
+  body: EditBody,
+): Promise<{ code: string; message: string } | null> {
+  // First-delivery gate (anti-gaming) — identical predicate to the Portal.
+  const gate = await canMutateSubscription(workspaceId, { id: sub.id, is_internal: sub.isInternal });
+  if (!gate.allowed) {
+    return { code: "mutation_gated", message: gate.reason || "This subscription can't be changed yet." };
+  }
+
+  // Failed-payment guard — the Portal blocks date + frequency changes on a
+  // payment-failed Appstle sub. Mirror that here.
+  if ((body.action === "change_date" || body.action === "change_frequency")) {
+    if (shouldBlockForFailedPayment({ is_internal: sub.isInternal, last_payment_status: sub.lastPaymentStatus })) {
+      return {
+        code: "payment_failed_update_blocked",
+        message: "This subscription has a failed payment. Update your payment method or cancel before changing it.",
+      };
+    }
+  }
+
+  // Selectability + consumable/in-stock guards on NEW targets (swap/add). The
+  // consumable rule is enforced server-side here by applying `isSwappableConsumable`
+  // to each resolved (product, variant) — the SAME pure predicate the catalog list
+  // filters on, so the UI and the server can never disagree.
+  const targets = newVariantTargets(body);
+  if (targets.length) {
+    const selectable = await assertNewVariantsSelectable(workspaceId, targets);
+    if (!selectable.ok) {
+      return { code: "variant_not_selectable", message: "That product isn't available to add right now. Please pick another." };
+    }
+    const contexts = await resolveVariantSwapContexts(workspaceId, targets);
+    for (const id of targets) {
+      const ctx = contexts.get(id);
+      // An unknown variant (not in the catalog) can't be proven swappable → block.
+      if (!ctx || !isSwappableConsumable(ctx.product, ctx.variant)) {
+        return { code: "variant_not_swappable", message: "That product is out of stock or can't be added to a subscription. Please pick another." };
+      }
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Guarantee a human owns the promise when a journey edit fails. Reminder sessions are
+ * minted with `ticket_id` null (src/lib/pre-renewal-reminders.ts sendTreatmentReminder),
+ * so "our team will take care of it" previously pointed at nothing. Create (or reuse)
+ * a ticket for the session's customer and stamp it on journey_sessions.ticket_id.
+ * Returns the ticket id, or null if the session has no customer to open one for.
+ */
+export async function ensureJourneyFollowUpTicket(
+  admin: Admin,
+  session: SessionRow,
+): Promise<string | null> {
+  if (session.ticket_id) return session.ticket_id;
+  if (!session.customer_id) return null;
+
+  const { data: ticket } = await admin
+    .from("tickets")
+    .insert({
+      workspace_id: session.workspace_id,
+      customer_id: session.customer_id,
+      channel: "email",
+      status: "open",
+      subject: "Next-order change needs manual help",
+    })
+    .select("id")
+    .maybeSingle();
+
+  const ticketId = ticket?.id as string | undefined;
+  if (!ticketId) return null;
+
+  await admin.from("journey_sessions").update({ ticket_id: ticketId }).eq("id", session.id);
+  return ticketId;
+}
+
 async function failUnresolved(
   admin: Admin,
-  sessionId: string,
-  ticketId: string | null,
-  workspaceId: string,
+  session: SessionRow,
   action: string,
 ): Promise<NextResponse> {
-  console.error(`[journey/edit] no resolvable subscription for session ${sessionId} action ${action}`);
-  await raiseFailedEdit(admin, sessionId, ticketId, workspaceId, action, "no resolvable subscription");
+  console.error(`[journey/edit] no resolvable subscription for session ${session.id} action ${action}`);
+  await raiseFailedEdit(admin, session, action, "no resolvable subscription");
   return NextResponse.json({
     success: false,
     message: "We couldn't find the subscription to update — our team has been notified and will follow up with you shortly.",
   });
 }
 
-/** Leave the ticket open + raise a high-severity notification for a failed edit. */
+/** Ensure a follow-up ticket exists, leave it open + raise a high-severity notification. */
 async function raiseFailedEdit(
   admin: Admin,
-  sessionId: string,
-  ticketId: string | null,
-  workspaceId: string,
+  session: SessionRow,
   action: string,
   error: string | undefined,
 ): Promise<void> {
+  const ticketId = await ensureJourneyFollowUpTicket(admin, session);
   if (ticketId) {
     await admin.from("tickets").update({ status: "open", handled_by: null, updated_at: new Date().toISOString() }).eq("id", ticketId);
     await admin.from("ticket_messages").insert({
@@ -264,12 +383,12 @@ async function raiseFailedEdit(
     });
   }
   await admin.from("dashboard_notifications").insert({
-    workspace_id: workspaceId,
+    workspace_id: session.workspace_id,
     type: "system",
     title: "Next-order journey edit could not be applied",
     body: ticketId
       ? `Ticket ${ticketId} — a "${action}" edit in the next-order journey failed to apply. Apply it manually.`
-      : `A "${action}" edit in the next-order journey failed to apply (session ${sessionId}).`,
-    metadata: { severity: "high", ticket_id: ticketId, journey_session_id: sessionId, action },
+      : `A "${action}" edit in the next-order journey failed to apply (session ${session.id}).`,
+    metadata: { severity: "high", ticket_id: ticketId, customer_id: session.customer_id, subscription_id: session.subscription_id, journey_session_id: session.id, action },
   });
 }

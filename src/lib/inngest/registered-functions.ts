@@ -81,6 +81,7 @@ import {
   shopifySubscriptionRenewalAttempt,
 } from "@/lib/inngest/shopify-subscription-renewals";
 import { preRenewalReminderCron } from "@/lib/inngest/pre-renewal-reminders";
+import { subscriberExperimentGuardrailCron } from "@/lib/inngest/subscriber-experiment-guardrails";
 import {
   shopcxContractIngest,
   shopcxContractSync,
@@ -280,6 +281,7 @@ export const registeredInngestFunctions = [
   shopifySubscriptionRenewalCron,
   shopifySubscriptionRenewalAttempt,
   preRenewalReminderCron,
+  subscriberExperimentGuardrailCron,
   shopcxContractIngest,
   shopcxContractSync,
   shopcxDriftReconcileCron,

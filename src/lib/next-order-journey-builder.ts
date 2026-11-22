@@ -15,6 +15,8 @@
  */
 
 import { createAdminClient } from "@/lib/supabase/admin";
+import { loadEditableCatalog } from "@/lib/portal/editable-catalog";
+import { resolveSubscriptionPricing } from "@/lib/pricing";
 
 export interface NextOrderEditableItem {
   title: string;
@@ -103,49 +105,68 @@ export async function buildNextOrderJourneySteps(
   // should let the customer act on it (same inclusion the cancel builder uses).
   const { data: subs } = await admin
     .from("subscriptions")
-    .select("id, shopify_contract_id, items, next_billing_date, status, billing_interval, billing_interval_count, created_at")
+    .select("id, shopify_contract_id, items, next_billing_date, status, billing_interval, billing_interval_count, created_at, is_internal, delivery_price_cents, pricing_offer_id")
     .in("customer_id", allCustomerIds)
     .eq("workspace_id", workspaceId)
     .in("status", ["active", "paused"])
     .order("next_billing_date", { ascending: true });
 
-  // Workspace product catalog for swap / add (shape: [{id, title, sku, price_cents}]).
-  const { data: products } = await admin
-    .from("products")
-    .select("title, variants")
-    .eq("workspace_id", workspaceId);
-
+  // Swap/add catalog comes from the SHARED Portal helper — same filtered list both
+  // surfaces show (products_available_to_add, Shipping Protection excluded by id,
+  // suppressed + out-of-stock + non-consumable variants dropped). The journey no
+  // longer loads every `products` row (CEO parity rule, 2026-11-22).
+  const editable = await loadEditableCatalog(workspaceId, admin);
   const cancelReasons = await loadCancelReasons(admin, workspaceId);
 
   const catalog: NextOrderCatalogVariant[] = [];
-  for (const p of products || []) {
-    const variants = (p.variants as { id?: string; title?: string; price_cents?: number }[]) || [];
-    for (const v of variants) {
-      if (!v.id) continue;
+  for (const p of editable.products) {
+    for (const v of p.variants) {
       catalog.push({
-        variant_id: String(v.id),
-        product_title: p.title || "",
-        variant_title: v.title || null,
-        price: typeof v.price_cents === "number" ? `$${(v.price_cents / 100).toFixed(2)}` : null,
+        variant_id: v.variantId,
+        product_title: p.title,
+        variant_title: v.title,
+        // Reference list price; the EXACT swap/add price comes from the shared
+        // price-quote path (src/app/api/journey/[token]/price-quote) on interaction.
+        price: typeof v.priceCents === "number" ? `$${(v.priceCents / 100).toFixed(2)}` : null,
       });
     }
   }
 
-  const subscriptions: NextOrderSubscription[] = (subs || []).map(sub => {
+  // Price each sub's lines + total through the SAME engine the renewal bills with.
+  // Internal subs resolve via resolveSubscriptionPricing (exact, rule-aware); other
+  // engines keep their stored (vendor-baked) line prices as the authoritative figure.
+  const subscriptions: NextOrderSubscription[] = await Promise.all((subs || []).map(async sub => {
     const rawItems = (sub.items as { title: string; variant_title?: string; variant_id?: string; quantity?: number; price?: string | number }[] || []);
-    const items: NextOrderEditableItem[] = rawItems
-      .filter(i => !isShippingProtection(i.title))
-      .map(i => ({
+    const nonProtection = rawItems.filter(i => !isShippingProtection(i.title));
+
+    let items: NextOrderEditableItem[];
+    let total: number;
+
+    if (sub.is_internal) {
+      const pricing = await resolveSubscriptionPricing(workspaceId, {
+        items: sub.items,
+        delivery_price_cents: sub.delivery_price_cents,
+        pricing_offer_id: sub.pricing_offer_id,
+      });
+      const productLines = pricing.lines.filter(l => l.kind === "product");
+      items = productLines.map(l => ({
+        title: l.title,
+        variant_title: l.variant_title || undefined,
+        variant_id: l.variant_id ? String(l.variant_id) : undefined,
+        quantity: l.quantity,
+        price: `$${(l.unit_cents / 100).toFixed(2)}`,
+      }));
+      total = (pricing.product_subtotal_cents + pricing.shipping_cents) / 100;
+    } else {
+      items = nonProtection.map(i => ({
         title: i.title,
         variant_title: i.variant_title,
         variant_id: i.variant_id ? String(i.variant_id) : undefined,
         quantity: i.quantity || 1,
         price: typeof i.price === "number" ? `$${i.price.toFixed(2)}` : (i.price ?? null),
       }));
-
-    const total = rawItems
-      .filter(i => !isShippingProtection(i.title))
-      .reduce((sum, i) => sum + (parseFloat(String(i.price ?? "0")) * (i.quantity || 1)), 0);
+      total = nonProtection.reduce((sum, i) => sum + (parseFloat(String(i.price ?? "0")) * (i.quantity || 1)), 0);
+    }
 
     const freq = sub.billing_interval && sub.billing_interval_count
       ? `Every ${sub.billing_interval_count} ${sub.billing_interval}${sub.billing_interval_count > 1 ? "s" : ""}`
@@ -174,7 +195,7 @@ export async function buildNextOrderJourneySteps(
       isFirstRenewal,
       subscriptionAgeDays: subAgeDays,
     };
-  });
+  }));
 
   const steps: NextOrderJourneyStep[] = [];
 
