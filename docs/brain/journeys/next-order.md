@@ -2,7 +2,7 @@
 
 The next-order journey gives subscribers the portal's full subscription editor **inside** the journey mini-site — swap, change quantity, add, remove, skip, change date, change frequency — plus an in-journey cancel that runs through the same cancel saves. A pre-renewal reminder (M2) links here so the customer acts instead of bouncing to the portal. Database row in [[../tables/journey_definitions]]: `slug='next-order'`, `journey_type='custom'`, `trigger_intent='next_order'`, `channels={email,sms}`.
 
-Part of the [[../goals/pre-renewal-reminder-next-order-journey]] M1 milestone. This is the surface the 50/50 test's treatment arm points at.
+Part of the [[../lifecycles/pre-renewal-reminder-journey]] flow (M1 milestone). This is the surface the 50/50 test's treatment arm points at.
 
 ## Trigger
 

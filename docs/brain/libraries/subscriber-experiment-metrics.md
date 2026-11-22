@@ -1,6 +1,6 @@
 # `src/lib/subscriber-experiment-metrics.ts` — per-arm net-revenue + secondary-metric rollup
 
-The read-only MEASUREMENT surface for the pre-renewal-reminder 50/50 test. Spec: `subscriber-experiment-guardrails-verdict` **Phase 1**. Part of goal [[../goals/pre-renewal-reminder-next-order-journey]] (M3 "Self-running 50/50 test"). The Phase 2 guardrail evaluator and the Phase 3 verdict engine both read their numbers from here — nothing else computes per-customer net revenue over a window.
+The read-only MEASUREMENT surface for the pre-renewal-reminder 50/50 test. Spec: `subscriber-experiment-guardrails-verdict` **Phase 1**. Part of the [[../lifecycles/pre-renewal-reminder-journey]] flow (M3 "Self-running 50/50 test"). The Phase 2 guardrail evaluator and the Phase 3 verdict engine both read their numbers from here — nothing else computes per-customer net revenue over a window.
 
 ## Primary metric — 90-day net revenue per customer
 

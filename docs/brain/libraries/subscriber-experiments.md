@@ -1,7 +1,7 @@
 # `src/lib/subscriber-experiments.ts` — the subscriber lifecycle-experiment harness SDK
 
 The ONE sanctioned chokepoint for the person-level experiment tables
-([[../tables/customer_lifecycle_experiments]] + [[../tables/customer_lifecycle_experiment_assignments]]) — CLAUDE.md raw-`.from` STOP rule, enforced by `scripts/_check-subscriber-experiments-sdk-compliance.ts` (wired into `predeploy:static` as `check:subscriber-experiments-sdk-compliance`). Spec: `subscriber-experiment-harness`. Part of goal [[../goals/pre-renewal-reminder-next-order-journey]] (M3 "Self-running 50/50 test").
+([[../tables/customer_lifecycle_experiments]] + [[../tables/customer_lifecycle_experiment_assignments]]) — CLAUDE.md raw-`.from` STOP rule, enforced by `scripts/_check-subscriber-experiments-sdk-compliance.ts` (wired into `predeploy:static` as `check:subscriber-experiments-sdk-compliance`). Spec: `subscriber-experiment-harness`. Part of the [[../lifecycles/pre-renewal-reminder-journey]] flow (M3 "Self-running 50/50 test").
 
 This is a NEW harness, deliberately NOT [[storefront-experiments]]: that framework is visitor/render grain with content-patch variants — the wrong grain (visitor, not person) and the wrong lever (content, not send/no-send) for a subscriber messaging test. Here assignment is persisted ONCE at the person level and never re-bucketed.
 

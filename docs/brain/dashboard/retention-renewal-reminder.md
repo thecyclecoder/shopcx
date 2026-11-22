@@ -15,4 +15,4 @@ Owner-only, **read-only** page: the live view of the pre-renewal-reminder 50/50 
 
 ## Related
 
-[[../libraries/reminder-results-sdk]] · [[../libraries/subscriber-experiment-metrics]] · [[../libraries/pre-renewal-reminders]] · [[ad-testing|Analytics → Ad Testing]] · [[../goals/pre-renewal-reminder-next-order-journey]] · [[../functions/retention]]
+[[../libraries/reminder-results-sdk]] · [[../libraries/subscriber-experiment-metrics]] · [[../libraries/pre-renewal-reminders]] · [[ad-testing|Analytics → Ad Testing]] · [[../lifecycles/pre-renewal-reminder-journey]] · [[../functions/retention]]

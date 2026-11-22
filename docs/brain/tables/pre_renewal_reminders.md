@@ -1,6 +1,6 @@
 # `pre_renewal_reminders` — one row per (customer group, renewal window) reminder decision
 
-The send-ledger for the pre-renewal reminder channel. One row per customer **identity group** per renewal, stamped with the experiment arm — the attributable record the M3 primary metric (90-day net revenue per customer, reminder group vs holdout) and the opt-out/complaint guardrails read. Written + read ONLY through [[../libraries/pre-renewal-reminders]] (CLAUDE.md raw-`.from` chokepoint). Migration `20270122120000_pre_renewal_reminders.sql`. RLS: service-role only. Part of goal [[../goals/pre-renewal-reminder-next-order-journey]] (M2 "Renewal reminder sends"). Spec: `pre-renewal-reminder-sends`.
+The send-ledger for the pre-renewal reminder channel. One row per customer **identity group** per renewal, stamped with the experiment arm — the attributable record the M3 primary metric (90-day net revenue per customer, reminder group vs holdout) and the opt-out/complaint guardrails read. Written + read ONLY through [[../libraries/pre-renewal-reminders]] (CLAUDE.md raw-`.from` chokepoint). Migration `20270122120000_pre_renewal_reminders.sql`. RLS: service-role only. Part of the [[../lifecycles/pre-renewal-reminder-journey]] flow (M2 "Renewal reminder sends"). Spec: `pre-renewal-reminder-sends`.
 
 **Holdout rows record the DECISION, not a send** — a `holdout` row is the clean counterfactual (we decided-not-to-remind). `treatment` rows carry the email + consented-SMS outcome. Every intended + actual send is here.
 
