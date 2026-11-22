@@ -1,0 +1,1 @@
+- **Subscriber lifecycle-experiment harness (sticky customer-level 50/50 + holdout)** · verified 2026-11-22 · → [[../lifecycles/pre-renewal-reminder-journey]]
