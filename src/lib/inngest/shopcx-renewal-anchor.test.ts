@@ -27,8 +27,13 @@ test("the drift is real arithmetic, not a rounding artifact", () => {
   // The exact cohort case: due 09-12, contract created 09-15, 2-month cadence.
   const trueDue = new Date("2026-09-12T16:51:38Z");
   const clamped = new Date("2026-09-15T16:51:39Z"); // createdAt + 1s
-  const fromTrue = rollForwardToFutureBillingDate(trueDue, "month", 2);
-  const fromClamp = rollForwardToFutureBillingDate(clamped, "month", 2);
+  // Anchor the roll-forward to the measurement day (2026-09-16, per the header note) instead of the
+  // wall clock — a single cadence from each anchor. Without an explicit `now`, the helper defaults to
+  // `new Date()` and, once real time passes the first +2-month target, silently rolls an extra cycle
+  // (making this a date-drift time-bomb): the arithmetic under test is the ONE-step advance, so pin it.
+  const asOf = new Date("2026-09-16T00:00:00Z");
+  const fromTrue = rollForwardToFutureBillingDate(trueDue, "month", 2, asOf);
+  const fromClamp = rollForwardToFutureBillingDate(clamped, "month", 2, asOf);
   assert.notEqual(
     fromTrue.toISOString().slice(0, 10),
     fromClamp.toISOString().slice(0, 10),

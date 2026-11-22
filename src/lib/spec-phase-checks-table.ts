@@ -80,7 +80,15 @@ export interface GrepCheckParams {
  * backfilled to `'regex'` by the mode-backfill migration so their behavior is unchanged.
  */
 export function grepModeOf(params: GrepCheckParams): "literal" | "regex" {
-  return params.mode ?? "literal";
+  if (params.mode) return params.mode;
+  // An UNSET mode whose pattern is unmistakably a regex (bare `a|b` alternation, `.*` / `.+`, an
+  // escaped metachar — the same shapes `validateLiteralGrepIsNotRegex` rejects at author time)
+  // runs as a regex. As a fixed string it can never match code, so the literal default only ever
+  // failed correct builds: pre-renewal-reminder-sends (`pre.?renewal|preRenewal`) and
+  // subscriber-experiment-harness (`linkedIds|group_id`) each failed self-verify twice and jammed
+  // their goal (2026-11-20/21). An explicit `mode: 'literal'` is always honored.
+  if (params.pattern && validateLiteralGrepIsNotRegex(params.pattern).valid === false) return "regex";
+  return "literal";
 }
 
 /**

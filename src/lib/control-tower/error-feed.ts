@@ -3388,11 +3388,12 @@ export function isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise(
 
 /**
  * Foreign-app noise — Postgres reporting a missing column for a Supabase Studio Table
- * Editor click that lists non-existent columns (`method`, `status_code`) on
+ * Editor click that lists non-existent columns (`method`, `status_code`, `contract_id`) on
  * `public.appstle_api_calls`. The table was created with `request_method` + `response_status`
  * (see `supabase/migrations/20260501130000_appstle_api_calls.sql`), not `method` /
- * `status_code` — no ShopCX code path (src/, scripts/, shopify-extension/, docs/brain/)
- * issues a SELECT on `appstle_api_calls.method` or `appstle_api_calls.status_code`. The
+ * `status_code` / `contract_id` — no ShopCX code path (src/, scripts/, shopify-extension/,
+ * docs/brain/) issues a SELECT on `appstle_api_calls.method`, `appstle_api_calls.status_code`,
+ * or `appstle_api_calls.contract_id`. The
  * message only reaches Supabase's `postgres_logs` feed when a human clicks the Table
  * Editor row on `appstle_api_calls` and the Studio-emitted PostgREST CTE wrapper names a
  * column that doesn't exist (operator-typo / renamed-column confusion). There is no
@@ -3405,15 +3406,17 @@ export function isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise(
  * Sibling of `isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise` — same
  * narrow-gating shape (exact column-missing message + SELECT-lookup shape covering BOTH
  * bare and PostgREST CTE wrapper forms), scoped to the appstle_api_calls `method` /
- * `status_code` typo instead.
+ * `status_code` / `contract_id` typo instead.
  *
  * `true` ONLY when BOTH markers are present:
- *   1. the message is Postgres's canonical column-missing shape for ONE of the two
+ *   1. the message is Postgres's canonical column-missing shape for ONE of the three
  *      confused columns — trimmed equal to one of
  *      `column appstle_api_calls.method does not exist`,
  *      `column public.appstle_api_calls.method does not exist`,
- *      `column appstle_api_calls.status_code does not exist`, or
- *      `column public.appstle_api_calls.status_code does not exist` (any leading
+ *      `column appstle_api_calls.status_code does not exist`,
+ *      `column public.appstle_api_calls.status_code does not exist`,
+ *      `column appstle_api_calls.contract_id does not exist`, or
+ *      `column public.appstle_api_calls.contract_id does not exist` (any leading
  *      `ERROR: ` prefix Postgres includes on the logs surface stripped), AND
  *   2. the `parsed.query` attribute is a SELECT-lookup on `public.appstle_api_calls` —
  *      either (a) the bare `select ... from (public.)?appstle_api_calls` shape, OR (b)
@@ -3451,7 +3454,9 @@ export function isForeignSupabasePostgresMissingAppstleApiCallsColumnAdhocNoise(
     stripped === "column appstle_api_calls.method does not exist" ||
     stripped === "column public.appstle_api_calls.method does not exist" ||
     stripped === "column appstle_api_calls.status_code does not exist" ||
-    stripped === "column public.appstle_api_calls.status_code does not exist";
+    stripped === "column public.appstle_api_calls.status_code does not exist" ||
+    stripped === "column appstle_api_calls.contract_id does not exist" ||
+    stripped === "column public.appstle_api_calls.contract_id does not exist";
   if (!messageMatches) return false;
   const q = (query ?? "").trim().toLowerCase();
   if (!q) return false;
@@ -4101,6 +4106,73 @@ export function isForeignSupabasePostgresInvalidUuidSyntaxOnOrdersWorkspaceIdAdh
   // code issues. `$?\d*` tolerates a bound `$1` placeholder or an inline literal; `.workspace_id = `
   // catches the qualified form.
   if (!(/\bworkspace_id\s*=\s*\$?\d*/.test(q) || q.includes(".workspace_id = "))) return false;
+  const bareSelect =
+    /^select\b[\s\S]*\bfrom\s+(?:public\.)?orders\b/.test(q);
+  // PostgREST wraps direct-REST row reads as `WITH pgrst_source AS ( SELECT ... FROM
+  // public.orders ... )` — the branch requires the wrapped op to be a SELECT so a PostgREST
+  // INSERT/UPDATE inside the same envelope (a real code-write) stays captured/paged.
+  const pgrstCte =
+    /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+public\.orders\b/.test(q);
+  return bareSelect || pgrstCte;
+}
+
+/**
+ * Foreign-app noise — Postgres rejecting a malformed-uuid read on the `orders.id` PRIMARY-KEY column
+ * with `invalid input syntax for type uuid: "<garbage>"`. This is the `orders/id` sibling of
+ * `isForeignSupabasePostgresInvalidUuidSyntaxOnOrdersWorkspaceIdAdhocNoise`: instead of an
+ * `orders.workspace_id` equality lookup, it is a `?id=eq.<non-uuid>` direct-REST (or Supabase Studio
+ * quick-filter) read of `public.orders` where the bound value is a hand-typed non-uuid token (e.g.
+ * the string `"null"`). Postgres rejects the literal at parse/bind time before any row is read, so no
+ * ShopCX code path produces it — every in-tree reader filters `orders.id` with a well-formed uuid.
+ * The resulting ERROR is repair work for a query no code owns (Control Tower signature
+ * `supabase-logs:d9393a3e4f8314e2`, which has paged Platform 305× since 2026-09-26). `orders.id` is
+ * the only equality member of that signature family never wired, so it is the sole remaining reason
+ * the signature keeps recurring.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message, after stripping any leading `ERROR: ` prefix, starts with
+ *      `invalid input syntax for type uuid:`, AND
+ *   2. the `parsed.query` attribute (quote-stripped + lowercased) is a SELECT-shape on `orders` —
+ *      either (a) the bare `select ... from (public.)?orders` shape, OR (b) the PostgREST-generated
+ *      `with pgrst_source as ( select ... from public.orders` CTE wrapper form — AND it contains an
+ *      `id = ` equality marker.
+ *
+ * Narrowly gated so:
+ *   - a malformed-uuid error on ANY OTHER table (a real code bug binding bad uuids elsewhere) still
+ *     pages,
+ *   - the same message attached to a non-SELECT statement on `orders` (INSERT / UPDATE / DELETE /
+ *     DDL — a real code-write shape) still pages,
+ *   - a genuine `orders` read failure with a different message, or one with no `id` equality marker,
+ *     still pages.
+ *
+ * The `id` marker is anchored with a leading `\b` word boundary so `workspace_id = ...` (which ends
+ * in `_id`, no word boundary before `id`) does NOT satisfy it — only the bare primary-key `id`
+ * column does.
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before `keyParts` is
+ * constructed — the mapRow contract treats `null` as `drop, do not record`, so returning null here
+ * fully suppresses the row (no error_event, no loop_alert, no signature). Not a `transient` flag:
+ * this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresInvalidUuidSyntaxOnOrdersIdAdhocNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  if (!stripped.toLowerCase().startsWith("invalid input syntax for type uuid:")) return false;
+  // Quote-stripped + lowercased so `"public"."orders"` collapses to `public.orders` and
+  // `"id" = $1` collapses to `id = $1`, covering both the bare and the double-quoted PostgREST-
+  // wrapper forms with one shape predicate.
+  const q = (query ?? "").trim().toLowerCase().replace(/"/g, "");
+  if (!q) return false;
+  // The uuid primary-key equality marker — the tell that distinguishes the Studio-click/REST
+  // quick-filter equality probe against the uuid `id` column from any other read our own code
+  // issues. The leading `\b` keeps `workspace_id = ...` from matching (no word boundary before the
+  // `id` in `_id`); `$?\d*` tolerates a bound `$1` placeholder or an inline literal; `.id = `
+  // catches the qualified `orders.id = ` form.
+  if (!(/\bid\s*=\s*\$?\d*/.test(q) || q.includes(".id = "))) return false;
   const bareSelect =
     /^select\b[\s\S]*\bfrom\s+(?:public\.)?orders\b/.test(q);
   // PostgREST wraps direct-REST row reads as `WITH pgrst_source AS ( SELECT ... FROM
@@ -7096,6 +7168,70 @@ export function isForeignSupabasePostgresMissingCustomerEventsColumnAdhocNoise(
   // same external callers emit. A JOIN / UNION / non-SELECT stays captured — a caller
   // that actually writes to customer_events with the named field is a code bug we DO
   // want to page on, not the ad hoc read this drop targets.
+  const bareSelect = /^select\b[\s\S]*\bfrom\s+(?:public\.)?customer_events\b/.test(q);
+  const pgrstCte =
+    /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"?(?:public"?\.)?"?customer_events\b/.test(q);
+  return bareSelect || pgrstCte;
+}
+
+/**
+ * Foreign-app noise — Postgres rejecting a malformed timestamp literal on an ad hoc
+ * SELECT lookup of `customer_events`. The twin of
+ * `isForeignSupabasePostgresMissingCustomerEventsColumnAdhocNoise` for a different failure
+ * class: instead of a missing column, the query carried a `timestamp with time zone`
+ * literal whose `+HH:MM` UTC offset got URL-decoded to ` HH:MM` (a `+` degrading to a
+ * space over PostgREST / a hand-pasted filter), so Postgres rejects it with
+ * `invalid input syntax for type timestamp with time zone: "<value>"`. There is no lever
+ * from ShopCX to make that foreign query parse — ShopCX's own code never issues this read,
+ * and any timestamp literal our code builds is already offset-correct — so paging Platform
+ * on it is noise, exactly like the uuid-syntax and missing-column twins for this table.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message (lowercased, with any leading `ERROR: ` prefix stripped) is Postgres's
+ *      canonical timestamp-syntax shape AND the quoted value is specifically the
+ *      `+`→space degradation — a `YYYY-MM-DDtHH:MM:SS` datetime, then a literal SPACE,
+ *      then an `HH:MM` offset (what a valid `…+HH:MM` becomes once the `+` is decoded to a
+ *      space). A genuinely-random malformed timestamp our own code might emit (missing
+ *      seconds, no offset, garbage text) does NOT match this exact degraded shape and
+ *      still pages, AND
+ *   2. the `parsed.query` attribute is the same ad hoc SELECT-lookup shape on
+ *      `public.customer_events` the missing-column twin gates on — the bare
+ *      `select ... from public.customer_events` form OR the PostgREST-generated
+ *      `WITH pgrst_source AS ( SELECT ... FROM "public"."customer_events" ... )` CTE wrapper
+ *      (reused verbatim).
+ *
+ * Narrowly gated so a malformed-timestamp error on ANY OTHER table, or on a non-SELECT
+ * statement shape (INSERT / UPDATE / DELETE / DDL / JOIN) against customer_events — i.e. a
+ * real in-code timestamp bug — still pages.
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not record`,
+ * so returning null here fully suppresses the row (no error_event, no loop_alert, no
+ * signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresInvalidTimestampCustomerEventsAdhocNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  // Strip an optional leading Postgres `ERROR: ` / `ERROR:  ` prefix — Supabase's logs
+  // surface sometimes carries it, sometimes doesn't — then lowercase so the `T` datetime
+  // separator and any casing in the message normalize.
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim().toLowerCase();
+  // The `+`→space degradation shape ONLY: a `YYYY-MM-DDtHH:MM:SS` datetime, a literal
+  // SPACE (what the `+` offset sign decoded to), then an `HH:MM` offset.
+  if (
+    !/^invalid input syntax for type timestamp with time zone: "\d{4}-\d{2}-\d{2}t\d{2}:\d{2}:\d{2} \d{2}:\d{2}"$/.test(
+      stripped,
+    )
+  ) {
+    return false;
+  }
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  // Reuse the missing-column twin's bareSelect/pgrstCte query gate verbatim — same ad hoc
+  // SELECT-lookup shape on public.customer_events (bare form or PostgREST CTE wrapper).
   const bareSelect = /^select\b[\s\S]*\bfrom\s+(?:public\.)?customer_events\b/.test(q);
   const pgrstCte =
     /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"?(?:public"?\.)?"?customer_events\b/.test(q);

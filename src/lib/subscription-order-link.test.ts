@@ -123,3 +123,53 @@ test("subscription items with blank SKUs fall through to the sole-candidate rule
   assert.equal(res.linked, true);
   assert.equal(res.reason, "sole_candidate");
 });
+
+// ── chooseSubscriptionForRenewalOrder ─────────────────────────────────────────
+import { chooseSubscriptionForRenewalOrder } from "./subscription-order-link";
+
+const P = { sku: "insure01", title: "Shipping Protection" };
+const PODS = { sku: "SC-COFFEEPOD-NP24", title: "Amazing Coffee Pods" };
+const TABS = { sku: "SC-TABS-PM-2", title: "Superfood Tabs" };
+const COFFEE = { sku: "SC-INSTANTCO-H-2", title: "Amazing Coffee" };
+
+test("renewal: shared shipping protection never picks the sub (SC142618 case)", () => {
+  const subs = [
+    { id: "tabs", items: [TABS, P] },
+    { id: "pods", items: [P, PODS] },
+  ];
+  assert.equal(chooseSubscriptionForRenewalOrder([PODS, P], subs)?.id, "pods");
+});
+
+test("renewal: equal product overlap breaks on the protection line (SC142137 case)", () => {
+  const subs = [
+    { id: "coffee", items: [COFFEE] },
+    { id: "pods-only", items: [PODS] },
+    { id: "pods+protection", items: [PODS, P] },
+  ];
+  assert.equal(chooseSubscriptionForRenewalOrder([PODS, P], subs)?.id, "pods+protection");
+  assert.equal(chooseSubscriptionForRenewalOrder([PODS], subs)?.id, "pods-only");
+});
+
+test("renewal: a true tie stays unlinked, and protection-only orders never link", () => {
+  const subs = [
+    { id: "a", items: [PODS] },
+    { id: "b", items: [PODS] },
+  ];
+  assert.equal(chooseSubscriptionForRenewalOrder([PODS], subs), null);
+  assert.equal(chooseSubscriptionForRenewalOrder([P], [{ id: "x", items: [P, TABS] }]), null);
+});
+
+import { pickSubscriptionByCycleClaim } from "./subscription-order-link";
+
+test("cycle claim: the one sub claimed next to the order wins; none or two stay null", () => {
+  const at = "2026-11-20T10:01:40Z";
+  assert.equal(pickSubscriptionByCycleClaim([
+    { subscription_id: "pods", claimed_at: "2026-11-20T10:01:00Z" },
+    { subscription_id: "tabs", claimed_at: "2026-10-23T10:00:00Z" },
+  ], at), "pods");
+  assert.equal(pickSubscriptionByCycleClaim([{ subscription_id: "tabs", claimed_at: "2026-11-19T10:00:00Z" }], at), null);
+  assert.equal(pickSubscriptionByCycleClaim([
+    { subscription_id: "a", claimed_at: "2026-11-20T10:00:00Z" },
+    { subscription_id: "b", claimed_at: "2026-11-20T10:02:00Z" },
+  ], at), null);
+});

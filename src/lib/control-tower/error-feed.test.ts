@@ -181,12 +181,14 @@ import {
   isForeignSupabasePostgresUuidIlikeOnTicketsIdAdhocNoise,
   isForeignSupabasePostgresInvalidUuidSyntaxOnTicketsIdAdhocNoise,
   isForeignSupabasePostgresInvalidUuidSyntaxOnOrdersWorkspaceIdAdhocNoise,
+  isForeignSupabasePostgresInvalidUuidSyntaxOnOrdersIdAdhocNoise,
   isForeignSupabasePostgresInvalidUuidSyntaxOnMigrationAuditsSubscriptionIdAdhocNoise,
   isForeignSupabasePostgresInvalidUuidSyntaxOnSubscriptionsIdAdhocNoise,
   isForeignSupabasePostgresUuidLikeOnAgentJobsIdAdhocNoise,
   isForeignSupabasePostgresJsonbIlikeOnErrorEventsSampleAdhocNoise,
   isForeignSupabasePostgresMissingErrorEventsMetadataAdhocNoise,
   isForeignSupabasePostgresMissingCustomerEventsColumnAdhocNoise,
+  isForeignSupabasePostgresInvalidTimestampCustomerEventsAdhocNoise,
   isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise,
   isForeignSupabasePostgresMissingErrorEventsCoalesceSearchNoise,
   isForeignSupabasePostgresMissingErrorEventsUnqualifiedColumnAdhocNoise,
@@ -3809,6 +3811,44 @@ test("isForeignSupabasePostgresMissingAppstleApiCallsColumnAdhocNoise drops both
     ),
     true,
   );
+  // `contract_id` column-missing — the third confused-column variant for this same
+  // Studio/PostgREST read shape (Control Tower signature supabase-logs:18b93ce98123329f).
+  assert.equal(
+    isForeignSupabasePostgresMissingAppstleApiCallsColumnAdhocNoise(
+      "column appstle_api_calls.contract_id does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."appstle_api_calls"."id", "public"."appstle_api_calls"."contract_id" FROM "public"."appstle_api_calls" LIMIT $1 OFFSET $2 )',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAppstleApiCallsColumnAdhocNoise(
+      "column public.appstle_api_calls.contract_id does not exist",
+      'with pgrst_source as ( select "public"."appstle_api_calls"."contract_id" from "public"."appstle_api_calls" limit 1 )',
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingAppstleApiCallsColumnAdhocNoise drops the contract_id confused-column under the CTE wrapper while a real column on the same table still pages", () => {
+  // The Studio Table-Editor click on a `contract_id` column that never existed on
+  // appstle_api_calls — dropped at capture time, no error_event, no page to Platform.
+  assert.equal(
+    isForeignSupabasePostgresMissingAppstleApiCallsColumnAdhocNoise(
+      "column appstle_api_calls.contract_id does not exist",
+      'WITH pgrst_source AS ( SELECT "contract_id" FROM "public"."appstle_api_calls" )',
+    ),
+    true,
+  );
+  // A different, REAL column on the same table (e.g. `appstle_contract_id`, which is a
+  // genuine column) failing is a real schema regression and must still page — the
+  // message pin is exact, so a non-allowlisted column name does not drop.
+  assert.equal(
+    isForeignSupabasePostgresMissingAppstleApiCallsColumnAdhocNoise(
+      "column appstle_api_calls.appstle_contract_id does not exist",
+      'WITH pgrst_source AS ( SELECT "appstle_contract_id" FROM "public"."appstle_api_calls" )',
+    ),
+    false,
+  );
 });
 
 test("isForeignSupabasePostgresMissingAppstleApiCallsColumnAdhocNoise KEEPS the same column-missing message when the FROM is a different table (a real schema regression on another table still pages)", () => {
@@ -4856,6 +4896,114 @@ test("isForeignSupabasePostgresInvalidUuidSyntaxOnOrdersWorkspaceIdAdhocNoise KE
   );
 });
 
+// ── isForeignSupabasePostgresInvalidUuidSyntaxOnOrdersIdAdhocNoise ──
+// The orders/id sibling of the orders.workspace_id invalid-uuid probe: a `?id=eq.<non-uuid>`
+// direct-REST / Supabase Studio quick-filter binds a hand-typed non-uuid token (e.g. the string
+// "null") to `WHERE "orders"."id" = $1`, which Postgres rejects at parse/bind time with `invalid
+// input syntax for type uuid: "<garbage>"`. Control Tower signature `supabase-logs:d9393a3e4f8314e2`
+// (305× since 2026-09-26) — orders.id is the only equality member of the family never wired. Drop AT
+// CAPTURE only when BOTH the `invalid input syntax for type uuid:` message AND the SELECT-shape on
+// `orders` with a bare `id =` equality marker are present; the same error on any OTHER table, a
+// `_id` column filter, or a non-SELECT shape on orders, still pages.
+
+test("isForeignSupabasePostgresInvalidUuidSyntaxOnOrdersIdAdhocNoise drops the invalid-uuid message paired with the PostgREST CTE wrapper AND the bare SELECT shape", () => {
+  // The Studio-emitted PostgREST CTE wrapper form (double-quoted identifiers), id = $1.
+  assert.equal(
+    isForeignSupabasePostgresInvalidUuidSyntaxOnOrdersIdAdhocNoise(
+      'invalid input syntax for type uuid: "null"',
+      'WITH pgrst_source AS ( SELECT "public"."orders".* FROM "public"."orders" WHERE "public"."orders"."id" = $1 LIMIT $2 OFFSET $3 )',
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the prefix check.
+  assert.equal(
+    isForeignSupabasePostgresInvalidUuidSyntaxOnOrdersIdAdhocNoise(
+      'ERROR: invalid input syntax for type uuid: "123"',
+      'WITH pgrst_source AS ( SELECT * FROM "public"."orders" WHERE "id" = $1 )',
+    ),
+    true,
+  );
+  // The bare SELECT shape (no PostgREST wrapper) drops too — the predicate accepts both.
+  assert.equal(
+    isForeignSupabasePostgresInvalidUuidSyntaxOnOrdersIdAdhocNoise(
+      'invalid input syntax for type uuid: "zzz"',
+      "select * from public.orders where id = 'zzz'",
+    ),
+    true,
+  );
+  // Unqualified `orders` (no `public.`) + bare SELECT is still the same ad hoc shape.
+  assert.equal(
+    isForeignSupabasePostgresInvalidUuidSyntaxOnOrdersIdAdhocNoise(
+      'invalid input syntax for type uuid: "123"',
+      "select id, status from orders where id = $1",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresInvalidUuidSyntaxOnOrdersIdAdhocNoise KEEPS the same invalid-uuid message when the FROM is a different table (a real bad-uuid code bug elsewhere still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresInvalidUuidSyntaxOnOrdersIdAdhocNoise(
+      'invalid input syntax for type uuid: "abc"',
+      "select * from public.subscriptions where id = $1",
+    ),
+    false,
+  );
+  // PostgREST CTE wrapper form, but FROM is a different table — must still page.
+  assert.equal(
+    isForeignSupabasePostgresInvalidUuidSyntaxOnOrdersIdAdhocNoise(
+      'invalid input syntax for type uuid: "abc"',
+      'WITH pgrst_source AS ( SELECT * FROM "public"."tickets" WHERE "id" = $1 )',
+    ),
+    false,
+  );
+  // A table whose name merely starts with `orders` must NOT be swept in by the drop.
+  assert.equal(
+    isForeignSupabasePostgresInvalidUuidSyntaxOnOrdersIdAdhocNoise(
+      'invalid input syntax for type uuid: "abc"',
+      "select * from public.orders_archive where id = $1",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresInvalidUuidSyntaxOnOrdersIdAdhocNoise KEEPS a DIFFERENT error on orders, and the invalid-uuid message with no bare-id marker", () => {
+  // A different error on `orders` is a real code bug we WANT to see.
+  assert.equal(
+    isForeignSupabasePostgresInvalidUuidSyntaxOnOrdersIdAdhocNoise(
+      "null value in column id violates not-null constraint",
+      "select * from public.orders where id = $1",
+    ),
+    false,
+  );
+  // The invalid-uuid message but the SELECT filters a `_id` column (the `\b` boundary keeps
+  // `workspace_id`/`customer_id` from matching the bare `id` marker) — not the id probe shape.
+  assert.equal(
+    isForeignSupabasePostgresInvalidUuidSyntaxOnOrdersIdAdhocNoise(
+      'invalid input syntax for type uuid: "abc"',
+      "select * from public.orders where customer_id = $1",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresInvalidUuidSyntaxOnOrdersIdAdhocNoise KEEPS a non-SELECT statement shape on orders (a real code-bug writing orders still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresInvalidUuidSyntaxOnOrdersIdAdhocNoise(
+      'invalid input syntax for type uuid: "abc"',
+      "update public.orders set status = $1 where id = $2",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresInvalidUuidSyntaxOnOrdersIdAdhocNoise(
+      'invalid input syntax for type uuid: "abc"',
+      "delete from public.orders where id = $1",
+    ),
+    false,
+  );
+});
+
 // ── isForeignSupabasePostgresInvalidUuidSyntaxOnMigrationAuditsSubscriptionIdAdhocNoise ──
 // The migration_audits/subscription_id sibling of the orders.workspace_id invalid-uuid probe: a
 // `?subscription_id=in.(<partial-uuid>)` / `=eq.<partial-uuid>` direct-REST / Supabase Studio
@@ -5734,6 +5882,161 @@ test("isForeignSupabasePostgresMissingCustomerEventsColumnAdhocNoise returns fal
     isForeignSupabasePostgresMissingCustomerEventsColumnAdhocNoise(
       "column customer_events.metadata does not exist",
       null,
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresInvalidTimestampCustomerEventsAdhocNoise ──
+// The twin of the missing-column drop for a different failure class: an ad hoc
+// `select ... from public.customer_events` lookup whose `timestamp with time zone` literal
+// carried a `+HH:MM` UTC offset that URL-decoded to ` HH:MM` (the `+` degraded to a space),
+// so Postgres rejects it with `invalid input syntax for type timestamp with time zone:
+// "<value>"`. ShopCX's own code never issues this read and every timestamp literal it builds
+// is offset-correct, so the parse rejection is repair work for a foreign query we don't own.
+// Drop AT CAPTURE only when BOTH the `+`→space degraded value shape AND the SELECT-lookup
+// shape (bare or PostgREST CTE wrapper) are present; a malformed-timestamp error on another
+// table, or via a non-SELECT statement (real in-code timestamp bug), still pages.
+
+test("isForeignSupabasePostgresInvalidTimestampCustomerEventsAdhocNoise drops the ad hoc SELECT lookup on the +→space degraded timestamp shape", () => {
+  assert.equal(
+    isForeignSupabasePostgresInvalidTimestampCustomerEventsAdhocNoise(
+      'invalid input syntax for type timestamp with time zone: "2026-11-21T10:30:00 05:30"',
+      "select * from public.customer_events where created_at > '2026-11-21T10:30:00 05:30'",
+    ),
+    true,
+  );
+  // Bare / unqualified `from customer_events` (no `public.` prefix) is the same shape.
+  assert.equal(
+    isForeignSupabasePostgresInvalidTimestampCustomerEventsAdhocNoise(
+      'invalid input syntax for type timestamp with time zone: "2026-01-02T00:00:00 00:00"',
+      "select event_type, created_at from customer_events where created_at >= '2026-01-02T00:00:00 00:00'",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the shape check.
+  assert.equal(
+    isForeignSupabasePostgresInvalidTimestampCustomerEventsAdhocNoise(
+      'ERROR: invalid input syntax for type timestamp with time zone: "2026-11-21T10:30:00 05:30"',
+      "select metadata from public.customer_events",
+    ),
+    true,
+  );
+  // Lowercase `t` datetime separator (what Postgres normalizes to in the log) still drops.
+  assert.equal(
+    isForeignSupabasePostgresInvalidTimestampCustomerEventsAdhocNoise(
+      'invalid input syntax for type timestamp with time zone: "2026-11-21t10:30:00 05:30"',
+      "select id from public.customer_events",
+    ),
+    true,
+  );
+  // Leading / trailing whitespace on message and query is tolerated.
+  assert.equal(
+    isForeignSupabasePostgresInvalidTimestampCustomerEventsAdhocNoise(
+      '  invalid input syntax for type timestamp with time zone: "2026-11-21T10:30:00 05:30"  ',
+      "   select * from public.customer_events   ",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresInvalidTimestampCustomerEventsAdhocNoise drops the PostgREST CTE wrapper form (same external callers)", () => {
+  assert.equal(
+    isForeignSupabasePostgresInvalidTimestampCustomerEventsAdhocNoise(
+      'invalid input syntax for type timestamp with time zone: "2026-11-21T10:30:00 05:30"',
+      'with pgrst_source as ( select "customer_events"."event_type", "customer_events"."created_at" from "public"."customer_events" ) select * from pgrst_source',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresInvalidTimestampCustomerEventsAdhocNoise(
+      'ERROR: invalid input syntax for type timestamp with time zone: "2026-11-21T10:30:00 05:30"',
+      'WITH pgrst_source AS ( SELECT "customer_events"."metadata" FROM "public"."customer_events" LIMIT 1 ) SELECT * FROM pgrst_source',
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresInvalidTimestampCustomerEventsAdhocNoise KEEPS a non-SELECT statement shape (a real in-code timestamp bug writing customer_events still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresInvalidTimestampCustomerEventsAdhocNoise(
+      'invalid input syntax for type timestamp with time zone: "2026-11-21T10:30:00 05:30"',
+      "insert into public.customer_events (id, created_at) values ($1, '2026-11-21T10:30:00 05:30')",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresInvalidTimestampCustomerEventsAdhocNoise(
+      'invalid input syntax for type timestamp with time zone: "2026-11-21T10:30:00 05:30"',
+      "update public.customer_events set created_at = '2026-11-21T10:30:00 05:30' where id = $1",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresInvalidTimestampCustomerEventsAdhocNoise KEEPS a malformed-timestamp error on OTHER tables (a real code bug on another table still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresInvalidTimestampCustomerEventsAdhocNoise(
+      'invalid input syntax for type timestamp with time zone: "2026-11-21T10:30:00 05:30"',
+      "select * from public.error_events where created_at > '2026-11-21T10:30:00 05:30'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresInvalidTimestampCustomerEventsAdhocNoise(
+      'invalid input syntax for type timestamp with time zone: "2026-11-21T10:30:00 05:30"',
+      "select * from public.orders where created_at > '2026-11-21T10:30:00 05:30'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresInvalidTimestampCustomerEventsAdhocNoise KEEPS a non-degraded / genuinely-malformed timestamp value (a real in-code timestamp bug still pages)", () => {
+  // A valid offset-correct literal that still failed for some OTHER reason is not the
+  // `+`→space degradation — the pin is exact, so it stays captured.
+  assert.equal(
+    isForeignSupabasePostgresInvalidTimestampCustomerEventsAdhocNoise(
+      'invalid input syntax for type timestamp with time zone: "2026-11-21T10:30:00+05:30"',
+      "select * from public.customer_events",
+    ),
+    false,
+  );
+  // No offset at all — real malformed timestamp our own code might emit, still pages.
+  assert.equal(
+    isForeignSupabasePostgresInvalidTimestampCustomerEventsAdhocNoise(
+      'invalid input syntax for type timestamp with time zone: "2026-11-21T10:30:00"',
+      "select * from public.customer_events",
+    ),
+    false,
+  );
+  // Garbage text value — not the degraded shape.
+  assert.equal(
+    isForeignSupabasePostgresInvalidTimestampCustomerEventsAdhocNoise(
+      'invalid input syntax for type timestamp with time zone: "not-a-timestamp"',
+      "select * from public.customer_events",
+    ),
+    false,
+  );
+  // A different Postgres error (FATAL / relation-missing) on this table is untouched.
+  assert.equal(
+    isForeignSupabasePostgresInvalidTimestampCustomerEventsAdhocNoise(
+      'relation "public.customer_events" does not exist',
+      "select * from public.customer_events",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresInvalidTimestampCustomerEventsAdhocNoise returns false on empty / nullish input", () => {
+  assert.equal(isForeignSupabasePostgresInvalidTimestampCustomerEventsAdhocNoise(null, null), false);
+  assert.equal(isForeignSupabasePostgresInvalidTimestampCustomerEventsAdhocNoise(undefined, undefined), false);
+  assert.equal(isForeignSupabasePostgresInvalidTimestampCustomerEventsAdhocNoise("", ""), false);
+  // Empty query — even with the exact message we cannot confirm the shape, so the row stays
+  // captured.
+  assert.equal(
+    isForeignSupabasePostgresInvalidTimestampCustomerEventsAdhocNoise(
+      'invalid input syntax for type timestamp with time zone: "2026-11-21T10:30:00 05:30"',
+      "",
     ),
     false,
   );

@@ -79,6 +79,7 @@ export async function GET(
       triggerIntent,
       session.customer_id,
       session.ticket_id || "",
+      session.subscription_id || null,
     );
 
     // Cancel + next-order affordance: if the launcher passed a subscription_id
