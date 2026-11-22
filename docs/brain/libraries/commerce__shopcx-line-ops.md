@@ -149,3 +149,5 @@ the same selection the renewal worker, Order Now and dunning use), falling back 
 cycle. Selecting by `nextBillingDate` could land the gift on a LATER cycle than the one billed next
 (seen 2026-11-22: date 11-23 resolved to cycle 3, expected 12-08), so the gift shipped an order late.
 The pending cycle edit locks the contract; see [[commerce__shopify-subscription-client]] § Billing-cycle edit lock.
+`shopcxAddOneTimeLine` is idempotent: if the same variant at the same price is already a one-time line on
+the target cycle it returns success without adding a second one (a repeat call stacked two free bags live).

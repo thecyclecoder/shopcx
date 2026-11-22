@@ -516,6 +516,19 @@ export async function shopcxAddOneTimeLine(
     const selector = ch.success && ch.index != null ? { index: ch.index } : { date };
 
     const bare = String(variantId).replace("gid://shopify/ProductVariant/", "");
+
+    // Idempotent: a repeat call (double click, retry) must not stack a second free item on the
+    // same order — seen live 2026-11-22 (two gift lines on one cycle).
+    if ("index" in selector) {
+      const { readPendingCycleEdits } = await import("@/lib/commerce/shopify-subscription-client");
+      const pending = await readPendingCycleEdits(workspaceId, contractId);
+      const already = pending.success && pending.lines.some((l) =>
+        l.cycleIndex === selector.index
+        && String(l.variantId).replace("gid://shopify/ProductVariant/", "") === bare
+        && Math.round(parseFloat(l.price) * 100) === priceCents);
+      if (already) return { success: true };
+    }
+
     return withBillingCycleDraft(workspaceId, contractId, selector, (draftId) =>
       shopifyAddDraftLine(workspaceId, draftId, bare, quantity, (priceCents / 100).toFixed(2)),
     );

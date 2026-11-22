@@ -432,3 +432,5 @@ Live-verified on contract 36020289709 (2026-11-22): cancel and pause hit the loc
 `subscriptionContractSetNextBillingDate` does NOT (it succeeds with a cycle edit present).
 `readPendingCycleEdits` must start its `subscriptionBillingCycles` range at the contract's `createdAt`
 (+1s): Shopify rejects an earlier start with "Billing cycle start date out of range".
+`readPendingCycleEdits` returns only UNBILLED edited cycles: an edit left on a billed cycle does not block
+updates and cannot be deleted ("The index provided is invalid").

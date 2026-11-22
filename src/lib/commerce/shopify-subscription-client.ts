@@ -145,13 +145,13 @@ export async function readPendingCycleEdits(
   const start = new Date(Number.isFinite(createdMs) ? createdMs + 1000 : Date.now()).toISOString();
   const end = new Date(Date.now() + 400 * 24 * 3600 * 1000).toISOString();
   const env = await gql<{ subscriptionBillingCycles?: { edges: { node: {
-    cycleIndex: number; edited: boolean;
+    cycleIndex: number; edited: boolean; status: string;
     editedContract?: { lines?: { edges: { node: { id: string; variantId: string | null; quantity: number; currentPrice?: { amount: string } } }[] } } | null;
   } }[] } }>(
     workspaceId,
     `query($id:ID!,$s:DateTime!,$e:DateTime!){
        subscriptionBillingCycles(contractId:$id, first:50, billingCyclesDateRangeSelector:{ startDate:$s, endDate:$e }){
-         edges { node { cycleIndex edited
+         edges { node { cycleIndex edited status
            editedContract { lines(first:50){ edges { node { id variantId quantity currentPrice { amount } } } } } } } } }`,
     { id: contractGid(contractId), s: start, e: end },
   );
@@ -159,7 +159,9 @@ export async function readPendingCycleEdits(
   const editedCycles: number[] = [];
   const lines: PendingOneTimeLine[] = [];
   for (const { node } of env.data?.subscriptionBillingCycles?.edges ?? []) {
-    if (!node.edited) continue;
+    // Only UNBILLED cycles: an edit on an already-billed cycle neither blocks updates nor can be
+    // deleted (Shopify: "The index provided is invalid"), seen live on 2026-11-22.
+    if (!node.edited || node.status !== "UNBILLED") continue;
     editedCycles.push(node.cycleIndex);
     for (const { node: l } of node.editedContract?.lines?.edges ?? []) {
       if (baseIds.has(l.id) || !l.variantId) continue;
