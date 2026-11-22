@@ -23,6 +23,7 @@ import {
   isForeignGoTrueAuthLogNoise,
   isForeignGoTrueEdgeNoise,
   isForeignSupabasePostgresAmbiguousOidIntrospectionNoise,
+  isForeignSupabaseRealtimeMessagesPartitionNoise,
   isForeignSupabasePostgresOrdersNameLookupNoise,
   isForeignSupabasePostgresMissingSpecPhasesWorkspaceSlugLookupNoise,
   isForeignSupabasePostgresMissingOrderRefundsCustomerIdAdhocNoise,
@@ -31627,6 +31628,54 @@ test("isForeignSupabasePostgresMissingSubscriptionsCancellationReasonColumnAdhoc
   assert.equal(
     isForeignSupabasePostgresMissingSubscriptionsCancellationReasonColumnAdhocNoise(
       "column subscriptions.cancellation_reason does not exist",
+      "",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabaseRealtimeMessagesPartitionNoise drops the realtime.authorize partition row", () => {
+  // The captured production sample: Supabase Realtime's internal `realtime.authorize(...)`
+  // function raising the partition-missing error on `realtime.messages` at a day boundary.
+  assert.equal(
+    isForeignSupabaseRealtimeMessagesPartitionNoise(
+      'no partition of relation "messages" found for row',
+      "SELECT realtime.authorize('{}', 'realtime', 'messages')",
+    ),
+    true,
+  );
+  // Case-insensitive on the query marker, and the message can carry extra context.
+  assert.equal(
+    isForeignSupabaseRealtimeMessagesPartitionNoise(
+      'ERROR: no partition of relation "messages" found for row. Partition key of the failing row contains (inserted_at)',
+      "select REALTIME.AUTHORIZE(foo)",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabaseRealtimeMessagesPartitionNoise KEEPS our own partition errors and other messages (real defects still page)", () => {
+  // The same partition-missing error on one of OUR tables — the query does not run
+  // `realtime.authorize(`, so a genuine partition/relation bug on our schema still pages.
+  assert.equal(
+    isForeignSupabaseRealtimeMessagesPartitionNoise(
+      'no partition of relation "messages" found for row',
+      "insert into public.error_events (id) values (1)",
+    ),
+    false,
+  );
+  // A DIFFERENT message on the `realtime.authorize(` query — only the partition shape drops.
+  assert.equal(
+    isForeignSupabaseRealtimeMessagesPartitionNoise(
+      "permission denied for schema realtime",
+      "SELECT realtime.authorize('{}', 'realtime', 'messages')",
+    ),
+    false,
+  );
+  // An empty / missing query attribute — cannot confirm the realtime.authorize shape.
+  assert.equal(
+    isForeignSupabaseRealtimeMessagesPartitionNoise(
+      'no partition of relation "messages" found for row',
       "",
     ),
     false,

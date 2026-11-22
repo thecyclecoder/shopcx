@@ -16242,6 +16242,46 @@ export function isForeignSupabasePostgresAdhocMonthlyRevenueSnapshotsToCharTextN
 }
 
 /**
+ * Foreign-app noise — Supabase Realtime's internal `realtime.authorize(...)` function raising
+ * `no partition of relation "messages" found for row` when its partition-maintenance job lags a
+ * day boundary and a row is inserted into `realtime.messages` before that day's partition
+ * exists. This is Supabase-managed infrastructure: the `messages` relation lives in the
+ * `realtime` schema (NOT our `public.messages`-free app — we have no such table), and the
+ * `realtime.authorize(` call that raises it is a Supabase-internal SECURITY DEFINER function we
+ * neither wrote nor can patch. There is no lever from ShopCX to fix Supabase's partition
+ * maintenance, so paging Platform on it ([[../specs/error-feed-drop-realtime-messages-partition-authorize-noise]],
+ * Control Tower signature `supabase-logs:53b2577e5d5336aa`) is repair work for foreign infra —
+ * the exact twin of the other `isForeignSupabase*Noise` capture-time drops, scoped to the
+ * realtime.authorize partition shape.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the `message` contains `no partition of relation "messages" found for row`, AND
+ *   2. the `query` contains `realtime.authorize(` (case-insensitive).
+ *
+ * Narrowly gated so:
+ *   - the same partition-missing error on one of OUR OWN tables (a query that does not run
+ *     `realtime.authorize(`) still pages — that would be a real product-code/data bug,
+ *   - any OTHER message on the `realtime.authorize(` query still pages,
+ *   - an empty query or empty message never drops.
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before `keyParts`
+ * is constructed — the mapRow contract treats `null` as `drop, do not record`, so returning
+ * null here fully suppresses the row (no error_event, no loop_alert, no signature). Not a
+ * `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabaseRealtimeMessagesPartitionNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").toLowerCase();
+  if (!msg.includes('no partition of relation "messages" found for row')) {
+    return false;
+  }
+  const q = (query ?? "").toLowerCase();
+  return q.includes("realtime.authorize(");
+}
+
+/**
  * Expected-by-design noise — Postgres reporting `duplicate key value violates unique
  * constraint "dashboard_notifications_dedupe_key_open_uniq"` on an INSERT INTO
  * `public.dashboard_notifications`. That partial UNIQUE index (migration

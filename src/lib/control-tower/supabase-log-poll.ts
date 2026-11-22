@@ -36,6 +36,7 @@ import {
   isForeignGoTrueAuthLogNoise,
   isForeignSupabasePostgresAdhocSkuSalesRoundTypeNoise,
   isForeignSupabasePostgresAdhocMonthlyRevenueSnapshotsToCharTextNoise,
+  isForeignSupabaseRealtimeMessagesPartitionNoise,
   isForeignSupabasePostgresMissingControlTowerEventsLookupNoise,
   isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise,
   isForeignSupabasePostgresMissingProductsTemplateSuffixLookupNoise,
@@ -3017,6 +3018,15 @@ const LOG_QUERIES: LogQuery[] = [
       // ([[../specs/error-feed-drop-adhoc-monthly-revenue-snapshots-to-char-text]], signature
       // `supabase-logs:b979de40e41e6ba2`).
       if (isForeignSupabasePostgresAdhocMonthlyRevenueSnapshotsToCharTextNoise(message, query)) return null;
+      // Foreign-app noise: Supabase Realtime's internal `realtime.authorize(...)` function
+      // raises `no partition of relation "messages" found for row` when its partition-maintenance
+      // job lags a day boundary. The `messages` relation lives in the Supabase-managed `realtime`
+      // schema (not our app) and `realtime.authorize(` is a Supabase-internal function we cannot
+      // patch — there is no ShopCX lever. Narrowly gated to the partition message AND the
+      // `realtime.authorize(` query, so a genuine partition/relation error on one of our own
+      // tables still pages ([[../specs/error-feed-drop-realtime-messages-partition-authorize-noise]],
+      // signature `supabase-logs:53b2577e5d5336aa`).
+      if (isForeignSupabaseRealtimeMessagesPartitionNoise(message, query)) return null;
       return {
         keyParts: ["postgres", severity, message],
         title: `postgres ${severity}: ${message}`,
