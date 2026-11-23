@@ -1,0 +1,1 @@
+- **Drop foreign ad-hoc `replacements.shopify_order_name` column-missing noise at capture** · verified 2026-11-23 · → [[../libraries/error-feed]]

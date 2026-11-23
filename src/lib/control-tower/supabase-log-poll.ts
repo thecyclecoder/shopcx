@@ -1074,7 +1074,7 @@ const LOG_QUERIES: LogQuery[] = [
       // `replacements.shopify_replacement_order_name`, while the bare `shopify_order_name`
       // name belongs to the sibling `one_time_charges` table) and no ShopCX code path selects
       // it — there is no lever to make the query resolve
-      // ([[../specs/error-feed-drop-replacements-shopify-order-name-adhoc-lookup]], Control
+      // ([[../archive.d/error-feed-drop-replacements-shopify-order-name-adhoc-lookup]], Control
       // Tower signature `supabase-logs:e1ed29c66b754f73`). Narrowly gated to require BOTH the
       // exact column-missing message AND the SELECT-lookup shape — a column-missing error on
       // any other column of `replacements` (including the live

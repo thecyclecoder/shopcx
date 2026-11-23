@@ -5271,7 +5271,7 @@ export function isForeignSupabasePostgresMissingOrdersShopifyOrderNameAdhocNoise
  * PostgREST `WITH pgrst_source AS ( SELECT ... FROM "public"."replacements" ... )` CTE
  * wrapper the same client emits over the REST endpoint. There is no lever from ShopCX to
  * make that query resolve — paging Platform on it
- * ([[../specs/error-feed-drop-replacements-shopify-order-name-adhoc-lookup]], Control
+ * ([[../archive.d/error-feed-drop-replacements-shopify-order-name-adhoc-lookup]], Control
  * Tower signature `supabase-logs:e1ed29c66b754f73`) is repair work for a query we don't
  * own.
  *
