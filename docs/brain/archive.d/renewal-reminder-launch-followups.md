@@ -1,0 +1,1 @@
+- **Renewal reminder follow-ups: amount includes tax + shipping, significant verdict, holdout-relative pause floors** · verified 2026-11-23 · → [[../lifecycles/pre-renewal-reminder-journey]]
