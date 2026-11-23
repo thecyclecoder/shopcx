@@ -1,0 +1,1 @@
+- **Drop the unqualified `column "contract_id" does not exist` form of the foreign appstle_contract_snapshots ad-hoc read** · verified 2026-11-23 · → [[../libraries/error-feed]]
