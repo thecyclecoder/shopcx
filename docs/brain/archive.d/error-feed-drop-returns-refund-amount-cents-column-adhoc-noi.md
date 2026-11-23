@@ -1,0 +1,1 @@
+- **Scope out foreign-app noise: returns.refund_amount_cents column-missing REST reads** · verified 2026-11-23 · → [[../libraries/error-feed]]
