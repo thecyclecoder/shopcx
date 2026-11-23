@@ -95,7 +95,15 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
       : Promise.resolve(),
   ]);
 
-  const response = NextResponse.redirect(shortlink.target_url, 302);
+  // Per-customer win-back deep link: a `/journey/@winback` target resolves to THIS customer's own
+  // pending win-back journey session ([[winback-shortlink]]).
+  let redirectTo = shortlink.target_url as string;
+  const { isWinbackSentinel, resolveWinbackTarget } = await import("@/lib/winback-shortlink");
+  if (isWinbackSentinel(redirectTo)) {
+    redirectTo = await resolveWinbackTarget(admin, shortlink.workspace_id, resolvedCustomerId, redirectTo);
+  }
+
+  const response = NextResponse.redirect(redirectTo, 302);
   if (resolvedCustomerId) {
     // Identifies the customer for the storefront pixel + lead-capture flows.
     // SameSite=Lax + Secure + HttpOnly per the storefront cookie conventions.
