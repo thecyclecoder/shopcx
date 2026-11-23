@@ -99,6 +99,7 @@ import {
   isForeignSupabasePostgresMissingOrdersNoteColumnAdhocNoise,
   isForeignSupabasePostgresMissingOrdersShippingNameColumnAdhocNoise,
   isForeignSupabasePostgresMissingOrdersShopifyOrderNameAdhocNoise,
+  isForeignSupabasePostgresMissingReplacementsShopifyOrderNameAdhocNoise,
   isForeignSupabasePostgresMissingOrdersEasypostTrackerAdhocNoise,
   isForeignSupabasePostgresMissingOrdersTrackingNumberAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsPausedAtColumnAdhocNoise,
@@ -19875,6 +19876,235 @@ test("isForeignSupabasePostgresMissingOrdersShopifyOrderNameAdhocNoise returns f
   assert.equal(
     isForeignSupabasePostgresMissingOrdersShopifyOrderNameAdhocNoise(
       "column orders.shopify_order_name does not exist",
+      null,
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingReplacementsShopifyOrderNameAdhocNoise ──
+// A foreign / stale PostgREST direct-REST client reads
+// `/rest/v1/replacements?select=...shopify_order_name...` against our `public.replacements`
+// table. The table exists but has NO `shopify_order_name` column — the replacement order's
+// name lives in `replacements.shopify_replacement_order_name`, and the bare
+// `shopify_order_name` name belongs to the sibling `one_time_charges` table. Foreign-owned
+// surface, no lever from us (Control Tower signature `supabase-logs:e1ed29c66b754f73`) —
+// drop AT CAPTURE only when BOTH the exact column-missing message on
+// `replacements.shopify_order_name` AND a SELECT-lookup shape on `replacements` (bare OR
+// PostgREST CTE wrapper) are present. A column-missing on a live `replacements` column, on
+// `shopify_order_name` from any other table (including the real
+// `one_time_charges.shopify_order_name`), or via a non-SELECT statement still pages.
+
+test("isForeignSupabasePostgresMissingReplacementsShopifyOrderNameAdhocNoise drops the captured supabase-logs:e1ed29c66b754f73 message+query pair (ad hoc SELECT on replacements.shopify_order_name)", () => {
+  // Unqualified and public.-qualified message variants over the bare-SELECT shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingReplacementsShopifyOrderNameAdhocNoise(
+      "column replacements.shopify_order_name does not exist",
+      "select id, shopify_order_name from public.replacements",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingReplacementsShopifyOrderNameAdhocNoise(
+      "column public.replacements.shopify_order_name does not exist",
+      "select shopify_order_name from public.replacements",
+    ),
+    true,
+  );
+  // Unqualified FROM (no `public.`) is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingReplacementsShopifyOrderNameAdhocNoise(
+      "column replacements.shopify_order_name does not exist",
+      "select shopify_order_name from replacements limit 10",
+    ),
+    true,
+  );
+  // Trailing WHERE / ORDER BY / LIMIT still the ad hoc lookup shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingReplacementsShopifyOrderNameAdhocNoise(
+      "column replacements.shopify_order_name does not exist",
+      "select id, shopify_order_name from public.replacements where workspace_id = 'x' order by created_at desc limit 50",
+    ),
+    true,
+  );
+  // Case-insensitive on the query.
+  assert.equal(
+    isForeignSupabasePostgresMissingReplacementsShopifyOrderNameAdhocNoise(
+      "column replacements.shopify_order_name does not exist",
+      "SELECT ID, SHOPIFY_ORDER_NAME FROM PUBLIC.REPLACEMENTS",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingReplacementsShopifyOrderNameAdhocNoise(
+      "ERROR: column replacements.shopify_order_name does not exist",
+      "select shopify_order_name from public.replacements",
+    ),
+    true,
+  );
+  // Leading / trailing whitespace on message and query is tolerated.
+  assert.equal(
+    isForeignSupabasePostgresMissingReplacementsShopifyOrderNameAdhocNoise(
+      "  column replacements.shopify_order_name does not exist  ",
+      "   select shopify_order_name from public.replacements   ",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingReplacementsShopifyOrderNameAdhocNoise ALSO drops the PostgREST `WITH pgrst_source AS (SELECT ... FROM \"public\".\"replacements\" ...)` CTE wrapper form", () => {
+  // The PostgREST direct-REST wire shape: identical foreign-owned lookup wrapped in the
+  // pgrst_source CTE with double-quoted `"public"."replacements"` identifiers.
+  assert.equal(
+    isForeignSupabasePostgresMissingReplacementsShopifyOrderNameAdhocNoise(
+      "column replacements.shopify_order_name does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."replacements"."id", "public"."replacements"."shopify_order_name" FROM "public"."replacements" )',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingReplacementsShopifyOrderNameAdhocNoise(
+      "column public.replacements.shopify_order_name does not exist",
+      'WITH pgrst_source AS (SELECT "public"."replacements"."shopify_order_name" FROM "public"."replacements")',
+    ),
+    true,
+  );
+  // ERROR: prefix stripped as usual.
+  assert.equal(
+    isForeignSupabasePostgresMissingReplacementsShopifyOrderNameAdhocNoise(
+      "ERROR: column replacements.shopify_order_name does not exist",
+      'WITH pgrst_source AS (SELECT "public"."replacements"."shopify_order_name" FROM "public"."replacements")',
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingReplacementsShopifyOrderNameAdhocNoise KEEPS a column-missing on a DIFFERENT column of replacements (a real product-schema regression on another replacements column still pages)", () => {
+  // If any other `replacements` column regressed we absolutely want the page — the pin is
+  // `replacements.shopify_order_name` only. The live column is
+  // `shopify_replacement_order_name`.
+  assert.equal(
+    isForeignSupabasePostgresMissingReplacementsShopifyOrderNameAdhocNoise(
+      "column replacements.shopify_replacement_order_name does not exist",
+      "select shopify_replacement_order_name from public.replacements",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingReplacementsShopifyOrderNameAdhocNoise(
+      "column public.replacements.status does not exist",
+      "select status from public.replacements",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingReplacementsShopifyOrderNameAdhocNoise KEEPS a shopify_order_name miss on a DIFFERENT table (the real one_time_charges.shopify_order_name regression still pages)", () => {
+  // The live `one_time_charges.shopify_order_name` column: if IT regresses we WANT the
+  // page — the pin is `replacements` only.
+  assert.equal(
+    isForeignSupabasePostgresMissingReplacementsShopifyOrderNameAdhocNoise(
+      "column one_time_charges.shopify_order_name does not exist",
+      "select shopify_order_name from public.one_time_charges",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingReplacementsShopifyOrderNameAdhocNoise(
+      "column orders.shopify_order_name does not exist",
+      "select shopify_order_name from public.orders",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingReplacementsShopifyOrderNameAdhocNoise KEEPS a non-SELECT statement shape on replacements (an INSERT/UPDATE/DELETE with the same message is a real code-bug and still pages)", () => {
+  // INSERT / UPDATE / DELETE against replacements referencing a bogus `shopify_order_name`
+  // column is real code trying to write the table — a bug we WANT to see, not the ad hoc
+  // read.
+  assert.equal(
+    isForeignSupabasePostgresMissingReplacementsShopifyOrderNameAdhocNoise(
+      "column replacements.shopify_order_name does not exist",
+      "insert into public.replacements (id, workspace_id, shopify_order_name) values ($1, $2, $3)",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingReplacementsShopifyOrderNameAdhocNoise(
+      "column replacements.shopify_order_name does not exist",
+      "update public.replacements set shopify_order_name = $1 where id = $2",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingReplacementsShopifyOrderNameAdhocNoise(
+      "column replacements.shopify_order_name does not exist",
+      "delete from public.replacements where shopify_order_name is null",
+    ),
+    false,
+  );
+  // Sibling: the PostgREST CTE wrapper whose wrapped op is a WRITE stays paged too.
+  assert.equal(
+    isForeignSupabasePostgresMissingReplacementsShopifyOrderNameAdhocNoise(
+      "column replacements.shopify_order_name does not exist",
+      'WITH pgrst_source AS ( INSERT INTO "public"."replacements"("workspace_id", "shopify_order_name") VALUES ($1, $2) RETURNING "public"."replacements"."id" )',
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingReplacementsShopifyOrderNameAdhocNoise(
+      "column replacements.shopify_order_name does not exist",
+      'WITH pgrst_source AS ( UPDATE "public"."replacements" SET "shopify_order_name" = $1 WHERE "public"."replacements"."id" = $2 )',
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingReplacementsShopifyOrderNameAdhocNoise KEEPS a FATAL / PANIC / constraint-violation (different message shape — a real DB problem still pages)", () => {
+  // FATAL / PANIC / unique-violation / foreign-key-violation on replacements are real DB
+  // problems — pin is the exact column-missing message only.
+  assert.equal(
+    isForeignSupabasePostgresMissingReplacementsShopifyOrderNameAdhocNoise(
+      "FATAL: database is shutting down",
+      "select shopify_order_name from public.replacements",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingReplacementsShopifyOrderNameAdhocNoise(
+      'duplicate key value violates unique constraint "replacements_pkey"',
+      "select shopify_order_name from public.replacements",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingReplacementsShopifyOrderNameAdhocNoise returns false on empty / nullish input", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingReplacementsShopifyOrderNameAdhocNoise(null, null),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingReplacementsShopifyOrderNameAdhocNoise(undefined, undefined),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingReplacementsShopifyOrderNameAdhocNoise("", ""),
+    false,
+  );
+  // Empty query — even with the exact message we cannot confirm the shape, so the row
+  // stays captured.
+  assert.equal(
+    isForeignSupabasePostgresMissingReplacementsShopifyOrderNameAdhocNoise(
+      "column replacements.shopify_order_name does not exist",
+      "",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingReplacementsShopifyOrderNameAdhocNoise(
+      "column replacements.shopify_order_name does not exist",
       null,
     ),
     false,

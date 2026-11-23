@@ -106,6 +106,7 @@ import {
   isForeignSupabasePostgresMissingOrdersNoteColumnAdhocNoise,
   isForeignSupabasePostgresMissingOrdersShippingNameColumnAdhocNoise,
   isForeignSupabasePostgresMissingOrdersShopifyOrderNameAdhocNoise,
+  isForeignSupabasePostgresMissingReplacementsShopifyOrderNameAdhocNoise,
   isForeignSupabasePostgresMissingOrdersAvalaraDocCodeColumnAdhocNoise,
   isForeignSupabasePostgresMissingOrdersEasypostTrackerAdhocNoise,
   isForeignSupabasePostgresMissingOrdersTrackingNumberAdhocNoise,
@@ -1065,6 +1066,22 @@ const LOG_QUERIES: LogQuery[] = [
       // non-SELECT statement (real code-bug shape), still surfaces / pages on first
       // sighting.
       if (isForeignSupabasePostgresMissingOrdersShopifyOrderNameAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc `select ... shopify_order_name ... from
+      // public.replacements` lookup by an external tool / stale exploratory query — or the
+      // PostgREST `WITH pgrst_source AS ( SELECT ... FROM "public"."replacements" ... )` CTE
+      // wrapper the same client emits over the REST endpoint. Our `replacements` table has NO
+      // `shopify_order_name` column (the replacement order's name lives in
+      // `replacements.shopify_replacement_order_name`, while the bare `shopify_order_name`
+      // name belongs to the sibling `one_time_charges` table) and no ShopCX code path selects
+      // it — there is no lever to make the query resolve
+      // ([[../specs/error-feed-drop-replacements-shopify-order-name-adhoc-lookup]], Control
+      // Tower signature `supabase-logs:e1ed29c66b754f73`). Narrowly gated to require BOTH the
+      // exact column-missing message AND the SELECT-lookup shape — a column-missing error on
+      // any other column of `replacements` (including the live
+      // `shopify_replacement_order_name`), or on `shopify_order_name` from any other table
+      // (including the real `one_time_charges.shopify_order_name`), or on `replacements` via a
+      // non-SELECT statement (real code-bug shape), still surfaces / pages on first sighting.
+      if (isForeignSupabasePostgresMissingReplacementsShopifyOrderNameAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc `select ... avalara_doc_code ... from
       // public.orders` lookup by an external tool / stale exploratory query — or the
       // PostgREST `WITH pgrst_source AS ( SELECT ... FROM "public"."orders" ... )` CTE
