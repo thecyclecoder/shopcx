@@ -1,0 +1,1 @@
+- **Scope out foreign PostgREST noise: column product_variants.barcode does not exist** · verified 2026-11-23 · → [[../libraries/error-feed]]
