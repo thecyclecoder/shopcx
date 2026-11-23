@@ -123,6 +123,83 @@ export function computeSendInstant(
   return new Date(wallAsUtc.getTime() - offsetMinutes * 60_000);
 }
 
+/* ------------------------------------------------------------------------------------------------
+ * Quiet-hours send window (TCPA). A reminder/marketing text may ONLY ever be delivered between
+ * 9:00 AM and 8:00 PM in the recipient's verified local time; anything outside that — or with a
+ * timezone we can't trust — must not send. getTimezoneOffsetMinutes returns 0 for an unrecognized
+ * IANA name (treating it as UTC), so callers that gate a send MUST validate the zone first with
+ * `isValidIanaTimezone` and bound the instant with `isWithinSmsSendWindow`.
+ * --------------------------------------------------------------------------------------------- */
+
+/** Earliest local hour a text may send (inclusive) — 9:00 AM. */
+export const SMS_WINDOW_START_HOUR = 9;
+/** First local hour a text may NOT send (exclusive) — 8:00 PM, so 7:59 PM is the last legal minute. */
+export const SMS_WINDOW_END_HOUR = 20;
+
+/**
+ * True only if `timezone` is a real IANA zone. `Intl.DateTimeFormat` throws a RangeError on an
+ * unknown timeZone, so a successful construction is the validation. An empty/whitespace string is
+ * invalid. This is the guard `getTimezoneOffsetMinutes`'s silent 0-for-unknown behaviour requires
+ * upstream of any send decision.
+ */
+export function isValidIanaTimezone(timezone: string | null | undefined): boolean {
+  if (!timezone || !timezone.trim()) return false;
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: timezone });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** The recipient's local wall time at `instant`, as minutes-since-local-midnight (0-1439). Returns
+ *  null when the timezone is invalid or the instant isn't a real Date. DST-aware via Intl. */
+function localWallMinutes(instant: Date, timezone: string): number | null {
+  if (!isValidIanaTimezone(timezone) || Number.isNaN(instant.getTime())) return null;
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: timezone,
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(instant);
+  const h = Number(parts.find((p) => p.type === "hour")?.value);
+  const m = Number(parts.find((p) => p.type === "minute")?.value);
+  if (Number.isNaN(h) || Number.isNaN(m)) return null;
+  return h * 60 + m;
+}
+
+/**
+ * The quiet-hours guard. `true` ONLY when `timezone` is a valid IANA zone AND the recipient's local
+ * wall time at `instant` is >= 09:00 and < 20:00. An invalid/unknown zone, or any instant outside
+ * the window, returns `false` — so a caller that asserts this immediately before sending can never
+ * breach quiet hours regardless of how the send instant was computed. Never throws.
+ */
+export function isWithinSmsSendWindow(instant: Date, timezone: string): boolean {
+  const minutes = localWallMinutes(instant, timezone);
+  if (minutes == null) return false;
+  return minutes >= SMS_WINDOW_START_HOUR * 60 && minutes < SMS_WINDOW_END_HOUR * 60;
+}
+
+/**
+ * The recipient's LOCAL calendar date at `instant` as 'YYYY-MM-DD' in `timezone`. Used to anchor a
+ * send at an hour on the recipient's own date (not the UTC date). Returns null for an invalid zone.
+ */
+export function localDateKey(instant: Date, timezone: string): string | null {
+  if (!isValidIanaTimezone(timezone) || Number.isNaN(instant.getTime())) return null;
+  // en-CA renders as YYYY-MM-DD.
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: timezone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(instant);
+  const y = parts.find((p) => p.type === "year")?.value;
+  const mo = parts.find((p) => p.type === "month")?.value;
+  const d = parts.find((p) => p.type === "day")?.value;
+  if (!y || !mo || !d) return null;
+  return `${y}-${mo}-${d}`;
+}
+
 /**
  * Get a timezone's UTC offset in minutes for a given moment, using
  * Intl.DateTimeFormat (which is DST-aware). Returns negative for
