@@ -92,6 +92,7 @@ import {
   isForeignSupabasePostgresMissingMigrationAuditsContractIdAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsInternalContractIdAdhocNoise,
   isForeignSupabasePostgresJsonbIlikeOnErrorEventsSampleAdhocNoise,
+  isForeignSupabasePostgresJsonbIlikeOnSubscriptionsAppliedDiscountsAdhocNoise,
   isForeignSupabasePostgresMissingOrdersSourceColumnNoise,
   isForeignSupabasePostgresMissingOrdersUpdatedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingCouponsDiscountTypeColumnNoise,
@@ -892,6 +893,15 @@ const LOG_QUERIES: LogQuery[] = [
       // or a non-SELECT statement on this table (real code-bug shape) still surfaces / pages
       // on first sighting.
       if (isForeignSupabasePostgresJsonbIlikeOnErrorEventsSampleAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: the same Supabase Studio Table Editor quick-filter
+      // (or external PostgREST probe) typed as a case-insensitive free-text search over the
+      // jsonb `applied_discounts` column on `public.subscriptions` emits
+      // `WHERE "applied_discounts" ILIKE $1`, which Postgres rejects with the same
+      // `operator does not exist: jsonb ~~* unknown` (no `jsonb ~~* text` ILIKE operator).
+      // No ShopCX code path text-matches the jsonb `applied_discounts` payload, so the ERROR is
+      // repair work for a query no code owns (Control Tower signature
+      // `supabase-logs:51710834d2a73960`). Same narrow gating as the error_events.sample sibling.
+      if (isForeignSupabasePostgresJsonbIlikeOnSubscriptionsAppliedDiscountsAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc `select ... source ... from
       // public.orders` lookup by an external tool / stale exploratory query. Our `orders`
       // table exposes `source_name`, not `source` — no ShopCX code path issues a SELECT on
