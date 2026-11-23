@@ -18,6 +18,7 @@ interface ArmResults {
   engagement: ArmEngagement;
   netRevenueCents: number;
   netRevenuePerCustomerCents: number;
+  netRevenueVarianceCents2: number;
   grossRevenueCents: number;
   refundsCents: number;
   refundRate: number;
@@ -34,7 +35,10 @@ interface ReminderVerdict {
   concluded: boolean;
   leadingArm: ExperimentArm | null;
   netRevenuePerCustomerLiftCents: number;
-  derived: true;
+  confidenceIntervalCents: { lowCents: number; highCents: number } | null;
+  significant: boolean;
+  verdict: string | null;
+  derived: boolean;
 }
 interface ReminderTestResults {
   generatedAt: string; experimentSlug: string; windowDays: number;
@@ -44,7 +48,18 @@ interface ReminderTestResults {
 }
 
 const usd = (c: number) => "$" + (c / 100).toLocaleString(undefined, { maximumFractionDigits: 0 });
+const signedUsd = (c: number) => (c >= 0 ? "+" : "−") + usd(Math.abs(c));
 const pct = (f: number) => (f * 100).toFixed(1) + "%";
+
+/** The verdict headline, honouring statistical significance — a winner is only named when the lift
+ *  is significant (the persisted verdict label, or the live CI excluding 0). */
+function verdictHeadline(v: ReminderVerdict): string {
+  if (v.verdict === "treatment_wins") return "Reminder wins";
+  if (v.verdict === "holdout_wins") return "Holdout wins";
+  if (v.verdict === "no_difference") return "No statistically significant difference";
+  if (!v.significant) return "No statistically significant difference";
+  return v.leadingArm === "treatment" ? "Reminder wins" : "Holdout wins";
+}
 
 const FUNNEL: { key: keyof ArmEngagement; label: string }[] = [
   { key: "reminded", label: "Sent" },
@@ -141,11 +156,14 @@ export default function RenewalReminderResults() {
           {v?.concluded && (
             <div className="mb-4 rounded-xl border border-indigo-200 bg-indigo-50 p-4">
               <div className="text-sm font-semibold text-indigo-900">
-                Verdict: {v.leadingArm === "treatment" ? "Reminder wins" : v.leadingArm === "holdout" ? "Holdout wins" : "No clear winner"}
-                {" "}({v.experimentStatus})
+                Verdict: {verdictHeadline(v)} ({v.experimentStatus})
               </div>
               <div className="text-xs text-indigo-700">
-                Net revenue per customer lift: {lift >= 0 ? "+" : ""}{usd(lift)} (treatment − holdout) · derived
+                Net revenue per customer lift: {signedUsd(lift)} (treatment − holdout)
+                {v.confidenceIntervalCents
+                  ? ` · 95% CI ${signedUsd(v.confidenceIntervalCents.lowCents)} to ${signedUsd(v.confidenceIntervalCents.highCents)} · ${v.significant ? "statistically significant" : "not significant"}`
+                  : " · interval pending (need ≥2 per arm)"}
+                {v.derived ? " · derived" : ""}
               </div>
             </div>
           )}

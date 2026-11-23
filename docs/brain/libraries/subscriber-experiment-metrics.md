@@ -34,7 +34,9 @@ Journey events are keyed by session, so the module resolves session → customer
 | Export | Signature | What |
 |---|---|---|
 | `computeExperimentMetrics(workspaceId, slug, opts?)` | `Promise<ExperimentMetrics>` | the one entry point — per-arm rollup. `opts`: `{ windowDays?, asOf?, admin? }`. Zeroed arms when no assignments exist. |
-| `ExperimentMetrics` / `ArmMetrics` | type | per-experiment + per-arm shapes (`treatment` + `holdout`). |
+| `ExperimentMetrics` / `ArmMetrics` | type | per-experiment + per-arm shapes (`treatment` + `holdout`). `ArmMetrics.netRevenueVarianceCents2` is the SAMPLE variance (÷ n−1) of per-person net merchandise revenue — the dispersion the verdict's Welch t-test needs (0 when n < 2). |
+| `welchTwoSampleCI(meanT, varT, nT, meanH, varH, nH, alpha)` | `WelchResult` | PURE two-sample **Welch's t-test** + confidence interval on a difference of means (unequal variances). Returns `{ diffCents, lowCents, highCents, df, significant }`; `significant` ⇔ the interval excludes 0. Needs ≥2/arm. Used by the verdict engine ([[subscriber-experiment-guardrails]] `evaluateVerdict`) + the results lens ([[reminder-results-sdk]] `deriveVerdict`). |
+| `studentTQuantile(p, df)` | `number` | t-quantile via the Cornish-Fisher expansion of `invNorm` — no stats dependency; → z for large df. |
 | `DEFAULT_WINDOW_DAYS` | `const 90` | the pre-registered horizon. |
 | `NETTED_REFUND_STATUSES` | `const ['succeeded','settled']` | the only refund statuses netted out. |
 

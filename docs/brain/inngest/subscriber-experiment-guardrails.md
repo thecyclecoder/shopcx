@@ -27,14 +27,20 @@ For every workspace with a **running** pre-renewal experiment:
    `evaluateGuardrails`: voluntary cancel rate, refund rate, SMS STOP opt-out rate, and net
    merchandise revenue per person. A signal trips on EITHER a **sequential-safe anytime-valid**
    confidence-sequence test (`proportionHarmTripped` — valid at every sample size, so daily peeking
-   can't inflate false trips) OR a **hard absolute floor** (STOP > 5%, refund > 20%, cancel > 20%,
-   net-revenue > 20% below holdout with ≥50/arm).
+   can't inflate false trips) OR a **hard floor**: STOP > 5% (ABSOLUTE — holdout sends no SMS), and —
+   **holdout-relative** since launch follow-up Phase 2 — treatment cancel/refund EXCESS over holdout
+   > 5 points (`voluntaryCancelExcessOverHoldout` / `refundExcessOverHoldout`, past ≥50/arm), plus
+   net-revenue > 20% below holdout with ≥50/arm. (The old absolute cancel/refund > 20% floors tripped
+   on baseline churn the reminder never caused.)
 2. **On a trip** → `setExperimentStatus(..., 'stopped', { by: 'guardrail', reason })` (which, after
    Phase 4, halts ALL reminders) + ONE deduped CEO [[../tables/dashboard_notifications]] row
    (dedupe key `subscriber-experiment:<id>:guardrail_trip`). Never auto-resumes.
 3. **Verdict** → when the pre-registered `required_n_per_arm` is reached AND every assignment's
-   90-day window has closed, `recordExperimentVerdict` (status → `complete` + verdict fields) + ONE
-   deduped CEO notification (`...:verdict`).
+   90-day window has closed, `evaluateVerdict` runs a two-sample **Welch's t-test** at the
+   experiment's pre-registered `alpha` on per-person net merchandise revenue — a winner
+   (`treatment_wins`/`holdout_wins`) is declared ONLY when the `confidenceInterval` on the lift
+   excludes 0, else `no_difference`. `recordExperimentVerdict` (status → `complete` + verdict fields,
+   detail carries the interval) + ONE deduped CEO notification (`...:verdict`).
 
 North star: the cron only ever PAUSES or CONCLUDES; launching/resuming stays a CEO-approved status
 flip. It escalates (notify) rather than silently executing.

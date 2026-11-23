@@ -12,7 +12,35 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { classifySmsConsent } from "@/lib/pre-renewal-reminders";
+import { classifySmsConsent, fmtPreviewAmount, type ReminderChargePreview } from "@/lib/pre-renewal-reminders";
+
+function preview(over: Partial<ReminderChargePreview>): ReminderChargePreview {
+  return {
+    subscriptionId: "sub-1",
+    nextBillingDate: "2026-11-30",
+    items: [],
+    amountCents: null,
+    shippingCents: null,
+    taxCents: null,
+    amountLabel: "plus tax",
+    ...over,
+  };
+}
+
+test("a tax-inclusive 'total' renders as a bare dollar amount", () => {
+  const s = fmtPreviewAmount(preview({ amountCents: 4999, taxCents: 412, amountLabel: "total" }));
+  assert.equal(s, "$49.99");
+});
+
+test("an unquoted-tax amount renders '$X plus tax', NEVER a bare pre-tax number", () => {
+  // The named failing state: a pre-tax figure must not be shown as if it were the full charge.
+  const s = fmtPreviewAmount(preview({ amountCents: 4999, taxCents: null, amountLabel: "plus tax" }));
+  assert.equal(s, "$49.99 plus tax");
+});
+
+test("an unresolved amount renders nothing (reminder omits it)", () => {
+  assert.equal(fmtPreviewAmount(preview({ amountCents: null })), null);
+});
 
 test("STOP (unsubscribed) is suppressed as suppressed_stop — never texted", () => {
   const v = classifySmsConsent({ sms_marketing_status: "unsubscribed", phone: "+15125551234" });

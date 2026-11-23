@@ -62,6 +62,7 @@
     "test:avalara-cart-product-fallback": "tsx --test src/lib/avalara-cart.product-fallback.test.ts",
     "test:support-mode": "tsx --test src/lib/support-mode.test.ts",
     "test:subscriber-experiments": "tsx --test src/lib/subscriber-experiments.test.ts",
+    "test:subscriber-experiment-guardrails": "tsx --test src/lib/subscriber-experiment-guardrails.test.ts",
     "test:pre-renewal-reminders": "tsx --test src/lib/pre-renewal-reminders.test.ts",
     "test:reminder-results-sdk": "tsx --test src/lib/retention/reminder-results-sdk.test.ts",
     "test:workspace-features": "tsx --test src/lib/workspace-features.test.ts",
