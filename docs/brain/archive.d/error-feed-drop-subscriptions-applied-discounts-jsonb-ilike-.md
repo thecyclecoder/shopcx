@@ -1,0 +1,1 @@
+- **Drop Supabase Studio jsonb-ILIKE noise on subscriptions.applied_discounts from the error feed** · verified 2026-11-23 · → [[../libraries/error-feed]]
