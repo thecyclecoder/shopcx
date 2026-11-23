@@ -22831,6 +22831,58 @@ test("isForeignSupabasePostgresMissingAppstleContractSnapshotsContractIdAdhocNoi
   );
 });
 
+test("isForeignSupabasePostgresMissingAppstleContractSnapshotsContractIdAdhocNoise drops the UNQUALIFIED double-quoted message form (bare `contract_id` reference, exact failing sample)", () => {
+  // Postgres emits `column "contract_id" does not exist` (unqualified, double-quoted) when
+  // the foreign probe references the column with no table prefix, as in the real failing
+  // sample's `where contract_id::text in (...)`. Same foreign-owned read — dropped because
+  // the query-shape gate still names appstle_contract_snapshots with no JOIN.
+  assert.equal(
+    isForeignSupabasePostgresMissingAppstleContractSnapshotsContractIdAdhocNoise(
+      'column "contract_id" does not exist',
+      "select * from appstle_contract_snapshots where contract_id::text in ('58320683181','31339643053') or shopify_contract_id::text in ('58320683181','31339643053') order by 1 desc limit 5",
+    ),
+    true,
+  );
+  // Same unqualified message against the public.-qualified FROM clause.
+  assert.equal(
+    isForeignSupabasePostgresMissingAppstleContractSnapshotsContractIdAdhocNoise(
+      'column "contract_id" does not exist',
+      "select contract_id from public.appstle_contract_snapshots where contract_id is not null",
+    ),
+    true,
+  );
+  // Leading `ERROR: ` prefix is stripped before the unqualified equality check too.
+  assert.equal(
+    isForeignSupabasePostgresMissingAppstleContractSnapshotsContractIdAdhocNoise(
+      'ERROR:  column "contract_id" does not exist',
+      "select * from appstle_contract_snapshots where contract_id::text in ('1') order by 1 desc limit 5",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingAppstleContractSnapshotsContractIdAdhocNoise KEEPS the UNQUALIFIED message for a read against a DIFFERENT table (the broader message only drops for appstle_contract_snapshots reads)", () => {
+  // The unqualified `column "contract_id" does not exist` message is table-agnostic, so the
+  // drop MUST stay gated by the query-shape marker — a bare `contract_id` miss on any other
+  // table still pages.
+  assert.equal(
+    isForeignSupabasePostgresMissingAppstleContractSnapshotsContractIdAdhocNoise(
+      'column "contract_id" does not exist',
+      "select contract_id from public.subscription_contracts where contract_id is not null",
+    ),
+    false,
+  );
+  // And a non-SELECT statement on this table with the unqualified message is still a real
+  // write bug we want to see.
+  assert.equal(
+    isForeignSupabasePostgresMissingAppstleContractSnapshotsContractIdAdhocNoise(
+      'column "contract_id" does not exist',
+      "update public.appstle_contract_snapshots set contract_id = $1 where workspace_id = $2",
+    ),
+    false,
+  );
+});
+
 test("isForeignSupabasePostgresMissingAppstleContractSnapshotsContractIdAdhocNoise KEEPS a column-missing on appstle_contract_snapshots for a DIFFERENT column (e.g. `appstle_contract_id` regression — the real key column)", () => {
   // `appstle_contract_id` IS the real key column. If it regressed we absolutely want the
   // page. The pin is `contract_id` only.
