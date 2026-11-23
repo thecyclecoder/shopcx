@@ -5258,6 +5258,74 @@ export function isForeignSupabasePostgresMissingOrdersShopifyOrderNameAdhocNoise
 
 /**
  * Foreign-app noise — Postgres reporting a missing column for an ad hoc SELECT lookup of
+ * `replacements.shopify_order_name`. Our `replacements` table has NO `shopify_order_name`
+ * column — the replacement order's customer-visible name lives in
+ * `replacements.shopify_replacement_order_name` (see
+ * supabase/migrations/20260407100000_replacements.sql), while the bare `shopify_order_name`
+ * name belongs to the sibling `one_time_charges` table. No ShopCX code path (src/,
+ * scripts/, shopify-extension/, supabase/migrations/, docs/brain/) issues a SELECT that
+ * names `replacements.shopify_order_name`. The message appears on Supabase's
+ * `postgres_logs` feed only when an external / manual tool (Supabase Studio's Table Editor
+ * / API Docs, a foreign SQL client, a stale exploratory query, a third-party integration)
+ * does a raw `select ... shopify_order_name ... from public.replacements` lookup — or the
+ * PostgREST `WITH pgrst_source AS ( SELECT ... FROM "public"."replacements" ... )` CTE
+ * wrapper the same client emits over the REST endpoint. There is no lever from ShopCX to
+ * make that query resolve — paging Platform on it
+ * ([[../specs/error-feed-drop-replacements-shopify-order-name-adhoc-lookup]], Control
+ * Tower signature `supabase-logs:e1ed29c66b754f73`) is repair work for a query we don't
+ * own.
+ *
+ * Sibling of `isForeignSupabasePostgresMissingOrdersShopifyOrderNameAdhocNoise` — same
+ * narrow-gating shape, scoped to the `replacements.shopify_order_name` /
+ * `shopify_replacement_order_name` confusion on the `public.replacements` table instead of
+ * the `orders.shopify_order_name` / `order_number` one.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical column-missing shape for THIS column —
+ *      trimmed equal to `column replacements.shopify_order_name does not exist` (with or
+ *      without the `public.` qualifier and any leading `ERROR: ` prefix Postgres
+ *      includes on the logs surface), AND
+ *   2. the `parsed.query` attribute is a SELECT-lookup on `public.replacements` — either
+ *      (a) the bare `select ... from public.replacements` shape, OR (b) the PostgREST-
+ *      generated `WITH pgrst_source AS ( SELECT ... FROM "public"."replacements" ... )`
+ *      CTE wrapper form with double-quoted identifiers.
+ *
+ * Narrowly gated so:
+ *   - a column-missing error for ANY OTHER column on `replacements` (a real product-schema
+ *     regression on a live column like `shopify_replacement_order_name` / `status`) still
+ *     pages,
+ *   - a column-missing error for `shopify_order_name` on ANY OTHER table — including the
+ *     real `one_time_charges.shopify_order_name` column if it ever regresses — still pages,
+ *   - the same message attached to a DIFFERENT statement shape (INSERT / UPDATE / DELETE
+ *     / DDL on `replacements`) still pages — the pin is the SELECT-lookup shape,
+ *   - a FATAL / PANIC / constraint violation is untouched (different message).
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not record`,
+ * so returning null here fully suppresses the row (no error_event, no loop_alert, no
+ * signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresMissingReplacementsShopifyOrderNameAdhocNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column replacements.shopify_order_name does not exist" ||
+    stripped === "column public.replacements.shopify_order_name does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  const bareSelect = /^select\b[\s\S]*\bfrom\s+(?:public\.)?replacements\b/.test(q);
+  const pgrstCte =
+    /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"?(?:public"?\.)?"?replacements\b/.test(q);
+  return bareSelect || pgrstCte;
+}
+
+/**
+ * Foreign-app noise — Postgres reporting a missing column for an ad hoc SELECT lookup of
  * `orders.avalara_doc_code`. Our `orders` table has NO `avalara_doc_code` column — the
  * Avalara AvaTax document code lives on the tax-transaction ledger, not on our internal
  * `orders` row, and no ShopCX code path (src/, scripts/, shopify-extension/,
