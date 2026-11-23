@@ -12,7 +12,12 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { classifySmsConsent, fmtPreviewAmount, type ReminderChargePreview } from "@/lib/pre-renewal-reminders";
+import {
+  classifySmsConsent,
+  fmtPreviewAmount,
+  reminderChargePreview,
+  type ReminderChargePreview,
+} from "@/lib/pre-renewal-reminders";
 
 function preview(over: Partial<ReminderChargePreview>): ReminderChargePreview {
   return {
@@ -23,8 +28,20 @@ function preview(over: Partial<ReminderChargePreview>): ReminderChargePreview {
     shippingCents: null,
     taxCents: null,
     amountLabel: "plus tax",
+    comp: false,
     ...over,
   };
+}
+
+/** A minimal admin stub whose `subscriptions` select resolves to `subRow` — enough for
+ *  `reminderChargePreview` on a non-internal (ShopCX) sub, which never hits the tax quote path. */
+function fakeAdmin(subRow: Record<string, unknown> | null): Parameters<typeof reminderChargePreview>[2] {
+  const q = {
+    select: () => q,
+    eq: () => q,
+    maybeSingle: async () => ({ data: subRow }),
+  };
+  return { from: () => q } as unknown as Parameters<typeof reminderChargePreview>[2];
 }
 
 test("a tax-inclusive 'total' renders as a bare dollar amount", () => {
@@ -40,6 +57,70 @@ test("an unquoted-tax amount renders '$X plus tax', NEVER a bare pre-tax number"
 
 test("an unresolved amount renders nothing (reminder omits it)", () => {
   assert.equal(fmtPreviewAmount(preview({ amountCents: null })), null);
+});
+
+test("a comped renewal renders 'This order is on us', never a bare $0.00", () => {
+  // The named failing state: a free sub must not show "$0.00".
+  const s = fmtPreviewAmount(preview({ comp: true, amountCents: 0, taxCents: 0, amountLabel: "total" }));
+  assert.equal(s, "This order is on us");
+});
+
+test("a ShopCX-shape sub with price_cents lines yields a non-null amount (one money resolver)", async () => {
+  // The CEO 2026-11-23 bug: ShopCX lines carry `price_cents`, so the old hand-sum of `items[].price`
+  // resolved every ShopCX sub to no amount. priceSubscription sums `price_cents` for all engines.
+  const sub = {
+    id: "sub-shopcx",
+    is_internal: false,
+    comp: false,
+    items: [{ title: "Daily Greens", quantity: 2, price_cents: 2500, variant_id: "v1" }],
+    delivery_price_cents: 500,
+    applied_discounts: [],
+    shipping_protection_added: false,
+    shipping_protection_amount_cents: 0,
+    next_billing_date: "2026-11-30",
+  };
+  const p = await reminderChargePreview("ws-1", "sub-shopcx", fakeAdmin(sub));
+  assert.ok(p, "preview resolved");
+  assert.equal(p!.amountCents, 5500); // 2×$25.00 + $5.00 shipping
+  assert.equal(p!.comp, false);
+  assert.equal(p!.amountLabel, "plus tax"); // Shopify applies tax at billing
+  assert.equal(fmtPreviewAmount(p!), "$55.00 plus tax");
+});
+
+test("a comped ShopCX sub yields the free wording, not an amount", async () => {
+  const sub = {
+    id: "sub-comp",
+    is_internal: false,
+    comp: true,
+    items: [{ title: "Daily Greens", quantity: 1, price_cents: 2500, variant_id: "v1" }],
+    delivery_price_cents: 0,
+    applied_discounts: [],
+    shipping_protection_added: false,
+    shipping_protection_amount_cents: 0,
+    next_billing_date: "2026-11-30",
+  };
+  const p = await reminderChargePreview("ws-1", "sub-comp", fakeAdmin(sub));
+  assert.ok(p, "preview resolved");
+  assert.equal(p!.comp, true);
+  assert.equal(fmtPreviewAmount(p!), "This order is on us");
+});
+
+test("a ShopCX sub whose lines are all $0 is treated as comped even without sub.comp", async () => {
+  const sub = {
+    id: "sub-zero",
+    is_internal: false,
+    comp: false,
+    items: [{ title: "Free Gift Box", quantity: 1, price_cents: 0, variant_id: "v1" }],
+    delivery_price_cents: 0,
+    applied_discounts: [],
+    shipping_protection_added: false,
+    shipping_protection_amount_cents: 0,
+    next_billing_date: "2026-11-30",
+  };
+  const p = await reminderChargePreview("ws-1", "sub-zero", fakeAdmin(sub));
+  assert.ok(p, "preview resolved");
+  assert.equal(p!.comp, true);
+  assert.equal(fmtPreviewAmount(p!), "This order is on us");
 });
 
 test("STOP (unsubscribed) is suppressed as suppressed_stop — never texted", () => {
