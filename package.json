@@ -471,6 +471,7 @@
     "test:migrate-detect-drift": "tsx --test src/lib/commerce/migrate-detect-drift.test.ts",
     "test:remedy-pitch-guard": "tsx --test src/lib/remedy-selector.pitch-guard.test.ts",
     "test:winback-reactivate-choice": "tsx --test src/lib/winback-reactivate-choice.test.ts",
+    "test:winback-shortlink": "tsx --test src/lib/winback-shortlink.test.ts",
     "test:crisis-restart-swap": "tsx --test src/lib/crisis-restart-swap.test.ts"
   },
   "dependencies": {

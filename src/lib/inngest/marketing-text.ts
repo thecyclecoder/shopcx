@@ -226,6 +226,16 @@ export const textCampaignScheduled = inngest.createFunction(
         rows = rows.filter((r) => !(r.segments || []).some((s) => excludeSet.has(s)));
       }
 
+      // Explicit customer allowlist (audience_filter.customer_ids) — for a hand-picked audience such
+      // as a win-back wave's opted-in recipients. Applied AFTER the consent + phone gates above, so
+      // it can only narrow the audience, never add someone who hasn't opted in. Filtered in JS:
+      // hundreds of UUIDs in an .in() would exceed the PostgREST URL limit.
+      const allow = filter.customer_ids;
+      if (Array.isArray(allow)) {
+        const allowSet = new Set(allow.map(String));
+        rows = rows.filter((r) => allowSet.has(r.id));
+      }
+
       return rows;
     });
 
