@@ -54,6 +54,7 @@ import {
   isForeignSupabasePostgresMissingReturnsRefundTypeColumnAdhocNoise,
   isForeignSupabasePostgresMissingReturnsResolutionColumnAdhocNoise,
   isForeignSupabasePostgresMissingReturnsFreeLabelColumnAdhocNoise,
+  isForeignSupabasePostgresMissingReturnsRefundAmountCentsColumnAdhocNoise,
   isForeignSupabasePostgresMissingReturnsShopifyCustomerIdColumnAdhocNoise,
   isForeignSupabasePostgresMissingReturnsRefundOnColumnAdhocNoise,
   isForeignSupabasePostgresMissingTicketsMergedIntoTicketIdColumnAdhocNoise,
@@ -543,6 +544,17 @@ const LOG_QUERIES: LogQuery[] = [
       // `returns` column (including the real `label_url`), the same message via a write/DDL, or
       // a FATAL/PANIC/constraint violation still surfaces / pages.
       if (isForeignSupabasePostgresMissingReturnsFreeLabelColumnAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: a foreign/stale direct-REST client reads
+      // `public.returns` with a guessed, wrong column list naming `refund_amount_cents` — our
+      // `returns` table stores the refunded amount in `net_refund_cents`, never a bare
+      // `refund_amount_cents`. No ShopCX code path names `returns.refund_amount_cents`, so the
+      // resulting column-missing ERROR is repair work for a query we don't own (Control Tower
+      // signature `supabase-logs:79ffb1a222c7d69e`). Narrowly gated to require BOTH the exact
+      // `column returns.refund_amount_cents does not exist` message AND the SELECT-lookup shape
+      // on `returns` (bare or PostgREST CTE wrapper) — a real schema regression on any live
+      // `returns` column (including the real `net_refund_cents`), the same message via a
+      // write/DDL, or a FATAL/PANIC/constraint violation still surfaces / pages.
+      if (isForeignSupabasePostgresMissingReturnsRefundAmountCentsColumnAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: a foreign/stale direct-REST client (still using the
       // old Shopify-era key) reads `public.returns` filtering by a legacy `shopify_customer_id`
       // column. Our `returns` table was built after Shopify was sunset and keys customers on
