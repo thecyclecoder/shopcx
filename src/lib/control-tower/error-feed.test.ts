@@ -188,6 +188,7 @@ import {
   isForeignSupabasePostgresInvalidUuidSyntaxOnSubscriptionsIdAdhocNoise,
   isForeignSupabasePostgresUuidLikeOnAgentJobsIdAdhocNoise,
   isForeignSupabasePostgresJsonbIlikeOnErrorEventsSampleAdhocNoise,
+  isForeignSupabasePostgresJsonbIlikeOnSubscriptionsAppliedDiscountsAdhocNoise,
   isForeignSupabasePostgresMissingErrorEventsMetadataAdhocNoise,
   isForeignSupabasePostgresMissingCustomerEventsColumnAdhocNoise,
   isForeignSupabasePostgresInvalidTimestampCustomerEventsAdhocNoise,
@@ -5446,6 +5447,119 @@ test("isForeignSupabasePostgresJsonbIlikeOnErrorEventsSampleAdhocNoise KEEPS a n
     isForeignSupabasePostgresJsonbIlikeOnErrorEventsSampleAdhocNoise(
       "operator does not exist: jsonb ~~* unknown",
       'WITH pgrst_source AS ( INSERT INTO "public"."error_events"("id","sample") VALUES ($1,$2) RETURNING * )',
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresJsonbIlikeOnSubscriptionsAppliedDiscountsAdhocNoise ──
+// The same Supabase Studio Table Editor quick-filter (or an external PostgREST probe) typed as
+// a case-insensitive free-text search over the jsonb `applied_discounts` column on
+// `public.subscriptions` emits `WHERE "applied_discounts" ILIKE $1`, which Postgres rejects with
+// `operator does not exist: jsonb ~~* unknown`. Control Tower signature
+// `supabase-logs:51710834d2a73960`. Drop AT CAPTURE only when BOTH the exact operator-missing
+// message AND the SELECT-shape on `subscriptions` naming `applied_discounts ilike` are present;
+// a jsonb-ILIKE error on any OTHER table, a DIFFERENT operator mismatch on this table, or a
+// non-SELECT shape still pages.
+
+test("isForeignSupabasePostgresJsonbIlikeOnSubscriptionsAppliedDiscountsAdhocNoise drops the operator-missing message paired with the PostgREST CTE wrapper AND the bare SELECT shape", () => {
+  // The Studio-emitted PostgREST CTE wrapper form (double-quoted identifiers), applied_discounts ILIKE.
+  assert.equal(
+    isForeignSupabasePostgresJsonbIlikeOnSubscriptionsAppliedDiscountsAdhocNoise(
+      "operator does not exist: jsonb ~~* unknown",
+      'WITH pgrst_source AS ( SELECT "public"."subscriptions".* FROM "public"."subscriptions" WHERE "public"."subscriptions"."applied_discounts" ilike $1 LIMIT $2 OFFSET $3 )',
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresJsonbIlikeOnSubscriptionsAppliedDiscountsAdhocNoise(
+      "ERROR: operator does not exist: jsonb ~~* unknown",
+      'WITH pgrst_source AS ( SELECT * FROM "public"."subscriptions" WHERE "applied_discounts" ilike $1 )',
+    ),
+    true,
+  );
+  // The bare SELECT shape (no PostgREST wrapper) drops too — the predicate accepts both.
+  assert.equal(
+    isForeignSupabasePostgresJsonbIlikeOnSubscriptionsAppliedDiscountsAdhocNoise(
+      "operator does not exist: jsonb ~~* unknown",
+      "select * from public.subscriptions where applied_discounts ilike '%foo%'",
+    ),
+    true,
+  );
+  // Unqualified `subscriptions` (no `public.`) + bare SELECT is still the same ad hoc shape.
+  assert.equal(
+    isForeignSupabasePostgresJsonbIlikeOnSubscriptionsAppliedDiscountsAdhocNoise(
+      "operator does not exist: jsonb ~~* unknown",
+      "select id, applied_discounts from subscriptions where applied_discounts ilike $1",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresJsonbIlikeOnSubscriptionsAppliedDiscountsAdhocNoise KEEPS the same operator-missing message when the FROM is a different table (a real jsonb-ILIKE code bug elsewhere still pages)", () => {
+  // Same jsonb ~~* unknown message, but the query ILIKEs a jsonb column on another table —
+  // that's a real code-bug shape in our own code, not Studio noise on subscriptions.
+  assert.equal(
+    isForeignSupabasePostgresJsonbIlikeOnSubscriptionsAppliedDiscountsAdhocNoise(
+      "operator does not exist: jsonb ~~* unknown",
+      "select * from public.orders where applied_discounts ilike '%foo%'",
+    ),
+    false,
+  );
+  // PostgREST CTE wrapper form, but FROM is a different table — must still page.
+  assert.equal(
+    isForeignSupabasePostgresJsonbIlikeOnSubscriptionsAppliedDiscountsAdhocNoise(
+      "operator does not exist: jsonb ~~* unknown",
+      'WITH pgrst_source AS ( SELECT * FROM "public"."orders" WHERE "applied_discounts" ilike $1 )',
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresJsonbIlikeOnSubscriptionsAppliedDiscountsAdhocNoise KEEPS a DIFFERENT operator-missing error on the same table (a real code-bug with a different operator mismatch still pages)", () => {
+  // The jsonb ~~ unknown (LIKE, not ILIKE) mismatch and other operators on subscriptions are
+  // real code bugs we WANT to see — the pin is the exact ~~* (ILIKE) operator.
+  assert.equal(
+    isForeignSupabasePostgresJsonbIlikeOnSubscriptionsAppliedDiscountsAdhocNoise(
+      "operator does not exist: jsonb ~~ unknown",
+      "select * from public.subscriptions where applied_discounts ilike $1",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresJsonbIlikeOnSubscriptionsAppliedDiscountsAdhocNoise(
+      "operator does not exist: jsonb @> unknown",
+      "select * from public.subscriptions where applied_discounts @> $1",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresJsonbIlikeOnSubscriptionsAppliedDiscountsAdhocNoise KEEPS a non-SELECT statement shape on the same table (a real code-bug writing subscriptions still pages)", () => {
+  // An INSERT / UPDATE / DELETE naming applied_discounts ILIKE indicates real code trying to
+  // mutate the table — a bug we WANT to see, not the Studio-click read we drop.
+  assert.equal(
+    isForeignSupabasePostgresJsonbIlikeOnSubscriptionsAppliedDiscountsAdhocNoise(
+      "operator does not exist: jsonb ~~* unknown",
+      "update public.subscriptions set applied_discounts = $1 where applied_discounts ilike $2",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresJsonbIlikeOnSubscriptionsAppliedDiscountsAdhocNoise(
+      "operator does not exist: jsonb ~~* unknown",
+      "delete from public.subscriptions where applied_discounts ilike $1",
+    ),
+    false,
+  );
+  // A PostgREST INSERT inside the same `WITH pgrst_source AS (...)` envelope is a real
+  // code-write and must stay captured/paged — the CTE branch requires the wrapped op to be a
+  // SELECT.
+  assert.equal(
+    isForeignSupabasePostgresJsonbIlikeOnSubscriptionsAppliedDiscountsAdhocNoise(
+      "operator does not exist: jsonb ~~* unknown",
+      'WITH pgrst_source AS ( INSERT INTO "public"."subscriptions"("id","applied_discounts") VALUES ($1,$2) RETURNING * )',
     ),
     false,
   );
