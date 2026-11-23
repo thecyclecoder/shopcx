@@ -13844,9 +13844,19 @@ export function isForeignSupabasePostgresMissingAppstleContractSnapshotsContract
   // has a stable shape: `column <table>.<name> does not exist`, pinned here to
   // `appstle_contract_snapshots.contract_id` (with or without the `public.` qualifier).
   const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  // Postgres emits the TABLE-QUALIFIED `column <table>.contract_id does not exist` form
+  // only when the column is referenced with a table prefix. When the same foreign probe
+  // references the column bare (e.g. `where contract_id::text in (...)` with no
+  // `appstle_contract_snapshots.` prefix), Postgres instead emits the UNQUALIFIED
+  // double-quoted `column "contract_id" does not exist` form. Both are the same
+  // foreign-owned read — the query-shape gate below (SELECT-on-appstle_contract_snapshots,
+  // no JOIN) is what keeps the broader unqualified message from dropping anything but a
+  // read against THIS specific table, so a bare `column "contract_id" does not exist` from
+  // any other query still pages.
   const messageMatches =
     stripped === "column appstle_contract_snapshots.contract_id does not exist" ||
-    stripped === "column public.appstle_contract_snapshots.contract_id does not exist";
+    stripped === "column public.appstle_contract_snapshots.contract_id does not exist" ||
+    stripped === 'column "contract_id" does not exist';
   if (!messageMatches) return false;
   const q = (query ?? "").trim().toLowerCase();
   if (!q) return false;
