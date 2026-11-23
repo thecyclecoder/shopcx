@@ -44,9 +44,15 @@ Product catalog entry for the editor's add-item dropdown.
 
 - `src/lib/journey-step-builder.ts` — `next_order` switch case
 
+## Total resolution — one money resolver, every engine
+
+Subscription totals resolve through the ONE money resolver `priceSubscription` ([[commerce__price]]) for every engine — the same resolver the Portal / mini-site / reminder use. This ensures the journey editor shows the same total the customer will see at checkout and the Portal shows in the subscription detail.
+
+For **internal subs**, lines are priced live via [[pricing]]. For **non-internal** (ShopCX/Appstle) subs, lines carry `price_cents`, so `priceSubscription` sums them (the old hand-sum of `items[].price` resolved ShopCX subs to no amount — a CEO 2026-11-23 bug fix). The total is `pricing.total_cents` (merchandise after discounts + shipping + protection). On `PriceInvariantError` (a line can't be priced), the builder falls back to the hand-sum rather than omitting the total (the reminder omits on error; the journey shows a fallback).
+
 ## Gotchas
 
-_None documented._
+None documented.
 
 ---
 
