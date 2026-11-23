@@ -43,3 +43,11 @@ newest dunning cycle as `recovered` even if it had already closed `exhausted`
 - 2026-11-17 ground truth: a dunning-cancelled customer fixed their card via the journey after
   the AI promised to restart them; the journey only vaulted + migrated, so nothing restarted and
   nothing was charged. Don't re-inline recovery in one surface.
+- 2026-11-23 ground truth: when the card save also MIGRATES the sub, `vaultAndMigratePaymentMethod`
+  fires its own order-now retry ([[order-now-verify]] `dispatchOrderNowRetryOnMigrate`) ~200ms before
+  this file's recovery event. Both target the same cycle, the per-cycle claim lets one through, and
+  the order-now retry always won — without `recovery: true` it advanced from the already-pushed
+  stored date, so 5 recovered customers each skipped a shipment (one charge each, no double-charge).
+  The migrate retry now forwards `recovery: !!isRecovery` through `subscriptionOrderNowVerified` →
+  `subscriptionOrderNow(…, { recovery })` → the internal renewal-attempt, so whichever event wins,
+  the date re-anchors and the exhausted cycle closes.

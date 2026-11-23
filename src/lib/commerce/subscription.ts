@@ -1300,6 +1300,9 @@ export async function subscriptionAttemptBilling(
 export async function subscriptionOrderNow(
   workspaceId: string,
   contractId: string,
+  /** `recovery`: the customer just fixed a failed card. Internal subs get `recovery: true` on the
+   *  renewal-attempt so next_billing_date re-anchors to charge + one interval (no skipped cycle). */
+  opts: { recovery?: boolean } = {},
 ): Promise<OpResult & { summary?: string; internal?: boolean }> {
   // An old (pre-migration) id resolves to the live migrated row before the lookup below.
   contractId = await resolveLiveContractId(workspaceId, contractId);
@@ -1360,6 +1363,7 @@ export async function subscriptionOrderNow(
         subscription_id: sub.id,
         workspace_id: workspaceId,
         expected_next_billing_date: (sub as { next_billing_date?: string | null }).next_billing_date ?? null,
+        ...(opts.recovery ? { recovery: true } : {}),
       },
     });
     return { success: true, internal: true, summary: "Triggered internal renewal (order now)" };

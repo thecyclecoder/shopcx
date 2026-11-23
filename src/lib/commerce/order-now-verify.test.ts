@@ -432,6 +432,7 @@ interface RetryFireCall {
   contract_id: string;
   customer_id?: string;
   ticket_id?: string;
+  recovery?: boolean;
 }
 interface RetryGuardCall {
   workspace_id: string;
@@ -459,7 +460,7 @@ function makeRetryDeps(overrides: {
       return overrides.alreadyRetried ?? false;
     },
     fireVerifiedOrderNow: async (workspace_id, contract_id, ctx) => {
-      fireCalls.push({ workspace_id, contract_id, customer_id: ctx.customer_id, ticket_id: ctx.ticket_id });
+      fireCalls.push({ workspace_id, contract_id, customer_id: ctx.customer_id, ticket_id: ctx.ticket_id, recovery: ctx.recovery });
       return {
         success: true,
         summary: "Triggered internal renewal (order now)",
@@ -592,4 +593,27 @@ test("dispatchOrderNowRetryOnMigrate: successful internal retry returns internal
     assert.equal(out.result.pending, false);
     assert.equal(out.fired_at, MIGRATED_AT);
   }
+});
+
+// A recovery migrate's order-now retry races runPaymentRecovery's recovery charge for the same
+// cycle and wins the claim, so IT must carry recovery:true — otherwise the renewal advances
+// next_billing_date from a date dunning already pushed and the customer skips a shipment
+// (2026-11-23 audit: Sara K, Susan A, Connie W, Sally M).
+test("dispatchOrderNowRetryOnMigrate: recovery migrate → fire carries recovery=true; a plain migrate does not", async () => {
+  const base = {
+    workspace_id: WORKSPACE,
+    customer_id: CUSTOMER,
+    subscription_id: SUB,
+    contract_id: INTERNAL_CONTRACT,
+    migrated_at: MIGRATED_AT,
+  };
+  const rec = makeRetryDeps();
+  await dispatchOrderNowRetryOnMigrate({ ...base, recovery: true }, rec.deps);
+  assert.equal(rec.fireCalls.length, 1);
+  assert.equal(rec.fireCalls[0]!.recovery, true, "recovery flag forwarded to the renewal fire");
+
+  const plain = makeRetryDeps();
+  await dispatchOrderNowRetryOnMigrate(base, plain.deps);
+  assert.equal(plain.fireCalls.length, 1);
+  assert.equal(plain.fireCalls[0]!.recovery, undefined, "non-recovery migrate leaves the flag off");
 });

@@ -259,6 +259,11 @@ export interface OrderNowVerifyContext {
   /** For Phase 2's decline-journey — the customer we send the
    *  update-payment-method journey to. */
   customer_id?: string;
+  /** Failed-payment recovery retry (the customer just fixed their card). Forwarded to the
+   *  internal renewal-attempt as `recovery: true`, so the charge re-anchors next_billing_date
+   *  to charge-date + one interval instead of advancing from a stored date dunning already
+   *  pushed forward (which skipped a whole shipment), and closes an exhausted dunning cycle. */
+  recovery?: boolean;
 }
 
 /** Fire the `commerce/order-now.verify` Inngest event with a delay picked
@@ -353,7 +358,7 @@ export async function subscriptionOrderNowVerified(
 
   // Fire the underlying order-now. Preserves the Braintree-vs-Appstle branch
   // in the shared `subscriptionOrderNow` — this wrapper only adds the verify.
-  const fired = await subscriptionOrderNow(workspaceId, contractId);
+  const fired = await subscriptionOrderNow(workspaceId, contractId, { recovery: !!ctx.recovery });
   if (!fired.success) {
     return {
       success: false,
@@ -814,6 +819,8 @@ export async function dispatchOrderNowRetryOnMigrate(
     /** For threading through to the verify's decline-branch recovery journey
      *  (Phase 2) — the customer id the recovery email would target. */
     ticket_id?: string;
+    /** True when the migrate is a failed-payment recovery — see OrderNowVerifyContext.recovery. */
+    recovery?: boolean;
   },
   deps: OrderNowRetryDeps = defaultOrderNowRetryDeps(),
 ): Promise<OrderNowRetryOutcome> {
@@ -833,6 +840,7 @@ export async function dispatchOrderNowRetryOnMigrate(
   const result = await deps.fireVerifiedOrderNow(input.workspace_id, input.contract_id, {
     customer_id: input.customer_id,
     ticket_id: input.ticket_id,
+    ...(input.recovery ? { recovery: true } : {}),
   });
   if (!result.success) {
     return {
