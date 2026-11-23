@@ -229,6 +229,7 @@ import {
   isForeignSupabasePostgresMissingCrisisEventsSubstituteVariantIdColumnAdhocNoise,
   isForeignSupabasePostgresMissingProductsIntelligenceColumnsAdhocNoise,
   isForeignSupabasePostgresMissingProductsPricingRuleIdLookupNoise,
+  isForeignSupabasePostgresMissingProductVariantsBarcodeAdhocNoise,
   isForeignSupabasePostgresMissingPlaybooksTitleAdhocNoise,
   isForeignSupabasePostgresMissingProductIngredientsSortOrderAdhocNoise,
   isForeignSupabasePostgresMissingDailyMetaAdSpendDateAdhocNoise,
@@ -2806,6 +2807,20 @@ const LOG_QUERIES: LogQuery[] = [
       // `products`, or on `products` via a non-SELECT statement (real code-bug shape)
       // still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingProductsPricingRuleIdLookupNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
+      // against `public.product_variants.barcode`. The `product_variants` table exists
+      // but has NEVER carried a `barcode` column — no ShopCX migration ever added it and
+      // no ShopCX reader selects it. The column-missing ERROR only reaches this feed when
+      // a foreign app / stale SQL Editor session / deprecated integration queries
+      // `/rest/v1/product_variants?select=id,barcode&...`. There is no lever from ShopCX
+      // to make that query resolve — paging Platform on it (Control Tower signature
+      // `supabase-logs:64cac2882bad75d0`) is repair work for a query we don't own.
+      // Narrowly gated to require BOTH the exact column-missing message AND a
+      // SELECT-on-product_variants shape (bare OR PostgREST CTE wrapper) — a
+      // column-missing error on any other table, a different column on `product_variants`,
+      // or on `product_variants` via a non-SELECT statement (real code-bug shape) still
+      // surfaces / pages on first sighting.
+      if (isForeignSupabasePostgresMissingProductVariantsBarcodeAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
       // against `public.playbooks.title`. The `playbooks` table exists but has NO
       // `title` column — the human-facing label is `name`, and every ShopCX reader /
