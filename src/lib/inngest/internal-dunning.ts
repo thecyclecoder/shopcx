@@ -359,10 +359,31 @@ export async function closeInternalDunningOnSuccess(
  * AND has an exhausted dunning cycle — NOT a voluntary cancel. Returns the ids
  * of the subs it reactivated (so the caller can charge them immediately).
  */
+/** Max age of the dunning cycle that may revive a cancelled sub on card recovery. */
+export const DUNNING_REACTIVATE_MAX_CYCLE_AGE_DAYS = 90;
+/** A cancel stamped more than this long after the cycle opened is a later (voluntary) cancel. */
+export const DUNNING_REACTIVATE_MAX_CANCEL_LAG_DAYS = 60;
+
+/**
+ * Pure: was this cancelled sub cancelled BY the given dunning cycle, recently? The cycle must have
+ * opened within DUNNING_REACTIVATE_MAX_CYCLE_AGE_DAYS, and a `cancelled_at` stamped well after the
+ * cycle opened means the customer (or an agent) cancelled later, so it isn't a dunning cancel.
+ * A `cancelled_at` BEFORE the cycle is a stale historical stamp (never cleared on resume) — ignored.
+ */
+export function isRecentDunningCancel(cycleCreatedAt: string | null, cancelledAt: string | null, now: Date = new Date()): boolean {
+  const DAY = 24 * 3600 * 1000;
+  const cycleMs = cycleCreatedAt ? new Date(cycleCreatedAt).getTime() : NaN;
+  if (!Number.isFinite(cycleMs)) return false;
+  if (now.getTime() - cycleMs > DUNNING_REACTIVATE_MAX_CYCLE_AGE_DAYS * DAY) return false;
+  const cancelMs = cancelledAt ? new Date(cancelledAt).getTime() : NaN;
+  if (Number.isFinite(cancelMs) && cancelMs - cycleMs > DUNNING_REACTIVATE_MAX_CANCEL_LAG_DAYS * DAY) return false;
+  return true;
+}
+
 export async function reactivateDunningCancelledSubs(workspaceId: string, customerIds: string[]): Promise<string[]> {
   const admin = createAdminClient();
   const { data: subs } = await admin.from("subscriptions")
-    .select("id, shopify_contract_id, billing_interval, billing_interval_count")
+    .select("id, shopify_contract_id, billing_interval, billing_interval_count, cancelled_at")
     .eq("workspace_id", workspaceId).in("customer_id", customerIds)
     .eq("is_internal", true).eq("status", "cancelled");
   if (!subs?.length) return [];
@@ -370,9 +391,14 @@ export async function reactivateDunningCancelledSubs(workspaceId: string, custom
   const reactivatedIds: string[] = [];
   for (const sub of subs) {
     const { data: cyc } = await admin.from("dunning_cycles")
-      .select("id").eq("workspace_id", workspaceId).eq("subscription_id", sub.id as string)
+      .select("id, created_at").eq("workspace_id", workspaceId).eq("subscription_id", sub.id as string)
       .in("status", ["exhausted", "cancelled"]).order("created_at", { ascending: false }).limit(1).maybeSingle();
     if (!cyc) continue; // not a dunning cancel — leave it
+    // ⭐ Only a RECENT dunning cancel counts. A stale cycle left on a sub the customer later
+    // cancelled themselves must not revive it (2026-11-23: a sub cancelled in the portal on 8/11,
+    // "too expensive", was restarted and charged off an unclosed April cycle when the customer
+    // fixed the card for a different sub).
+    if (!isRecentDunningCancel(cyc.created_at as string | null, (sub as { cancelled_at?: string | null }).cancelled_at ?? null)) continue;
 
     const interval = String(sub.billing_interval || "month").toLowerCase();
     const count = Number(sub.billing_interval_count || 1);

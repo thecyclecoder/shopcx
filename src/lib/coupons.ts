@@ -693,6 +693,13 @@ export async function countCouponRedemptions(
  * Returns the discount to subtract NOW, the codes to keep on the sub, and the
  * resolved coupons that should be recorded as redeemed AFTER a successful charge.
  */
+/** True for the contract's structural Subscribe & Save allocation ("Subscribe & Save",
+ *  "Subscribe and Save", "subscribe-&-save" …). Never a real coupon code. */
+export function isStructuralSubscribeAndSave(codeOrTitle: string | null | undefined): boolean {
+  const norm = String(codeOrTitle || "").toLowerCase().replace(/[^a-z&]+/g, "").replace("and", "&");
+  return norm === "subscribe&save";
+}
+
 export async function resolveRenewalDiscount(
   workspaceId: string,
   appliedDiscounts: Array<Record<string, unknown>> | null,
@@ -711,6 +718,11 @@ export async function resolveRenewalDiscount(
 
   for (const d of list) {
     const code = (d.code || d.title || "").trim();
+    // ⭐ The structural Subscribe & Save discount is NOT a coupon. The pricing engine already
+    // applies S&S to every subscription line, so a "Subscribe & Save" entry mirrored from a
+    // Shopify/Appstle contract and carried onto an internal sub at migration applied a SECOND
+    // ~25% off (2026-11-23: 15 renewals undercharged $382 since 10/29). Drop it from the sub.
+    if (isStructuralSubscribeAndSave(code)) continue;
     // Drop entries with no usable code (Appstle AUTOMATIC discounts have only a
     // title like "Buy 3 Discount" but resolve to nothing — our pricing rules
     // already apply those). Dedup repeated codes.

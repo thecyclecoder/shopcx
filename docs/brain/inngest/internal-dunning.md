@@ -12,7 +12,7 @@ Not an Inngest function itself — a library of handlers called from [[internal-
 |---|---|---|
 | `handleInternalDunningFailure(input)` | `dunning.ts` `dunningPaymentFailed`, branched on `source === "internal_subscription_renewal"` | Opens/advances the dunning cycle, logs `payment_failures` + `customer_events`, schedules the next payday retry (moves `next_billing_date`), emails once on the first failure of the cycle, cancels on exhaustion. |
 | `closeInternalDunningOnSuccess(ws, subId, internalContractId, custId)` | `internal-subscription-renewals.ts` success path | Marks an open cycle `recovered` + logs `payment.recovered` (replaces the Appstle `billing-success` webhook). |
-| `reactivateDunningCancelledSubs(ws, customerIds[])` | `portal/handlers/payment-method-update.ts` recover flow | Reactivates subs cancelled **by dunning** (have an `exhausted`/`cancelled` cycle — never voluntary cancels), sets a fresh `next_billing_date`, marks cycle `recovered`. Returns count. |
+| `reactivateDunningCancelledSubs(ws, customerIds[])` | `portal/handlers/payment-method-update.ts` recover flow | Reactivates subs cancelled **by dunning** (have an `exhausted`/`cancelled` cycle — never voluntary cancels), sets a fresh `next_billing_date`, marks cycle `recovered`. Returns count. Gated by the pure `isRecentDunningCancel(cycleCreatedAt, cancelledAt)` (cycle ≤ `DUNNING_REACTIVATE_MAX_CYCLE_AGE_DAYS`=90d old; `cancelled_at` ≤ `DUNNING_REACTIVATE_MAX_CANCEL_LAG_DAYS`=60d after the cycle opened) so a stale cycle never revives a later voluntary cancel (2026-11-23). |
 
 ## Key behaviour
 

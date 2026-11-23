@@ -28,6 +28,7 @@ async function vaultAndMigratePaymentMethod(input: VaultAndMigrateInput): Promis
 2. `vaultPaymentMethod(workspaceId, braintreeCustomerId, nonce, deviceData)` — Braintree `paymentMethod.create` with `verifyCard + makeDefault`.
 3. `savePaymentMethod({ ..., makeDefault })` — upsert into `customer_payment_methods`; demotes other defaults in the customer's link group when `makeDefault=true`.
 4. If `migrate !== false`: `migrateCustomerAppstleSubsToInternal(workspaceId, customerId, { isRecovery })` — sweeps the customer's Appstle subs to internal billing.
+5. If `retryOrderNowOnMigrate` (default `isRecovery`) and subs migrated: `dispatchOrderNowRetryOnMigrate` per migrated sub, with `recovery: !!isRecovery` so the charge re-anchors `next_billing_date` to charge + one interval (it races [[payment-recovery]]'s recovery event for the same cycle and usually wins — see that page's 2026-11-23 gotcha).
 
 **Failure behavior:**
 - Vault failure → throws. Callers decide: portal returns 502; the journey returns 502 AND keeps the session `in_progress` (fail closed — no completion signal, client shows retry).
