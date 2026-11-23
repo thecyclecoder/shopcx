@@ -26,6 +26,7 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import {
   computeExperimentMetrics,
+  welchTwoSampleCI,
   type ArmMetrics,
 } from "@/lib/subscriber-experiment-metrics";
 import {
@@ -86,6 +87,8 @@ export interface ArmResults {
   netRevenueCents: number;
   /** Mean 90-day net MERCHANDISE revenue per person-group, in cents (the PRIMARY metric, ex tax/shipping). */
   netRevenuePerCustomerCents: number;
+  /** Sample variance (÷ n−1) of per-person net merchandise revenue, in cents² — feeds the verdict's Welch t-test. */
+  netRevenueVarianceCents2: number;
   /** Σ merchandise charges in-window (ex tax/shipping), in cents. */
   grossRevenueCents: number;
   /** Σ settled refunds netted out, in cents. */
@@ -128,6 +131,13 @@ export interface ReminderVerdict {
   leadingArm: ExperimentArm | null;
   /** Treatment − holdout net revenue per customer, in cents (the primary-metric delta). */
   netRevenuePerCustomerLiftCents: number;
+  /** Confidence interval on that lift (Welch's t-test at the experiment's alpha), in cents — null
+   *  until both arms have ≥2 groups. The banner shows this so a lift is never read as a win without
+   *  its uncertainty. */
+  confidenceIntervalCents: { lowCents: number; highCents: number } | null;
+  /** Whether the lift is statistically significant at the experiment's alpha (the CI excludes 0). A
+   *  winner is only declared when this is true. */
+  significant: boolean;
   /** The PERSISTED terminal verdict label once the cron has recorded it (null while derived). */
   verdict: string | null;
   /** false once the persisted verdict/guardrail engine has run; true for the pre-evaluation fallback. */
@@ -244,6 +254,7 @@ export function buildArmResults(
     engagement,
     netRevenueCents: metrics.netRevenueCents,
     netRevenuePerCustomerCents: metrics.netRevenuePerCustomerCents,
+    netRevenueVarianceCents2: metrics.netRevenueVarianceCents2,
     grossRevenueCents: metrics.grossRevenueCents,
     refundsCents: metrics.refundsCents,
     refundRate,
@@ -293,11 +304,25 @@ export function deriveVerdict(
   if (arms.treatment.customerGroups > 0 || arms.holdout.customerGroups > 0) {
     leadingArm = lift >= 0 ? "treatment" : "holdout";
   }
+  // Welch's t-test at the experiment's pre-registered alpha (default 0.05) on per-person net
+  // merchandise revenue — the lift is only a WIN when its CI excludes 0. Computed live so the banner
+  // always shows the interval, even before the cron has persisted the terminal verdict.
+  const alpha = experiment?.alpha ?? 0.05;
+  const ci =
+    arms.treatment.customerGroups >= 2 && arms.holdout.customerGroups >= 2
+      ? welchTwoSampleCI(
+          arms.treatment.netRevenuePerCustomerCents, arms.treatment.netRevenueVarianceCents2, arms.treatment.customerGroups,
+          arms.holdout.netRevenuePerCustomerCents, arms.holdout.netRevenueVarianceCents2, arms.holdout.customerGroups,
+          alpha,
+        )
+      : null;
   return {
     experimentStatus,
     concluded,
     leadingArm,
     netRevenuePerCustomerLiftCents: lift,
+    confidenceIntervalCents: ci ? { lowCents: ci.lowCents, highCents: ci.highCents } : null,
+    significant: ci?.significant ?? false,
     verdict: null,
     derived: true,
   };

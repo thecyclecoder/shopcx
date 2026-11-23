@@ -26,7 +26,7 @@ import {
   setExperimentStatus,
   PRE_RENEWAL_EXPERIMENT_SLUG,
 } from "@/lib/subscriber-experiments";
-import { DEFAULT_WINDOW_DAYS } from "@/lib/subscriber-experiment-metrics";
+import { DEFAULT_WINDOW_DAYS, welchTwoSampleCI } from "@/lib/subscriber-experiment-metrics";
 import { getReminderTestResults, type ArmResults } from "@/lib/retention/reminder-results-sdk";
 
 type Admin = ReturnType<typeof createAdminClient>;
@@ -44,17 +44,22 @@ export type PauseWriter = typeof setExperimentStatus;
 /** Default anytime-valid significance level for a guardrail trip. */
 export const GUARDRAIL_ALPHA = 0.05;
 
-/** Hard absolute floors — a trip regardless of significance (CEO: STOP/complaint spikes etc.). */
+/** Hard floors — a trip regardless of the significance test (CEO: STOP/complaint spikes etc.). The
+ *  cancel/refund floors are HOLDOUT-RELATIVE (treatment's EXCESS over holdout), not absolute on the
+ *  treatment arm alone — normal 90-day churn hits both arms equally, so an absolute floor on
+ *  treatment would pause the test on baseline churn the reminder never caused. Only the SMS STOP
+ *  floor stays absolute (the holdout sends no SMS, so there is no holdout baseline to net against). */
 export const HARD_FLOORS = {
-  /** Treatment SMS STOP opt-out rate this high is a hard stop no matter the sample. */
+  /** Treatment SMS STOP opt-out rate this high is a hard stop no matter the sample (ABSOLUTE — the
+   *  holdout sends nothing, so there is no holdout rate to subtract). */
   smsOptOutRate: 0.05,
-  /** Treatment refund rate this high is a hard stop. */
-  refundRate: 0.2,
-  /** Treatment voluntary-cancel rate this high is a hard stop. */
-  voluntaryCancelRate: 0.2,
+  /** Treatment refund rate exceeding holdout's by this many points (e.g. 0.05 = 5pts) is a hard stop. */
+  refundExcessOverHoldout: 0.05,
+  /** Treatment voluntary-cancel rate exceeding holdout's by this many points (0.05 = 5pts) is a hard stop. */
+  voluntaryCancelExcessOverHoldout: 0.05,
   /** Treatment net merchandise revenue per person this far BELOW holdout (relative) is a hard stop. */
   netRevenueRelativeDrop: 0.2,
-  /** Minimum groups per arm before the net-revenue floor can trip (avoids tiny-sample noise). */
+  /** Minimum groups per arm before the net-revenue + excess floors can trip (avoids tiny-sample noise). */
   netRevenueMinN: 50,
 } as const;
 
@@ -115,22 +120,29 @@ export function evaluateGuardrails(
   const nT = treatment.customerGroups;
   const nH = holdout.customerGroups;
 
-  // Voluntary cancel rate.
+  // Both arms must clear the min-sample bar before an EXCESS floor can trip (avoids tiny-sample noise
+  // and matches the net-revenue floor's gate).
+  const haveMinN = nT >= HARD_FLOORS.netRevenueMinN && nH >= HARD_FLOORS.netRevenueMinN;
+
+  // Voluntary cancel rate — trip on significance OR treatment's EXCESS over holdout (never on
+  // treatment's absolute rate, which includes baseline churn the reminder didn't cause).
   {
     const pT = treatment.voluntaryCancelRate;
     const pH = holdout.voluntaryCancelRate;
-    const tripped = proportionHarmTripped(pT, nT, pH, nH, alpha) || pT >= HARD_FLOORS.voluntaryCancelRate;
+    const excessTripped = haveMinN && pT - pH >= HARD_FLOORS.voluntaryCancelExcessOverHoldout;
+    const tripped = proportionHarmTripped(pT, nT, pH, nH, alpha) || excessTripped;
     signals.push({ key: "voluntary_cancel", tripped, treatment: pT, holdout: pH,
-      reason: tripped ? `treatment voluntary-cancel rate ${(pT * 100).toFixed(1)}% vs holdout ${(pH * 100).toFixed(1)}%` : "" });
+      reason: tripped ? `treatment voluntary-cancel rate ${(pT * 100).toFixed(1)}% vs holdout ${(pH * 100).toFixed(1)}% (excess ${((pT - pH) * 100).toFixed(1)}pts)` : "" });
   }
 
-  // Refund rate.
+  // Refund rate — trip on significance OR treatment's EXCESS over holdout.
   {
     const pT = treatment.refundRate;
     const pH = holdout.refundRate;
-    const tripped = proportionHarmTripped(pT, nT, pH, nH, alpha) || pT >= HARD_FLOORS.refundRate;
+    const excessTripped = haveMinN && pT - pH >= HARD_FLOORS.refundExcessOverHoldout;
+    const tripped = proportionHarmTripped(pT, nT, pH, nH, alpha) || excessTripped;
     signals.push({ key: "refund", tripped, treatment: pT, holdout: pH,
-      reason: tripped ? `treatment refund rate ${(pT * 100).toFixed(1)}% vs holdout ${(pH * 100).toFixed(1)}%` : "" });
+      reason: tripped ? `treatment refund rate ${(pT * 100).toFixed(1)}% vs holdout ${(pH * 100).toFixed(1)}% (excess ${((pT - pH) * 100).toFixed(1)}pts)` : "" });
   }
 
   // SMS STOP opt-out rate (treatment is the only arm that sends; holdout ≈ 0).
@@ -170,16 +182,30 @@ export interface VerdictResult {
 
 /**
  * Classify the terminal verdict on the primary metric (90-day net merchandise revenue per person).
- * PURE — the caller gates on sample-complete + windows-closed before calling. A relative lift under
- * 1% of holdout is `no_difference`.
+ * PURE — the caller gates on sample-complete + windows-closed before calling.
+ *
+ * A winner (`treatment_wins`/`holdout_wins`) is declared ONLY when a two-sample Welch t-test on
+ * per-person net merchandise revenue REJECTS at the experiment's pre-registered `alpha` — i.e. the
+ * confidence interval on the lift excludes 0. The old 1%-relative rule named a winner on noise the
+ * test (powered for ~10% MDE) can't distinguish from zero; it's gone. The verdict detail reports the
+ * lift with its `confidenceInterval` { lowCents, highCents } so the reader sees the uncertainty.
  */
-export function evaluateVerdict(treatment: ArmResults, holdout: ArmResults): VerdictResult {
+export function evaluateVerdict(
+  treatment: ArmResults,
+  holdout: ArmResults,
+  alpha: number = GUARDRAIL_ALPHA,
+): VerdictResult {
   const tRev = treatment.netRevenuePerCustomerCents;
   const hRev = holdout.netRevenuePerCustomerCents;
   const liftCents = tRev - hRev;
   const relative = hRev !== 0 ? liftCents / Math.abs(hRev) : (tRev > 0 ? 1 : 0);
+  const ci = welchTwoSampleCI(
+    tRev, treatment.netRevenueVarianceCents2, treatment.customerGroups,
+    hRev, holdout.netRevenueVarianceCents2, holdout.customerGroups,
+    alpha,
+  );
   let verdict: VerdictResult["verdict"] = "no_difference";
-  if (Math.abs(relative) >= 0.01) verdict = liftCents > 0 ? "treatment_wins" : "holdout_wins";
+  if (ci.significant) verdict = liftCents > 0 ? "treatment_wins" : "holdout_wins";
   return {
     verdict,
     detail: {
@@ -188,6 +214,10 @@ export function evaluateVerdict(treatment: ArmResults, holdout: ArmResults): Ver
       holdoutPerCustomerCents: hRev,
       liftCents,
       relativeLift: relative,
+      alpha,
+      significant: ci.significant,
+      confidenceInterval: { lowCents: ci.lowCents, highCents: ci.highCents },
+      degreesOfFreedom: ci.df,
       treatmentN: treatment.customerGroups,
       holdoutN: holdout.customerGroups,
     },
@@ -292,18 +322,19 @@ export async function evaluateWorkspaceGuardrails(
   if (results.guardrails.sampleComplete) {
     const closed = await allWindowsClosed(workspaceId, results.windowDays || DEFAULT_WINDOW_DAYS, now, admin);
     if (closed) {
-      const verdict = evaluateVerdict(treatment, holdout);
+      const verdict = evaluateVerdict(treatment, holdout, experiment.alpha ?? GUARDRAIL_ALPHA);
       await recordExperimentVerdict(workspaceId, PRE_RENEWAL_EXPERIMENT_SLUG, verdict, {
         by: "guardrail",
         reason: "pre-registered sample reached + all windows closed",
       }, admin);
+      const ci = verdict.detail.confidenceInterval as { lowCents: number; highCents: number };
       await notifyCeoOnce(
         admin,
         workspaceId,
         experiment.id,
         "verdict",
         "Pre-renewal reminder test reached its verdict",
-        `The pre-renewal reminder 50/50 test concluded: ${verdict.verdict}. Treatment net merchandise revenue/person ${(treatment.netRevenuePerCustomerCents / 100).toFixed(2)} vs holdout ${(holdout.netRevenuePerCustomerCents / 100).toFixed(2)}.`,
+        `The pre-renewal reminder 50/50 test concluded: ${verdict.verdict}. Treatment net merchandise revenue/person ${(treatment.netRevenuePerCustomerCents / 100).toFixed(2)} vs holdout ${(holdout.netRevenuePerCustomerCents / 100).toFixed(2)} (lift CI $${(ci.lowCents / 100).toFixed(2)} to $${(ci.highCents / 100).toFixed(2)} at alpha ${experiment.alpha ?? GUARDRAIL_ALPHA}).`,
         { verdict: verdict.verdict, detail: verdict.detail },
       );
       return { evaluated: true, tripped: false, concluded: true };

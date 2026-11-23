@@ -31,13 +31,29 @@ intervals in the harmful direction)? Variance proxy floored for conservatism.
 ### `evaluateGuardrails(treatment, holdout, alpha?)` — pure → `GuardrailEvaluation`
 
 Every guardrail (voluntary cancel, refund, SMS STOP opt-out, net merchandise revenue) trips on EITHER
-the anytime-valid test OR a hard absolute floor (`HARD_FLOORS`). Takes two `ArmResults`
-([[reminder-results-sdk]]). Net-revenue only trips on a material relative drop with ≥50/arm.
+the anytime-valid test OR a hard floor (`HARD_FLOORS`). Takes two `ArmResults`
+([[reminder-results-sdk]]).
 
-### `evaluateVerdict(treatment, holdout)` — pure → `VerdictResult`
+- **Cancel + refund floors are HOLDOUT-RELATIVE** (launch follow-up Phase 2): they trip on treatment's
+  EXCESS over holdout (`voluntaryCancelExcessOverHoldout` / `refundExcessOverHoldout`, 0.05 = 5 points),
+  not the treatment arm's absolute rate. Normal 90-day churn hits both arms equally, so an absolute
+  floor on treatment alone would pause the test on baseline churn the reminder never caused. Gated on
+  both arms clearing `netRevenueMinN` (50).
+- **The SMS STOP opt-out floor stays ABSOLUTE** (`smsOptOutRate` 0.05) — the holdout sends no SMS, so
+  there is no holdout baseline to net against.
+- Net-revenue only trips on a material relative drop (`netRevenueRelativeDrop`) with ≥`netRevenueMinN`/arm.
+
+### `evaluateVerdict(treatment, holdout, alpha?)` — pure → `VerdictResult`
 
 Classifies the terminal verdict on the primary metric (90-day net merchandise revenue per person):
-`treatment_wins` | `holdout_wins` | `no_difference` (< 1% relative lift).
+`treatment_wins` | `holdout_wins` | `no_difference`. A winner is declared ONLY when a two-sample
+**Welch's t-test** on per-person net merchandise revenue REJECTS at the experiment's pre-registered
+`alpha` — i.e. the `confidenceInterval` { lowCents, highCents } on the lift excludes 0 (launch
+follow-up Phase 2). The old 1%-relative-lift rule named a winner on noise the test (powered for ~10%
+MDE) can't tell from zero; it's gone. The verdict `detail` reports the lift, the `confidenceInterval`,
+`alpha`, `significant`, and the Welch-Satterthwaite `degreesOfFreedom`. The Welch helper
+(`welchTwoSampleCI` + `studentTQuantile`) lives in [[subscriber-experiment-metrics]] and reads each
+arm's `netRevenueVarianceCents2` (sample variance of per-person net revenue, added there).
 
 ### `evaluateWorkspaceGuardrails(workspaceId, now, admin)` / `runSubscriberExperimentGuardrails(now?, admin?)`
 

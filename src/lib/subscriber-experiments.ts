@@ -160,8 +160,9 @@ export interface PowerCalcInput {
 }
 
 /** Inverse standard-normal CDF (Acklam's rational approximation) — z for a cumulative probability
- *  p, used to turn alpha/power into critical z-values without a stats dependency. */
-function invNorm(p: number): number {
+ *  p, used to turn alpha/power into critical z-values without a stats dependency. Exported so the
+ *  verdict engine's Welch t-test can derive a t-quantile from z without a stats dependency. */
+export function invNorm(p: number): number {
   // coefficients
   const a = [-3.969683028665376e1, 2.209460984245205e2, -2.759285104469687e2, 1.38357751867269e2, -3.066479806614716e1, 2.506628277459239];
   const b = [-5.447609879822406e1, 1.615858368580409e2, -1.556989798598866e2, 6.680131188771972e1, -1.328068155288572e1];
