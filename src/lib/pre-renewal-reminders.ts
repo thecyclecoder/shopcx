@@ -49,7 +49,13 @@ import { ensureFreshSubscriptionTaxQuote } from "@/lib/avalara-subscription";
 import {
   resolveRecipientTimezone,
   computeSendInstant,
+  isValidIanaTimezone,
+  isWithinSmsSendWindow,
+  localDateKey,
+  SMS_WINDOW_START_HOUR,
+  SMS_WINDOW_END_HOUR,
   type CustomerForTzResolve,
+  type TimezoneSource,
 } from "@/lib/marketing-text-timezone";
 import { sendSMS } from "@/lib/twilio";
 
@@ -67,9 +73,14 @@ const WINDOW_HIGH_DAYS = PRE_RENEWAL_WINDOW_DAYS + 1; // 6
 /** A sub edited within this many days was just acted on — skip (don't re-nudge). */
 export const PRE_RENEWAL_RECENT_EDIT_DAYS = 3;
 
-/** Local hour the SMS targets — well inside business hours so quiet hours (night)
- *  are never breached. The email is transactional and sends immediately. */
+/** Local hour the SMS targets — well inside the 9 AM-8 PM send window so quiet hours
+ *  (night) are never breached. The email is transactional and sends immediately. */
 export const PRE_RENEWAL_SMS_LOCAL_HOUR = 11;
+
+/** Twilio SendAt must be >=15 min out; we keep a 16-min buffer. A target instant closer than
+ *  this (or already past) rolls to 11:00 local the NEXT day — we NEVER send a reminder text
+ *  without a SendAt, so a passed-slot can't fall through to an immediate (possibly night) send. */
+const SMS_MIN_SCHEDULE_LEAD_MS = 16 * 60_000;
 
 /** Workspace timezone fallback when a recipient's tz can't be resolved. */
 const DEFAULT_FALLBACK_TZ = "America/Chicago";
@@ -613,12 +624,9 @@ async function sendTreatmentReminder(
     ? `Your next order is coming up. Here's what will renew:\n${renewalLines.join("\n")}\n\nReview it — swap flavors, change quantities, update your delivery date, or adjust anything before we bill.`
     : "Your next order is coming up soon. Take a moment to review it — swap flavors, change quantities, update your delivery date, or adjust anything before we bill.";
 
-  // Short SMS: date + amount + link (the journey url is appended by maybeSendConsentedSms).
+  // Short SMS: the house block layout (hook / CTA + link / deadline) is built inside
+  // maybeSendConsentedSms from the earliest in-window preview.
   const firstPreview = previews[0];
-  const smsAmount = firstPreview ? fmtPreviewAmount(firstPreview) : null;
-  const smsLead = firstPreview
-    ? `Your next order renews ${fmtDate(firstPreview.nextBillingDate)}${smsAmount ? ` — ${smsAmount}` : ""}. Review or change it before we bill:`
-    : "Your next order is coming up soon. Review or change it before we bill:";
 
   // ── Phase 2: transactional email (goes to every treatment customer). ──
   if (customer?.email && token) {
@@ -656,12 +664,12 @@ async function sendTreatmentReminder(
     update.email_error = "customer has no email";
   }
 
-  // ── Phase 3: consented SMS (gated on marketing consent + quiet hours). ──
+  // ── Phase 3: consented SMS (gated on marketing consent + the 9 AM-8 PM local window). ──
   const smsResult = await maybeSendConsentedSms(
     workspaceId,
     customer,
     token,
-    smsLead,
+    firstPreview,
     now,
   );
   Object.assign(update, smsResult.update);
@@ -713,17 +721,121 @@ export function classifySmsConsent(customer: SmsCustomer | null | undefined): Sm
 }
 
 /**
- * Send the reminder by SMS ONLY to a customer with live marketing consent, at their
- * local send window with quiet hours respected. A non-consented customer, a customer
- * who sent STOP (sms_marketing_status 'unsubscribed'), or a bad phone gets NO text —
- * the suppression is counted on the ledger so the M3 opt-out/complaint guardrails can
- * read it. Never texts a suppressed or non-consented customer (TCPA).
+ * The quiet-hours scheduling decision for a reminder text (TCPA). PURE — no I/O, exported for
+ * testing. A text is only ever scheduled for an instant that is provably between 9 AM and 8 PM in
+ * the recipient's VERIFIED local time; if no such instant can be guaranteed (fallback or invalid
+ * timezone), the person gets no text (email only).
+ */
+export type SmsSendDecision =
+  | {
+      send: false;
+      smsStatus: "suppressed_no_timezone" | "suppressed_quiet_hours";
+      reason: string;
+      timezone: string;
+      source: TimezoneSource;
+    }
+  | { send: true; sendAt: Date; timezone: string; source: TimezoneSource };
+
+/**
+ * Decide IF and WHEN a reminder text may be sent to this recipient:
+ *
+ *   • Resolve the recipient's timezone. If the resolver fell back to the workspace default
+ *     (source 'fallback') or the resolved zone is not a valid IANA name, we do NOT actually know
+ *     the recipient's local time → `suppressed_no_timezone`, email only. This closes the gap where
+ *     a Hawaii/Alaska customer got the Central-time 11 AM text at 7-8 AM local, and the gap where
+ *     an invalid `customers.timezone` string was silently treated as UTC and sent immediately.
+ *   • Otherwise target 11:00 on the recipient's LOCAL calendar date today; if that instant is
+ *     already past or <16 min away, roll to 11:00 local TOMORROW (Twilio SendAt allows up to 7
+ *     days). We ALWAYS return a SendAt — never an immediate, possibly-night send.
+ *   • Hard guard: assert the chosen instant is inside the 9 AM-8 PM local window. 11:00 local
+ *     always is, but the assert fails closed (`suppressed_quiet_hours`) against any DST / resolver
+ *     edge rather than risk a quiet-hours breach.
+ */
+export function planReminderSmsSend(
+  customer: CustomerForTzResolve | null | undefined,
+  now: Date,
+): SmsSendDecision {
+  const tz = resolveRecipientTimezone(customer, DEFAULT_FALLBACK_TZ);
+
+  // No verified timezone → no text. A fallback resolution means we don't know the recipient's
+  // zone; an invalid IANA string can't be trusted (getTimezoneOffsetMinutes would treat it as UTC).
+  if (tz.source === "fallback" || !isValidIanaTimezone(tz.timezone)) {
+    return {
+      send: false,
+      smsStatus: "suppressed_no_timezone",
+      reason:
+        tz.source === "fallback"
+          ? "no verified timezone (resolver fell back to workspace default) — email only"
+          : `invalid timezone '${tz.timezone}' — email only`,
+      timezone: tz.timezone,
+      source: tz.source,
+    };
+  }
+
+  // Target 11:00 on the recipient's LOCAL calendar date; roll to tomorrow if today's slot is
+  // past / too close for Twilio's minimum lead. localDateKey is non-null here (zone validated above).
+  const minScheduleAt = now.getTime() + SMS_MIN_SCHEDULE_LEAD_MS;
+  const todayKey = localDateKey(now, tz.timezone) ?? toDateKey(now);
+  let sendAt = computeSendInstant(todayKey, PRE_RENEWAL_SMS_LOCAL_HOUR, tz.timezone);
+  if (sendAt.getTime() < minScheduleAt) {
+    const tomorrowKey =
+      localDateKey(new Date(now.getTime() + 86_400_000), tz.timezone) ?? toDateKey(new Date(now.getTime() + 86_400_000));
+    sendAt = computeSendInstant(tomorrowKey, PRE_RENEWAL_SMS_LOCAL_HOUR, tz.timezone);
+  }
+
+  // Fail closed: never schedule outside 9 AM-8 PM local, whatever the computation produced.
+  if (!isWithinSmsSendWindow(sendAt, tz.timezone)) {
+    return {
+      send: false,
+      smsStatus: "suppressed_quiet_hours",
+      reason: `computed send ${sendAt.toISOString()} is outside ${SMS_WINDOW_START_HOUR}:00-${SMS_WINDOW_END_HOUR}:00 local`,
+      timezone: tz.timezone,
+      source: tz.source,
+    };
+  }
+
+  return { send: true, sendAt, timezone: tz.timezone, source: tz.source };
+}
+
+/**
+ * Build the reminder SMS body in the house block layout (sms-marketing SKILL.md step 4): a short
+ * hook block (what renews + when + the amount label), a blank line, a CTA label line with the link
+ * on its own line in the middle, a blank line, then a short deadline line. GSM-7 only (no em
+ * dashes, straight quotes). PURE — exported for testing.
+ */
+export function buildReminderSmsBody(
+  preview: ReminderChargePreview | undefined,
+  journeyUrl: string,
+): string {
+  const hook = (() => {
+    if (!preview) return "Your next order is coming up soon.";
+    const when = fmtDate(preview.nextBillingDate);
+    if (preview.comp) return `Your next order renews ${when} and it is on us.`;
+    const amount = fmtPreviewAmount(preview); // '$X' | '$X plus tax' | null (never comp here)
+    return amount
+      ? `Your next order renews ${when} for ${amount}.`
+      : `Your next order renews ${when}.`;
+  })();
+  const deadline = preview
+    ? `Make changes before ${fmtDate(preview.nextBillingDate)}.`
+    : "Make changes before it renews.";
+
+  // hook / blank / CTA label + link-on-its-own-line / blank / deadline.
+  return `${hook}\n\nReview your order:\n${journeyUrl}\n\n${deadline}`;
+}
+
+/**
+ * Send the reminder by SMS ONLY to a customer with live marketing consent, scheduled for their
+ * local 9 AM-8 PM window. A non-consented customer, a customer who sent STOP (sms_marketing_status
+ * 'unsubscribed'), a bad phone, OR a customer whose local time can't be verified gets NO text — the
+ * suppression is counted on the ledger (the email still goes). Never texts a suppressed or
+ * non-consented customer and never sends without a SendAt inside the window (TCPA).
  */
 async function maybeSendConsentedSms(
   workspaceId: string,
   customer: SmsCustomer | null | undefined,
   token: string | null,
-  leadIn: string,
+  preview: ReminderChargePreview | undefined,
   now: Date,
 ): Promise<{ sent: boolean; suppressed: boolean; update: Record<string, unknown> }> {
   const update: Record<string, unknown> = {};
@@ -742,27 +854,34 @@ async function maybeSendConsentedSms(
     return { sent: false, suppressed: false, update };
   }
 
-  // Resolve the recipient's timezone + compute the local send instant. Targeting a
-  // business-hours local hour inherently respects quiet hours (no night sends).
-  const tz = resolveRecipientTimezone(customer, DEFAULT_FALLBACK_TZ);
-  const sendAt = computeSendInstant(toDateKey(now), PRE_RENEWAL_SMS_LOCAL_HOUR, tz.timezone);
-  update.sms_resolved_timezone = tz.timezone;
-  update.sms_timezone_source = tz.source;
+  // Decide if/when the text may send — only ever an instant inside the recipient's verified
+  // 9 AM-8 PM local window. Fallback / invalid timezone → no text, email only.
+  const plan = planReminderSmsSend(customer, now);
+  update.sms_resolved_timezone = plan.timezone;
+  update.sms_timezone_source = plan.source;
+  if (!plan.send) {
+    update.sms_status = plan.smsStatus;
+    update.sms_suppression_reason = plan.reason;
+    return { sent: false, suppressed: true, update };
+  }
 
-  // Twilio SendAt must be ≥15 min out and ≤7 days. If the local window already
-  // passed today (or is <16 min away), send immediately rather than schedule.
-  const minScheduleAt = new Date(now.getTime() + 16 * 60_000);
-  const useSchedule = sendAt.getTime() >= minScheduleAt.getTime();
+  // Defense in depth: re-assert the window at the exact instant we'll deliver, immediately before
+  // the send. If it somehow fails, suppress rather than breach quiet hours.
+  if (!isWithinSmsSendWindow(plan.sendAt, plan.timezone)) {
+    update.sms_status = "suppressed_quiet_hours";
+    update.sms_suppression_reason = `send instant ${plan.sendAt.toISOString()} failed the window guard at dispatch`;
+    return { sent: false, suppressed: true, update };
+  }
 
   const journeyUrl = getJourneyUrl(token);
-  const body = `${leadIn}\n\n${journeyUrl}`;
+  const body = buildReminderSmsBody(preview, journeyUrl);
 
   try {
-    // verdict.allowed guarantees a consented customer with a phone.
-    const res = await sendSMS(workspaceId, customer!.phone!, body, useSchedule ? { sendAt } : undefined);
+    // verdict.allowed guarantees a consented customer with a phone; we ALWAYS pass SendAt.
+    const res = await sendSMS(workspaceId, customer!.phone!, body, { sendAt: plan.sendAt });
     if (res.success) {
-      update.sms_status = useSchedule ? "scheduled" : "sent";
-      update.sms_scheduled_send_at = useSchedule ? sendAt.toISOString() : new Date().toISOString();
+      update.sms_status = "scheduled";
+      update.sms_scheduled_send_at = plan.sendAt.toISOString();
       return { sent: true, suppressed: false, update };
     }
     update.sms_status = "failed";
