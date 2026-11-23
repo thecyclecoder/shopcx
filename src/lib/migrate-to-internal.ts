@@ -736,6 +736,37 @@ export async function migrateContractToInternalComp(
   }
 }
 
+/**
+ * The one-time lines sitting in a ShopCX contract's UNBILLED billing-cycle edits, as internal
+ * `one_time_next_renewal` items (a $0 line → `is_gift`, priced $0 by the engine; a paid line keeps
+ * its price as the override). They ride the first internal renewal, then the renewal engine drops
+ * them. Non-fatal: a read failure logs loudly and migrates the recurring lines alone.
+ */
+export async function carryPendingShopcxOneTimeLines(
+  workspaceId: string,
+  contractId: string,
+): Promise<Array<Record<string, unknown>>> {
+  const { readPendingCycleEdits } = await import("@/lib/commerce/shopify-subscription-client");
+  const { resolveVariant, buildOneTimeGiftItem } = await import("@/lib/internal-subscription");
+  const pending = await readPendingCycleEdits(workspaceId, contractId);
+  if (!pending.success) {
+    console.error(`[migrate-to-internal] could not read one-time cycle edits on ${contractId} — gifts may be lost:`, pending.error);
+    return [];
+  }
+  const out: Array<Record<string, unknown>> = [];
+  for (const l of pending.lines) {
+    const shopifyVid = String(l.variantId).split("/").pop() || "";
+    const resolved = shopifyVid ? await resolveVariant(workspaceId, shopifyVid) : null;
+    if (!resolved) {
+      console.error(`[migrate-to-internal] one-time line variant ${l.variantId} on ${contractId} not in catalog — not carried`);
+      continue;
+    }
+    const priceCents = Math.round(parseFloat(l.price || "0") * 100) || 0;
+    out.push(buildOneTimeGiftItem(resolved, resolved.id, l.quantity, { free: priceCents === 0, priceCents }) as Record<string, unknown>);
+  }
+  return out;
+}
+
 export async function migrateCustomerAppstleSubsToInternal(
   workspaceId: string,
   customerId: string,
@@ -852,6 +883,13 @@ export async function migrateCustomerAppstleSubsToInternal(
         // The sub's only products are excluded (e.g. ACV Gummies alone) → don't migrate it.
         // Checked BEFORE the cancel so the old engine is left exactly as it was.
         if (!items.length && excludedLines.length) { result.skipped.push({ contractId, reason: "only_excluded_products" }); continue; }
+        // ⭐ ShopCX one-time lines (win-back gifts, one-time add-ons) live in a billing-CYCLE edit,
+        // not on the base contract the reader above returns — so they silently vanished at migration
+        // (2026-11-23: a win-back free Creamer promised "with your next order" never shipped). Read
+        // them BEFORE the old contract is cancelled and carry them as one_time_next_renewal items.
+        if (engine === "shopcx" && !isCancelled) {
+          items.push(...(await carryPendingShopcxOneTimeLines(workspaceId, contractId)));
+        }
         interval = String((live.billingPolicy as Record<string, unknown> | undefined)?.interval || "week").toLowerCase();
         intervalCount = Number((live.billingPolicy as Record<string, unknown> | undefined)?.intervalCount || 1);
         nextBillingDate = (live.nextBillingDate as string) || new Date().toISOString();

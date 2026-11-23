@@ -58,10 +58,12 @@
     "predeploy": "npm run predeploy:static && npm run check:policy-contradictions",
     "test:all": "tsx scripts/_run-registered-tests.ts",
     "test:run-registered-tests": "tsx --test scripts/_run-registered-tests.test.ts",
+    "test:recovery-migration-bugs": "tsx --test src/lib/recovery-migration-bugs.test.ts",
     "test:portal-pause-renewal-date": "tsx --test src/lib/portal/pause-renewal-date.test.ts",
     "test:avalara-cart-product-fallback": "tsx --test src/lib/avalara-cart.product-fallback.test.ts",
     "test:support-mode": "tsx --test src/lib/support-mode.test.ts",
     "test:subscriber-experiments": "tsx --test src/lib/subscriber-experiments.test.ts",
+    "test:subscriber-experiment-guardrails": "tsx --test src/lib/subscriber-experiment-guardrails.test.ts",
     "test:pre-renewal-reminders": "tsx --test src/lib/pre-renewal-reminders.test.ts",
     "test:reminder-results-sdk": "tsx --test src/lib/retention/reminder-results-sdk.test.ts",
     "test:workspace-features": "tsx --test src/lib/workspace-features.test.ts",
@@ -335,6 +337,7 @@
     "test:error-feed-crisis-customer-actions-contract-id-noise": "tsx --test src/lib/control-tower/error-feed.crisis-customer-actions-contract-id-noise.test.ts",
     "test:error-feed-adhoc-monthly-revenue-snapshots-to-char-text-noise": "tsx --test src/lib/control-tower/error-feed.adhoc-monthly-revenue-snapshots-to-char-text-noise.test.ts",
     "test:error-feed-returns-free-label-noise": "tsx --test src/lib/control-tower/error-feed.returns-free-label-noise.test.ts",
+    "test:error-feed-returns-refund-amount-cents-noise": "tsx --test src/lib/control-tower/error-feed.returns-refund-amount-cents-noise.test.ts",
     "test:error-feed-returns-shopify-customer-id-noise": "tsx --test src/lib/control-tower/error-feed.returns-shopify-customer-id-noise.test.ts",
     "test:error-feed-customers-display-name-noise": "tsx --test src/lib/control-tower/error-feed.customers-display-name-noise.test.ts",
     "test:error-feed-loyalty-transactions-customer-id-noise": "tsx --test src/lib/control-tower/error-feed.loyalty-transactions-customer-id-noise.test.ts",
@@ -469,6 +472,7 @@
     "test:migrate-detect-drift": "tsx --test src/lib/commerce/migrate-detect-drift.test.ts",
     "test:remedy-pitch-guard": "tsx --test src/lib/remedy-selector.pitch-guard.test.ts",
     "test:winback-reactivate-choice": "tsx --test src/lib/winback-reactivate-choice.test.ts",
+    "test:winback-shortlink": "tsx --test src/lib/winback-shortlink.test.ts",
     "test:crisis-restart-swap": "tsx --test src/lib/crisis-restart-swap.test.ts"
   },
   "dependencies": {

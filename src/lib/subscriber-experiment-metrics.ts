@@ -44,10 +44,78 @@ import {
   type ExperimentArm,
   type ExperimentAssignmentRow,
   getExperiment,
+  invNorm,
   listAssignments,
 } from "@/lib/subscriber-experiments";
 
 type Admin = ReturnType<typeof createAdminClient>;
+
+/* ------------------------------------------------------------------------------------------------
+ * Two-sample significance — Welch's t-test on per-person net merchandise revenue.
+ *
+ * The verdict engine ([[subscriber-experiment-guardrails]]) and the results lens
+ * ([[retention/reminder-results-sdk]]) both need a significance test + a confidence interval on the
+ * treatment−holdout difference of per-person 90-day net merchandise revenue. Welch's t-test does NOT
+ * assume equal variances (the arms' revenue spreads differ), so it's the right two-sample test here.
+ * Pure math, no dependency: the t critical value is derived from the normal quantile (`invNorm`) via
+ * the Cornish-Fisher expansion, exact enough for the powered sample sizes this runs at.
+ * --------------------------------------------------------------------------------------------- */
+
+/** Student-t quantile at probability `p` and `df` degrees of freedom, via the Cornish-Fisher
+ *  expansion of the normal quantile. For large df it converges to `invNorm(p)` (the z-quantile). */
+export function studentTQuantile(p: number, df: number): number {
+  const z = invNorm(p);
+  if (!Number.isFinite(df) || df <= 0) return z;
+  const z2 = z * z, z3 = z2 * z, z5 = z3 * z2, z7 = z5 * z2;
+  return (
+    z +
+    (z3 + z) / (4 * df) +
+    (5 * z5 + 16 * z3 + 3 * z) / (96 * df * df) +
+    (3 * z7 + 19 * z5 + 17 * z3 - 15 * z) / (384 * df * df * df)
+  );
+}
+
+export interface WelchResult {
+  /** treatment mean − holdout mean, in cents. */
+  diffCents: number;
+  /** (1 − alpha) confidence interval on the difference, in cents. */
+  lowCents: number;
+  highCents: number;
+  /** Degrees of freedom (Welch–Satterthwaite). */
+  df: number;
+  /** The difference is significant at `alpha` ⇔ the interval excludes 0. */
+  significant: boolean;
+}
+
+/**
+ * Welch's two-sample t-test + confidence interval on a difference of means, from each arm's mean,
+ * SAMPLE variance, and n. PURE. Needs ≥2 observations per arm for a variance; with fewer (or zero
+ * standard error) it returns a degenerate CI and `significant: false` — a winner is never declared
+ * on data too thin to test.
+ */
+export function welchTwoSampleCI(
+  meanT: number, varT: number, nT: number,
+  meanH: number, varH: number, nH: number,
+  alpha: number,
+): WelchResult {
+  const diffCents = meanT - meanH;
+  if (nT < 2 || nH < 2) {
+    return { diffCents, lowCents: diffCents, highCents: diffCents, df: 0, significant: false };
+  }
+  const seT2 = varT / nT;
+  const seH2 = varH / nH;
+  const se = Math.sqrt(seT2 + seH2);
+  if (!(se > 0)) {
+    // Zero variance in both arms: the CI collapses to the point estimate. Any non-zero gap is real.
+    return { diffCents, lowCents: diffCents, highCents: diffCents, df: 0, significant: diffCents !== 0 };
+  }
+  const df = Math.pow(seT2 + seH2, 2) / (Math.pow(seT2, 2) / (nT - 1) + Math.pow(seH2, 2) / (nH - 1));
+  const tCrit = studentTQuantile(1 - alpha / 2, df);
+  const margin = tCrit * se;
+  const lowCents = diffCents - margin;
+  const highCents = diffCents + margin;
+  return { diffCents, lowCents, highCents, df, significant: lowCents > 0 || highCents < 0 };
+}
 
 /** Default measurement window — the pre-registered 90-day net-revenue horizon. */
 export const DEFAULT_WINDOW_DAYS = 90;
@@ -123,6 +191,9 @@ export interface ArmMetrics {
   refundedCustomerGroups: number;
   /** Mean net revenue per person-group, in cents (0 when the arm has no groups). */
   netRevenuePerCustomerCents: number;
+  /** SAMPLE variance (÷ n−1) of per-person-group net merchandise revenue, in cents² — the dispersion
+   *  the verdict's Welch t-test needs. 0 when the arm has fewer than 2 groups. */
+  netRevenueVarianceCents2: number;
   /** Fraction of groups with ≥1 voluntary cancel event in-window. */
   voluntaryCancelRate: number;
   /** Fraction of groups that skipped a next order in-window (next-order journey, M1). */
@@ -165,6 +236,7 @@ function emptyArm(arm: ExperimentArm): ArmMetrics {
     refundsCents: 0,
     refundedCustomerGroups: 0,
     netRevenuePerCustomerCents: 0,
+    netRevenueVarianceCents2: 0,
     voluntaryCancelRate: 0,
     skipRate: 0,
     swapAddOnRate: 0,
@@ -360,6 +432,7 @@ export async function computeExperimentMetrics(
       continue;
     }
     let net = 0;
+    let netSumSq = 0;
     let gross = 0;
     let refunds = 0;
     let refundedGroups = 0;
@@ -368,7 +441,9 @@ export async function computeExperimentMetrics(
     let swaps = 0;
     let distinctSum = 0;
     for (const g of gs) {
-      net += g.chargesCents - g.refundsCents;
+      const groupNet = g.chargesCents - g.refundsCents;
+      net += groupNet;
+      netSumSq += groupNet * groupNet;
       gross += g.chargesCents;
       refunds += g.refundsCents;
       if (g.refundsCents > 0) refundedGroups += 1;
@@ -382,6 +457,8 @@ export async function computeExperimentMetrics(
     m.refundsCents = refunds;
     m.refundedCustomerGroups = refundedGroups;
     m.netRevenuePerCustomerCents = net / n;
+    // Sample variance (÷ n−1) of per-group net revenue: Σ(x−x̄)² = Σx² − (Σx)²/n. 0 when n < 2.
+    m.netRevenueVarianceCents2 = n >= 2 ? Math.max(0, (netSumSq - (net * net) / n) / (n - 1)) : 0;
     m.voluntaryCancelRate = cancels / n;
     m.skipRate = skips / n;
     m.swapAddOnRate = swaps / n;

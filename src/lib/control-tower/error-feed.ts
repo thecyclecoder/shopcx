@@ -4592,6 +4592,67 @@ export function isForeignSupabasePostgresJsonbIlikeOnErrorEventsSampleAdhocNoise
 }
 
 /**
+ * Foreign-app noise — Postgres rejecting an ad hoc case-insensitive ILIKE filter typed against
+ * the JSONB `subscriptions.applied_discounts` column. No ShopCX code path issues a jsonb ILIKE
+ * on `applied_discounts`; the message appears on Supabase's `postgres_logs` feed only when an
+ * external tool (Supabase Studio Table Editor filter, foreign SQL client) runs a free-text
+ * ILIKE search against that JSONB column. There is no lever from ShopCX to make that query
+ * resolve — paging Platform on it (Control Tower signature `supabase-logs:51710834d2a73960`) is
+ * repair work for a query we don't own.
+ *
+ * Sibling of `isForeignSupabasePostgresJsonbIlikeOnErrorEventsSampleAdhocNoise` — same
+ * narrow-gating shape (exact operator-missing message + SELECT-lookup shape covering BOTH bare
+ * and PostgREST CTE wrapper forms), scoped to the jsonb-ILIKE-on-subscriptions.applied_discounts
+ * search instead of the jsonb-ILIKE-on-error_events.sample one.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical operator-missing shape for the jsonb ILIKE —
+ *      trimmed equal to `operator does not exist: jsonb ~~* unknown` (any leading `ERROR: `
+ *      prefix Postgres includes on the logs surface stripped), AND
+ *   2. the `parsed.query` attribute (quote-stripped + lowercased) is a SELECT-shape on
+ *      `subscriptions` — either (a) the bare `select ... from (public.)?subscriptions` shape,
+ *      OR (b) the PostgREST-generated `with pgrst_source as ( select ... )` CTE wrapper form —
+ *      AND contains the `applied_discounts ilike` marker.
+ *
+ * Narrowly gated so:
+ *   - a jsonb-ILIKE operator-missing error on ANY OTHER table still pages,
+ *   - a DIFFERENT operator-missing error on `subscriptions` still pages,
+ *   - the same message attached to a non-SELECT statement on this table (INSERT / UPDATE /
+ *     DELETE / DDL — a real code-bug shape) still pages.
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before `keyParts`
+ * is constructed — the mapRow contract treats `null` as `drop, do not record`, so returning
+ * null here fully suppresses the row (no error_event, no loop_alert, no signature). Not a
+ * `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresJsonbIlikeOnSubscriptionsAppliedDiscountsAdhocNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  if (stripped !== "operator does not exist: jsonb ~~* unknown") return false;
+  // Quote-stripped + lowercased so `"public"."subscriptions"` collapses to
+  // `public.subscriptions` and `"applied_discounts" ilike` collapses to
+  // `applied_discounts ilike`, covering both the bare and the double-quoted PostgREST-wrapper
+  // forms with one shape predicate.
+  const q = (query ?? "").trim().toLowerCase().replace(/"/g, "");
+  if (!q) return false;
+  // The free-text ILIKE marker on the jsonb `applied_discounts` column — the tell that
+  // distinguishes the Studio-click/REST search from any structural filter our own code issues.
+  if (!/\bapplied_discounts\s+ilike\b/.test(q)) return false;
+  const bareSelect =
+    /^select\b[\s\S]*\bfrom\s+(?:public\.)?subscriptions\b/.test(q);
+  // PostgREST wraps direct-REST row reads as `WITH pgrst_source AS ( SELECT ... )` — the
+  // branch requires the wrapped op to be a SELECT so a PostgREST INSERT/UPDATE inside the
+  // same envelope (a real code-write) stays captured/paged.
+  const pgrstCte =
+    /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+(?:public\.)?subscriptions\b/.test(q);
+  return bareSelect || pgrstCte;
+}
+
+/**
  * Foreign-app noise — Postgres reporting a missing column for an ad hoc SELECT lookup of
  * `orders.source`. Our `orders` table exposes `source_name`, not `source` — no ShopCX code
  * path (src/, scripts/, shopify-extension/, docs/brain/) issues a SELECT on `orders.source`.
@@ -5192,6 +5253,74 @@ export function isForeignSupabasePostgresMissingOrdersShopifyOrderNameAdhocNoise
   const bareSelect = /^select\b[\s\S]*\bfrom\s+(?:public\.)?orders\b/.test(q);
   const pgrstCte =
     /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"?(?:public"?\.)?"?orders\b/.test(q);
+  return bareSelect || pgrstCte;
+}
+
+/**
+ * Foreign-app noise — Postgres reporting a missing column for an ad hoc SELECT lookup of
+ * `replacements.shopify_order_name`. Our `replacements` table has NO `shopify_order_name`
+ * column — the replacement order's customer-visible name lives in
+ * `replacements.shopify_replacement_order_name` (see
+ * supabase/migrations/20260407100000_replacements.sql), while the bare `shopify_order_name`
+ * name belongs to the sibling `one_time_charges` table. No ShopCX code path (src/,
+ * scripts/, shopify-extension/, supabase/migrations/, docs/brain/) issues a SELECT that
+ * names `replacements.shopify_order_name`. The message appears on Supabase's
+ * `postgres_logs` feed only when an external / manual tool (Supabase Studio's Table Editor
+ * / API Docs, a foreign SQL client, a stale exploratory query, a third-party integration)
+ * does a raw `select ... shopify_order_name ... from public.replacements` lookup — or the
+ * PostgREST `WITH pgrst_source AS ( SELECT ... FROM "public"."replacements" ... )` CTE
+ * wrapper the same client emits over the REST endpoint. There is no lever from ShopCX to
+ * make that query resolve — paging Platform on it
+ * ([[../archive.d/error-feed-drop-replacements-shopify-order-name-adhoc-lookup]], Control
+ * Tower signature `supabase-logs:e1ed29c66b754f73`) is repair work for a query we don't
+ * own.
+ *
+ * Sibling of `isForeignSupabasePostgresMissingOrdersShopifyOrderNameAdhocNoise` — same
+ * narrow-gating shape, scoped to the `replacements.shopify_order_name` /
+ * `shopify_replacement_order_name` confusion on the `public.replacements` table instead of
+ * the `orders.shopify_order_name` / `order_number` one.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical column-missing shape for THIS column —
+ *      trimmed equal to `column replacements.shopify_order_name does not exist` (with or
+ *      without the `public.` qualifier and any leading `ERROR: ` prefix Postgres
+ *      includes on the logs surface), AND
+ *   2. the `parsed.query` attribute is a SELECT-lookup on `public.replacements` — either
+ *      (a) the bare `select ... from public.replacements` shape, OR (b) the PostgREST-
+ *      generated `WITH pgrst_source AS ( SELECT ... FROM "public"."replacements" ... )`
+ *      CTE wrapper form with double-quoted identifiers.
+ *
+ * Narrowly gated so:
+ *   - a column-missing error for ANY OTHER column on `replacements` (a real product-schema
+ *     regression on a live column like `shopify_replacement_order_name` / `status`) still
+ *     pages,
+ *   - a column-missing error for `shopify_order_name` on ANY OTHER table — including the
+ *     real `one_time_charges.shopify_order_name` column if it ever regresses — still pages,
+ *   - the same message attached to a DIFFERENT statement shape (INSERT / UPDATE / DELETE
+ *     / DDL on `replacements`) still pages — the pin is the SELECT-lookup shape,
+ *   - a FATAL / PANIC / constraint violation is untouched (different message).
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not record`,
+ * so returning null here fully suppresses the row (no error_event, no loop_alert, no
+ * signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresMissingReplacementsShopifyOrderNameAdhocNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column replacements.shopify_order_name does not exist" ||
+    stripped === "column public.replacements.shopify_order_name does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  const bareSelect = /^select\b[\s\S]*\bfrom\s+(?:public\.)?replacements\b/.test(q);
+  const pgrstCte =
+    /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"?(?:public"?\.)?"?replacements\b/.test(q);
   return bareSelect || pgrstCte;
 }
 
@@ -13844,9 +13973,19 @@ export function isForeignSupabasePostgresMissingAppstleContractSnapshotsContract
   // has a stable shape: `column <table>.<name> does not exist`, pinned here to
   // `appstle_contract_snapshots.contract_id` (with or without the `public.` qualifier).
   const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  // Postgres emits the TABLE-QUALIFIED `column <table>.contract_id does not exist` form
+  // only when the column is referenced with a table prefix. When the same foreign probe
+  // references the column bare (e.g. `where contract_id::text in (...)` with no
+  // `appstle_contract_snapshots.` prefix), Postgres instead emits the UNQUALIFIED
+  // double-quoted `column "contract_id" does not exist` form. Both are the same
+  // foreign-owned read — the query-shape gate below (SELECT-on-appstle_contract_snapshots,
+  // no JOIN) is what keeps the broader unqualified message from dropping anything but a
+  // read against THIS specific table, so a bare `column "contract_id" does not exist` from
+  // any other query still pages.
   const messageMatches =
     stripped === "column appstle_contract_snapshots.contract_id does not exist" ||
-    stripped === "column public.appstle_contract_snapshots.contract_id does not exist";
+    stripped === "column public.appstle_contract_snapshots.contract_id does not exist" ||
+    stripped === 'column "contract_id" does not exist';
   if (!messageMatches) return false;
   const q = (query ?? "").trim().toLowerCase();
   if (!q) return false;
@@ -16009,6 +16148,66 @@ export function isForeignSupabasePostgresMissingReturnsFreeLabelColumnAdhocNoise
   const messageMatches =
     stripped === "column returns.free_label does not exist" ||
     stripped === "column public.returns.free_label does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  const bareSelect = /^select\b[\s\S]*\bfrom\s+(?:public\.)?returns\b/.test(q);
+  const pgrstCte =
+    /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"?(?:public"?\.)?"?returns\b/.test(q);
+  return bareSelect || pgrstCte;
+}
+
+/**
+ * Foreign-app noise — Postgres reporting a missing column for an ad hoc SELECT lookup of
+ * `returns.refund_amount_cents`. Our `public.returns` table stores the refunded amount in a
+ * `net_refund_cents` column, NOT a bare `refund_amount_cents` one, and no ShopCX code path
+ * (src/, scripts/, shopify-extension/, supabase/migrations/, docs/brain/) issues a SELECT that
+ * names `returns.refund_amount_cents`. The message appears on Supabase's `postgres_logs` feed
+ * only when an external / manual tool (Supabase Studio Table Editor / API Docs, a foreign SQL
+ * client reading our `returns` table with a guessed/wrong column list, a stale exploratory
+ * query, a third-party integration) does a raw `select ... refund_amount_cents ... from
+ * public.returns` lookup — or the PostgREST `WITH pgrst_source AS ( SELECT ... FROM
+ * "public"."returns" ... )` CTE wrapper the same client emits over the REST endpoint. There is
+ * no lever from ShopCX to make that query resolve — paging Platform on it (Control Tower
+ * signature `supabase-logs:79ffb1a222c7d69e`) is repair work for a query we don't own.
+ *
+ * Sibling of `isForeignSupabasePostgresMissingReturnsFreeLabelColumnAdhocNoise` — same
+ * narrow-gating shape, scoped to the `returns.refund_amount_cents` lookup instead of the
+ * `returns.free_label` one.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical column-missing shape for THIS column —
+ *      trimmed equal to `column returns.refund_amount_cents does not exist` (with or without
+ *      the `public.` qualifier and any leading `ERROR: ` prefix Postgres includes on the logs
+ *      surface), AND
+ *   2. the `parsed.query` attribute is a SELECT-lookup on `public.returns` — either (a) the
+ *      bare `select ... from public.returns` shape, OR (b) the PostgREST-generated
+ *      `WITH pgrst_source AS ( SELECT ... FROM "public"."returns" ... )` CTE wrapper form
+ *      with double-quoted identifiers.
+ *
+ * Narrowly gated so:
+ *   - a column-missing error for ANY OTHER column on `returns` (a real product-schema
+ *     regression on a live column, including the real `net_refund_cents`) still pages,
+ *   - a column-missing error for `refund_amount_cents` on ANY OTHER table still pages,
+ *   - the same message attached to a DIFFERENT statement shape (INSERT / UPDATE / DELETE /
+ *     DDL on `returns`) still pages — the pin is the SELECT-lookup shape,
+ *   - a FATAL / PANIC / constraint violation is untouched (different message).
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not record`,
+ * so returning null here fully suppresses the row (no error_event, no loop_alert, no
+ * signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresMissingReturnsRefundAmountCentsColumnAdhocNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column returns.refund_amount_cents does not exist" ||
+    stripped === "column public.returns.refund_amount_cents does not exist";
   if (!messageMatches) return false;
   const q = (query ?? "").trim().toLowerCase();
   if (!q) return false;

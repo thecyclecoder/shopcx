@@ -44,7 +44,8 @@ import {
 import { resolveEffectiveSwitch } from "@/lib/control-tower/kill-switch-resolver";
 import { generateJourneyToken, getJourneyUrl } from "@/lib/journey-tokens";
 import { sendJourneyCTA } from "@/lib/email";
-import { resolveSubscriptionPricing } from "@/lib/pricing";
+import { priceSubscription, PriceInvariantError } from "@/lib/commerce/price";
+import { ensureFreshSubscriptionTaxQuote } from "@/lib/avalara-subscription";
 import {
   resolveRecipientTimezone,
   computeSendInstant,
@@ -248,9 +249,22 @@ export interface ReminderChargePreview {
   nextBillingDate: string | null;
   /** Product items that will renew — Shipping Protection lines excluded (not products). */
   items: ReminderChargePreviewItem[];
-  /** The exact amount the renewal will charge, in cents — or null when it can't be resolved
-   *  exactly (the reminder then omits the amount rather than showing a guess). */
+  /** The FULL amount the renewal will charge, in cents — merchandise after discounts + shipping +
+   *  protection + tax when `amountLabel` is 'total', or the pre-tax base when `amountLabel` is
+   *  'plus tax'. Null when it can't be resolved at all (the reminder then omits the amount). */
   amountCents: number | null;
+  /** Shipping the renewal will charge, in cents; null when not resolvable. */
+  shippingCents: number | null;
+  /** Tax the renewal will charge, in cents; null when it can't be quoted exactly before billing
+   *  (Shopify-computed at billing for shopcx subs, or an Avalara quote that didn't resolve) — the
+   *  amount is then shown 'plus tax' rather than as a bare number. */
+  taxCents: number | null;
+  /** 'total' ⇒ `amountCents` already includes tax (the exact charge). 'plus tax' ⇒ tax is excluded
+   *  and unquotable, so the amount must render as "$X plus tax", never a bare pre-tax number. */
+  amountLabel: "total" | "plus tax";
+  /** True when the renewal is free (comped) — `sub.comp`, or a resolver total of 0 with every
+   *  product line at $0. Copy then reads "This order is on us", never a bare "$0.00". */
+  comp: boolean;
 }
 
 function isShippingProtectionTitle(title: string): boolean {
@@ -258,17 +272,34 @@ function isShippingProtectionTitle(title: string): boolean {
   return t.includes("shipping protection") || t.includes("shipping insurance") || t.includes("route protection");
 }
 
+/** The full subscription row `priceSubscription` + the tax quote need to resolve a renewal charge.
+ *  Matches the canonical money-resolver select ([[commerce/subscription]]), trimmed to the columns
+ *  the reminder preview reads. */
+const REMINDER_PREVIEW_SUB_SELECT =
+  "id, items, next_billing_date, is_internal, comp, delivery_price_cents, pricing_offer_id, applied_discounts, shipping_protection_added, shipping_protection_amount_cents";
+
 /**
- * Resolve, for ONE subscription, exactly what its next renewal will charge — using the SAME pricing
- * the renewal charge uses for that engine, never a re-implementation (CEO requirement, 2026-11-17).
+ * Resolve, for ONE subscription, exactly what its next renewal will charge — the FULL amount
+ * (merchandise after discounts + shipping + protection + tax), via the ONE money resolver
+ * `priceSubscription` ([[commerce/price]]) for EVERY engine, so the number matches what the Portal
+ * shows, with tax layered on top — never a per-engine re-implementation (CEO 2026-11-23: ShopCX
+ * subs carry `price_cents` lines, so the old hand-summed `items[].price` resolved them to no amount;
+ * a customer must also never see one number and be charged a higher one).
  *
- *   • internal subs → [[pricing]] `resolveSubscriptionPricing` (merchandise after discounts +
- *     resolved shipping). Tax is added by Avalara AT charge time and can't be resolved exactly
- *     before billing, so the preview amount is the pre-tax merchandise+shipping the engine computes.
- *   • other engines → the stored contract-line prices the renewal bills (items[].price × quantity).
+ *   • Base (all engines) → `priceSubscription(workspaceId, sub).pricing.total_cents` = merch after
+ *     discounts + shipping + protection, exactly as the Portal renders it. A `PriceInvariantError`
+ *     (a line that can't be priced) ⇒ `amountCents: null` (omit rather than guess).
+ *   • internal subs → layer the renewal path's OWN tax quote on top of that base.
+ *     `ensureFreshSubscriptionTaxQuote` ([[avalara-subscription]], the same quote the internal
+ *     renewal worker reads) returns `{ tax_cents }`; the full charge is `base + tax_cents`
+ *     ('total'). We QUOTE only (SalesOrder, commit=false); no filing. Avalara enabled but no quote
+ *     ⇒ pre-tax base labelled 'plus tax'; Avalara disabled ⇒ $0 tax so base IS the charge ('total').
+ *   • shopcx subs → Shopify computes + applies tax AT billing (shopify-subscription-renewals.ts),
+ *     so tax can't be quoted here: `taxCents=null`, amount shown 'plus tax' on top of the base.
+ *   • comped subs (`sub.comp`, or a resolver total of 0 with every product line at $0) → the
+ *     renewal is free; `comp=true`, amount 0, and copy reads "This order is on us", never "$0.00".
  *
- * Returns `amountCents: null` when the amount can't be resolved exactly — the reminder omits it
- * rather than guessing. Read-only.
+ * Read-only (quote is non-committing).
  */
 export async function reminderChargePreview(
   workspaceId: string,
@@ -277,14 +308,14 @@ export async function reminderChargePreview(
 ): Promise<ReminderChargePreview | null> {
   const { data: sub } = await admin
     .from("subscriptions")
-    .select("id, items, next_billing_date, is_internal, delivery_price_cents, pricing_offer_id")
+    .select(REMINDER_PREVIEW_SUB_SELECT)
     .eq("workspace_id", workspaceId)
     .eq("id", subscriptionId)
     .maybeSingle();
   if (!sub) return null;
 
   const rawItems = (Array.isArray(sub.items) ? sub.items : []) as {
-    title?: string; quantity?: number; price?: string | number; variant_id?: string;
+    title?: string; quantity?: number; price?: string | number; price_cents?: number; variant_id?: string;
   }[];
   const productItems = rawItems.filter((i) => !isShippingProtectionTitle(i.title || ""));
   const items: ReminderChargePreviewItem[] = productItems.map((i) => ({
@@ -293,28 +324,65 @@ export async function reminderChargePreview(
   }));
 
   let amountCents: number | null = null;
-  if (sub.is_internal) {
-    try {
-      const pricing = await resolveSubscriptionPricing(workspaceId, {
-        items: sub.items,
-        delivery_price_cents: sub.delivery_price_cents,
-        pricing_offer_id: sub.pricing_offer_id,
-      });
-      amountCents = pricing.product_subtotal_cents + pricing.shipping_cents;
-    } catch {
-      amountCents = null; // couldn't resolve exactly → omit rather than guess
+  let shippingCents: number | null = null;
+  let taxCents: number | null = null;
+  let amountLabel: "total" | "plus tax" = "plus tax";
+  let comp = !!sub.comp;
+
+  // Base merchandise total from the ONE money resolver — the SAME number the Portal shows for every
+  // engine (ShopCX lines carry `price_cents`, internal subs price live). On PriceInvariantError the
+  // charge can't be stated → omit the amount rather than guess.
+  let base: number | null = null;
+  try {
+    const { pricing } = await priceSubscription(workspaceId, sub as Record<string, unknown>);
+    base = pricing.total_cents;
+    shippingCents = pricing.shipping_cents;
+  } catch (e) {
+    if (!(e instanceof PriceInvariantError)) {
+      // Any other resolver failure also means we can't state the charge exactly — omit it.
+    }
+    base = null;
+  }
+
+  // A resolver total of 0 with every product line at $0 is a comped renewal too (belt-and-suspenders
+  // with sub.comp for free subs whose comp flag isn't set).
+  if (base === 0 && productItems.length > 0 && productItems.every((i) => Number(i.price_cents ?? i.price ?? 0) === 0)) {
+    comp = true;
+  }
+
+  if (comp) {
+    // Free renewal — the charge is $0; copy says "This order is on us", never a bare "$0.00".
+    amountCents = 0;
+    taxCents = 0;
+    shippingCents = shippingCents ?? 0;
+    amountLabel = "total";
+  } else if (base == null) {
+    amountCents = null; // couldn't resolve the base → omit rather than guess
+  } else if (sub.is_internal) {
+    // Layer the renewal path's own tax quote (quote-only — SalesOrder, commit=false) ON TOP of the
+    // resolver total, never re-deriving merchandise from the quote.
+    const quote = await ensureFreshSubscriptionTaxQuote(workspaceId, sub.id).catch(() => null);
+    if (quote) {
+      taxCents = quote.tax_cents;
+      amountCents = base + quote.tax_cents;
+      amountLabel = "total";
+    } else if (await isAvalaraEnabled(workspaceId, admin)) {
+      // Tax applies but is unquotable here → show the base 'plus tax'.
+      taxCents = null;
+      amountCents = base;
+      amountLabel = "plus tax";
+    } else {
+      // Avalara disabled ⇒ renewal charges $0 tax, so the base IS the full charge.
+      taxCents = 0;
+      amountCents = base;
+      amountLabel = "total";
     }
   } else {
-    // Other engines bill the stored contract-line prices. Sum them only if every product line
-    // carries a numeric price; a single missing price means we can't state the exact charge.
-    let sum = 0;
-    let resolvable = productItems.length > 0;
-    for (const i of productItems) {
-      const n = typeof i.price === "number" ? i.price : parseFloat(String(i.price ?? ""));
-      if (!Number.isFinite(n)) { resolvable = false; break; }
-      sum += Math.round(n * 100) * (i.quantity || 1);
-    }
-    amountCents = resolvable ? sum : null;
+    // ShopCX-engine: Shopify applies tax at billing, so it can't be quoted exactly before the charge
+    // → taxCents null, the base shown 'plus tax'.
+    taxCents = null;
+    amountLabel = "plus tax";
+    amountCents = base;
   }
 
   return {
@@ -322,12 +390,38 @@ export async function reminderChargePreview(
     nextBillingDate: sub.next_billing_date ?? null,
     items,
     amountCents,
+    shippingCents,
+    taxCents,
+    amountLabel,
+    comp,
   };
+}
+
+/** Is Avalara enabled for this workspace? When false the renewal charges $0 tax, so a pre-tax
+ *  preview is the exact full charge (shown 'total'), not a 'plus tax' estimate. */
+async function isAvalaraEnabled(workspaceId: string, admin: Admin): Promise<boolean> {
+  const { data: ws } = await admin
+    .from("workspaces")
+    .select("avalara_enabled")
+    .eq("id", workspaceId)
+    .maybeSingle();
+  return !!ws?.avalara_enabled;
 }
 
 /** Format a cents amount as `$12.34`. */
 function fmtMoney(cents: number): string {
   return `$${(cents / 100).toFixed(2)}`;
+}
+
+/** Render a preview's amount for customer copy: "This order is on us" for a comped (free) renewal
+ *  (never a bare "$0.00"); `$X` when it already includes tax ('total'); `$X plus tax` when tax is
+ *  excluded/unquotable — never a bare pre-tax number. Null when the amount couldn't be resolved
+ *  (caller omits it). PURE — exported for testing. */
+export function fmtPreviewAmount(p: ReminderChargePreview): string | null {
+  if (p.comp) return "This order is on us";
+  if (p.amountCents == null) return null;
+  const money = fmtMoney(p.amountCents);
+  return p.amountLabel === "plus tax" ? `${money} plus tax` : money;
 }
 
 /** Format a YYYY-MM-DD / ISO date as a short human date (e.g. "Nov 27"). */
@@ -496,14 +590,22 @@ async function sendTreatmentReminder(
     group.subscriptionIds.map((sid) => reminderChargePreview(workspaceId, sid, admin).catch(() => null)),
   )).filter((p): p is ReminderChargePreview => !!p);
 
-  update.previewed_amount_cents = previews.reduce<number | null>((acc, p) => {
-    if (p.amountCents == null) return acc;
-    return (acc ?? 0) + p.amountCents;
-  }, null);
+  // Stamp the amount actually shown on the ledger so the audit can compare it to the real renewal
+  // charge, and record whether that amount already includes tax. previewed_includes_tax is true
+  // only when every resolved-amount preview is a tax-inclusive 'total'; false when any is 'plus
+  // tax'; null when no amount resolved.
+  const resolvedPreviews = previews.filter((p) => p.amountCents != null);
+  update.previewed_amount_cents = resolvedPreviews.length
+    ? resolvedPreviews.reduce((acc, p) => acc + (p.amountCents as number), 0)
+    : null;
+  update.previewed_includes_tax = resolvedPreviews.length
+    ? resolvedPreviews.every((p) => p.amountLabel === "total")
+    : null;
 
   const renewalLines = previews.map((p) => {
     const itemList = p.items.map((i) => (i.quantity > 1 ? `${i.quantity}x ${i.title}` : i.title)).join(", ");
-    const amountPart = p.amountCents != null ? ` — ${fmtMoney(p.amountCents)}` : "";
+    const amount = fmtPreviewAmount(p);
+    const amountPart = amount ? ` — ${amount}` : "";
     return `Renews ${fmtDate(p.nextBillingDate)}: ${itemList || "your subscription"}${amountPart}`;
   });
 
@@ -513,8 +615,9 @@ async function sendTreatmentReminder(
 
   // Short SMS: date + amount + link (the journey url is appended by maybeSendConsentedSms).
   const firstPreview = previews[0];
+  const smsAmount = firstPreview ? fmtPreviewAmount(firstPreview) : null;
   const smsLead = firstPreview
-    ? `Your next order renews ${fmtDate(firstPreview.nextBillingDate)}${firstPreview.amountCents != null ? ` — ${fmtMoney(firstPreview.amountCents)}` : ""}. Review or change it before we bill:`
+    ? `Your next order renews ${fmtDate(firstPreview.nextBillingDate)}${smsAmount ? ` — ${smsAmount}` : ""}. Review or change it before we bill:`
     : "Your next order is coming up soon. Review or change it before we bill:";
 
   // ── Phase 2: transactional email (goes to every treatment customer). ──

@@ -54,6 +54,7 @@ import {
   isForeignSupabasePostgresMissingReturnsRefundTypeColumnAdhocNoise,
   isForeignSupabasePostgresMissingReturnsResolutionColumnAdhocNoise,
   isForeignSupabasePostgresMissingReturnsFreeLabelColumnAdhocNoise,
+  isForeignSupabasePostgresMissingReturnsRefundAmountCentsColumnAdhocNoise,
   isForeignSupabasePostgresMissingReturnsShopifyCustomerIdColumnAdhocNoise,
   isForeignSupabasePostgresMissingReturnsRefundOnColumnAdhocNoise,
   isForeignSupabasePostgresMissingTicketsMergedIntoTicketIdColumnAdhocNoise,
@@ -91,6 +92,7 @@ import {
   isForeignSupabasePostgresMissingMigrationAuditsContractIdAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsInternalContractIdAdhocNoise,
   isForeignSupabasePostgresJsonbIlikeOnErrorEventsSampleAdhocNoise,
+  isForeignSupabasePostgresJsonbIlikeOnSubscriptionsAppliedDiscountsAdhocNoise,
   isForeignSupabasePostgresMissingOrdersSourceColumnNoise,
   isForeignSupabasePostgresMissingOrdersUpdatedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingCouponsDiscountTypeColumnNoise,
@@ -104,6 +106,7 @@ import {
   isForeignSupabasePostgresMissingOrdersNoteColumnAdhocNoise,
   isForeignSupabasePostgresMissingOrdersShippingNameColumnAdhocNoise,
   isForeignSupabasePostgresMissingOrdersShopifyOrderNameAdhocNoise,
+  isForeignSupabasePostgresMissingReplacementsShopifyOrderNameAdhocNoise,
   isForeignSupabasePostgresMissingOrdersAvalaraDocCodeColumnAdhocNoise,
   isForeignSupabasePostgresMissingOrdersEasypostTrackerAdhocNoise,
   isForeignSupabasePostgresMissingOrdersTrackingNumberAdhocNoise,
@@ -543,6 +546,17 @@ const LOG_QUERIES: LogQuery[] = [
       // `returns` column (including the real `label_url`), the same message via a write/DDL, or
       // a FATAL/PANIC/constraint violation still surfaces / pages.
       if (isForeignSupabasePostgresMissingReturnsFreeLabelColumnAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: a foreign/stale direct-REST client reads
+      // `public.returns` with a guessed, wrong column list naming `refund_amount_cents` — our
+      // `returns` table stores the refunded amount in `net_refund_cents`, never a bare
+      // `refund_amount_cents`. No ShopCX code path names `returns.refund_amount_cents`, so the
+      // resulting column-missing ERROR is repair work for a query we don't own (Control Tower
+      // signature `supabase-logs:79ffb1a222c7d69e`). Narrowly gated to require BOTH the exact
+      // `column returns.refund_amount_cents does not exist` message AND the SELECT-lookup shape
+      // on `returns` (bare or PostgREST CTE wrapper) — a real schema regression on any live
+      // `returns` column (including the real `net_refund_cents`), the same message via a
+      // write/DDL, or a FATAL/PANIC/constraint violation still surfaces / pages.
+      if (isForeignSupabasePostgresMissingReturnsRefundAmountCentsColumnAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: a foreign/stale direct-REST client (still using the
       // old Shopify-era key) reads `public.returns` filtering by a legacy `shopify_customer_id`
       // column. Our `returns` table was built after Shopify was sunset and keys customers on
@@ -880,6 +894,15 @@ const LOG_QUERIES: LogQuery[] = [
       // or a non-SELECT statement on this table (real code-bug shape) still surfaces / pages
       // on first sighting.
       if (isForeignSupabasePostgresJsonbIlikeOnErrorEventsSampleAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: the same Supabase Studio Table Editor quick-filter
+      // (or external PostgREST probe) typed as a case-insensitive free-text search over the
+      // jsonb `applied_discounts` column on `public.subscriptions` emits
+      // `WHERE "applied_discounts" ILIKE $1`, which Postgres rejects with the same
+      // `operator does not exist: jsonb ~~* unknown` (no `jsonb ~~* text` ILIKE operator).
+      // No ShopCX code path text-matches the jsonb `applied_discounts` payload, so the ERROR is
+      // repair work for a query no code owns (Control Tower signature
+      // `supabase-logs:51710834d2a73960`). Same narrow gating as the error_events.sample sibling.
+      if (isForeignSupabasePostgresJsonbIlikeOnSubscriptionsAppliedDiscountsAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc `select ... source ... from
       // public.orders` lookup by an external tool / stale exploratory query. Our `orders`
       // table exposes `source_name`, not `source` — no ShopCX code path issues a SELECT on
@@ -1043,6 +1066,22 @@ const LOG_QUERIES: LogQuery[] = [
       // non-SELECT statement (real code-bug shape), still surfaces / pages on first
       // sighting.
       if (isForeignSupabasePostgresMissingOrdersShopifyOrderNameAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc `select ... shopify_order_name ... from
+      // public.replacements` lookup by an external tool / stale exploratory query — or the
+      // PostgREST `WITH pgrst_source AS ( SELECT ... FROM "public"."replacements" ... )` CTE
+      // wrapper the same client emits over the REST endpoint. Our `replacements` table has NO
+      // `shopify_order_name` column (the replacement order's name lives in
+      // `replacements.shopify_replacement_order_name`, while the bare `shopify_order_name`
+      // name belongs to the sibling `one_time_charges` table) and no ShopCX code path selects
+      // it — there is no lever to make the query resolve
+      // ([[../archive.d/error-feed-drop-replacements-shopify-order-name-adhoc-lookup]], Control
+      // Tower signature `supabase-logs:e1ed29c66b754f73`). Narrowly gated to require BOTH the
+      // exact column-missing message AND the SELECT-lookup shape — a column-missing error on
+      // any other column of `replacements` (including the live
+      // `shopify_replacement_order_name`), or on `shopify_order_name` from any other table
+      // (including the real `one_time_charges.shopify_order_name`), or on `replacements` via a
+      // non-SELECT statement (real code-bug shape), still surfaces / pages on first sighting.
+      if (isForeignSupabasePostgresMissingReplacementsShopifyOrderNameAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc `select ... avalara_doc_code ... from
       // public.orders` lookup by an external tool / stale exploratory query — or the
       // PostgREST `WITH pgrst_source AS ( SELECT ... FROM "public"."orders" ... )` CTE

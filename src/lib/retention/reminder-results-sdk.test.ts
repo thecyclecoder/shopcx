@@ -46,6 +46,7 @@ function metrics(arm: ExperimentArm, over: Partial<ArmMetrics>): ArmMetrics {
     refundsCents: 0,
     refundedCustomerGroups: 0,
     netRevenuePerCustomerCents: 0,
+    netRevenueVarianceCents2: 0,
     voluntaryCancelRate: 0,
     skipRate: 0,
     swapAddOnRate: 0,
@@ -168,10 +169,38 @@ test("deriveVerdict reports the leading arm by net revenue per customer and conc
   assert.equal(complete.concluded, true);
   assert.equal(complete.experimentStatus, "complete");
 
-  // Absent experiment / no data → no leading arm.
+  // Absent experiment / no data → no leading arm and no interval.
   const emptyT = buildArmResults(metrics("treatment", {}), emptyEngagement());
   const emptyH = buildArmResults(metrics("holdout", {}), emptyEngagement());
   const absent = deriveVerdict(null, { treatment: emptyT, holdout: emptyH });
   assert.equal(absent.experimentStatus, "absent");
   assert.equal(absent.leadingArm, null);
+  assert.equal(absent.confidenceIntervalCents, null);
+  assert.equal(absent.significant, false);
+});
+
+test("deriveVerdict reports a confidence interval on the lift once both arms have ≥2 groups", () => {
+  // Big mean gap, tiny variance, healthy n → the CI should exclude 0 (significant).
+  const treatment = buildArmResults(
+    metrics("treatment", { customerGroups: 200, netRevenuePerCustomerCents: 8000, netRevenueVarianceCents2: 250000 }),
+    emptyEngagement(),
+  );
+  const holdout = buildArmResults(
+    metrics("holdout", { customerGroups: 200, netRevenuePerCustomerCents: 6000, netRevenueVarianceCents2: 250000 }),
+    emptyEngagement(),
+  );
+  const v = deriveVerdict({ status: "complete", alpha: 0.05 } as CustomerLifecycleExperimentRow, { treatment, holdout });
+  assert.ok(v.confidenceIntervalCents, "interval present");
+  assert.equal(v.netRevenuePerCustomerLiftCents, 2000);
+  // Interval brackets the point estimate and (here) excludes 0.
+  assert.ok(v.confidenceIntervalCents!.lowCents < 2000 && v.confidenceIntervalCents!.highCents > 2000);
+  assert.ok(v.confidenceIntervalCents!.lowCents > 0);
+  assert.equal(v.significant, true);
+
+  // A tiny gap swamped by huge variance → interval spans 0, not significant.
+  const noisyT = buildArmResults(metrics("treatment", { customerGroups: 60, netRevenuePerCustomerCents: 6010, netRevenueVarianceCents2: 90000000 }), emptyEngagement());
+  const noisyH = buildArmResults(metrics("holdout", { customerGroups: 60, netRevenuePerCustomerCents: 6000, netRevenueVarianceCents2: 90000000 }), emptyEngagement());
+  const noisy = deriveVerdict({ status: "complete", alpha: 0.05 } as CustomerLifecycleExperimentRow, { treatment: noisyT, holdout: noisyH });
+  assert.equal(noisy.significant, false);
+  assert.ok(noisy.confidenceIntervalCents!.lowCents < 0 && noisy.confidenceIntervalCents!.highCents > 0);
 });

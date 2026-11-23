@@ -190,6 +190,11 @@ export async function vaultAndMigratePaymentMethod(
             subscription_id: m.subId,
             contract_id: contractId,
             migrated_at: migratedAt,
+            // ⭐ This retry and runPaymentRecovery's recovery charge target the SAME cycle and race
+            // (~200ms apart); the per-cycle claim lets only one through and this one wins. Without
+            // the flag it advanced next_billing_date from a date dunning had already pushed, so the
+            // recovered customer skipped a shipment (2026-11-23: Sara K, Susan A, Connie W, Sally M).
+            recovery: !!input.isRecovery,
           },
           retryDeps,
         );

@@ -71,3 +71,6 @@ Per-segment conversion from our own sends → [[../sms-segment-performance]].
 ---
 
 [[../README]] · [[../integrations/inngest]] · [[../../CLAUDE]] · [[../sms-segment-performance]]
+
+
+**2026-11-23:** `audience_filter.customer_ids` (array of customer UUIDs) narrows the resolved audience to an explicit allowlist, applied after the SMS-consent and phone gates (JS filter; too many UUIDs for a PostgREST `.in()`). Used for hand-picked audiences like a win-back wave. Shortlink targets on `/journey/@winback` resolve per customer — see [[../libraries/winback-shortlink]].
