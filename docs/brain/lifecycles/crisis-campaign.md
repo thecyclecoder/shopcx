@@ -153,6 +153,13 @@ For rows where Tier 1 or Tier 2 swap was accepted:
 - Optional follow-up journey: "Mixed Berry is back! Want us to swap you back?"
 - Customer-driven, not automatic — they may have grown to like the new flavor.
 
+### Auto swap-back for restart swaps
+
+Rows with `auto_swap_back=true` (written when a customer RESTARTED a sub carrying the crisis flavor —
+[[../libraries/crisis-restart-swap]]) are swapped back to `original_item` automatically on Resolve,
+because the restart page promised it. Compare-and-set on the live sub items; failures block the
+resolve unless `force_resolve`.
+
 Flip [[../tables/crisis_events]] `status='resolved'`.
 
 ## Phase 7 — analytics
@@ -210,7 +217,9 @@ See [[../lifecycles/ai-multi-turn]] crisis rules.
 
 **Shipped:** Crisis event activation, daily cron eligibility scanning, Tier 1/2/3 journeys with flavor/product swaps, pause/remove logic, auto-resume + auto-readd on resolution — all functional.
 
-**Known gaps / not yet shipped:** None identified.
+**Shipped 2026-11-22:** restarts (portal + win-back journey) swap crisis flavors to the default on the way back in and enrol `auto_swap_back` rows ([[../libraries/crisis-restart-swap]]).
+
+**Known gaps / not yet shipped:** no "your flavor is back" email on swap-back; stock outside a crisis row is invisible (product_variants has no inventory signal).
 
 **Recent activity:**
 - `12f954ff` docs/brain: lifecycles/ — 12 narrative pages tracing key flows end-to-end

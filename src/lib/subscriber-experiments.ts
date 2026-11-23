@@ -46,11 +46,13 @@ export const PRE_RENEWAL_EXPERIMENT_SLUG = "pre-renewal-reminder";
 /** The two permanent arms. `holdout` gets nothing new; `treatment` gets the reminder. */
 export type ExperimentArm = "treatment" | "holdout";
 
+export type ExperimentStatus = "draft" | "running" | "stopped" | "complete";
+
 export interface CustomerLifecycleExperimentRow {
   id: string;
   workspace_id: string;
   slug: string;
-  status: "draft" | "running" | "stopped" | "complete";
+  status: ExperimentStatus;
   proxy_metric: string;
   holdout_pct: number;
   target_mde: number | null;
@@ -59,6 +61,14 @@ export interface CustomerLifecycleExperimentRow {
   baseline_cv: number | null;
   required_n_per_arm: number | null;
   stop_rule: string | null;
+  /** Who flipped status last (operator id / 'guardrail' / 'ceo') — audit trail. */
+  status_changed_by: string | null;
+  status_changed_reason: string | null;
+  status_changed_at: string | null;
+  /** Persisted terminal verdict on the primary metric (set when the cron concludes the test). */
+  verdict: string | null;
+  verdict_detail: Record<string, unknown> | null;
+  verdict_at: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -240,6 +250,81 @@ export async function createExperiment(
   return data as CustomerLifecycleExperimentRow;
 }
 
+/**
+ * The REAL on/off switch (CEO requirement): reminders go out ONLY while the experiment status is
+ * `running`. `draft` sends nothing (not launched yet); `stopped`/`complete` stop ALL further
+ * reminders — new AND existing assignees. Launch = a CEO-approved flip to `running`. Pure.
+ */
+export function isExperimentRunning(
+  experiment: Pick<CustomerLifecycleExperimentRow, "status"> | null | undefined,
+): boolean {
+  return !!experiment && experiment.status === "running";
+}
+
+/**
+ * The ONLY sanctioned writer of `customer_lifecycle_experiments.status` — the SDK chokepoint that
+ * records who flipped it and why (audit trail; north star: no silent proxy flip). `createExperiment`
+ * still defaults new rows to `draft`; a launch is a deliberate `setExperimentStatus(..., 'running')`.
+ * Returns the updated row (or null if the experiment doesn't exist for the workspace).
+ */
+export async function setExperimentStatus(
+  workspaceId: string,
+  slug: string,
+  status: ExperimentStatus,
+  opts: { by: string; reason?: string },
+  admin: Admin = createAdminClient(),
+): Promise<CustomerLifecycleExperimentRow | null> {
+  const now = new Date().toISOString();
+  const { data, error } = await admin
+    .from("customer_lifecycle_experiments")
+    .update({
+      status,
+      status_changed_by: opts.by,
+      status_changed_reason: opts.reason ?? null,
+      status_changed_at: now,
+      updated_at: now,
+    })
+    .eq("workspace_id", workspaceId)
+    .eq("slug", slug)
+    .select("*")
+    .maybeSingle();
+  if (error) throw new Error(`setExperimentStatus(${slug}, ${status}): ${error.message}`);
+  return (data as CustomerLifecycleExperimentRow | null) ?? null;
+}
+
+/**
+ * Conclude the test: flip status to `complete` and persist the terminal verdict on the primary
+ * metric in ONE write (through the same status chokepoint). Written by the guardrail/verdict cron
+ * once the pre-registered sample is reached and every group's window has closed.
+ */
+export async function recordExperimentVerdict(
+  workspaceId: string,
+  slug: string,
+  verdict: { verdict: string; detail: Record<string, unknown> },
+  opts: { by: string; reason?: string },
+  admin: Admin = createAdminClient(),
+): Promise<CustomerLifecycleExperimentRow | null> {
+  const now = new Date().toISOString();
+  const { data, error } = await admin
+    .from("customer_lifecycle_experiments")
+    .update({
+      status: "complete",
+      verdict: verdict.verdict,
+      verdict_detail: verdict.detail,
+      verdict_at: now,
+      status_changed_by: opts.by,
+      status_changed_reason: opts.reason ?? "verdict reached",
+      status_changed_at: now,
+      updated_at: now,
+    })
+    .eq("workspace_id", workspaceId)
+    .eq("slug", slug)
+    .select("*")
+    .maybeSingle();
+  if (error) throw new Error(`recordExperimentVerdict(${slug}): ${error.message}`);
+  return (data as CustomerLifecycleExperimentRow | null) ?? null;
+}
+
 export async function getExperiment(
   workspaceId: string,
   slug: string,
@@ -326,6 +411,13 @@ export async function assignArm(
 ): Promise<ExperimentArm | null> {
   const experiment = await getExperiment(workspaceId, experimentSlug, admin);
   if (!experiment) return null;
+
+  // Status is the real on/off switch (CEO requirement). A `draft` row sends nothing; `stopped`/
+  // `complete` halts ALL further reminders — new AND existing assignees. So this gate is BEFORE the
+  // stored-arm read: a stopped experiment returns null even for an already-assigned person, which is
+  // what stops existing treatment customers from getting more reminders. The sticky assignment row
+  // is preserved (never deleted) so measurement still reads it.
+  if (!isExperimentRunning(experiment)) return null;
 
   const groupId = await resolveGroupId(admin, customerId);
 

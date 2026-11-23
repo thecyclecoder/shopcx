@@ -551,6 +551,16 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     registeredAt: "2026-11-22T00:00:00Z",
   },
   {
+    id: "subscriber-experiment-guardrail-cron",
+    kind: "cron",
+    owner: "retention",
+    label: "Subscriber-experiment guardrails + verdict",
+    description: "Daily guardrail/verdict evaluator for the pre-renewal reminder 50/50 test: evaluates treatment-vs-holdout guardrails (voluntary cancel, refund, SMS STOP opt-out, net merchandise revenue per person) with a sequential-safe anytime-valid method plus hard absolute floors; on a trip it flips the experiment to 'stopped' through the status SDK (halting ALL reminders) and sends ONE deduped CEO notification. When the pre-registered sample is reached and every group's 90-day window has closed, it records the verdict and notifies the CEO once. Never auto-resumes. No-op (still heartbeats) unless a running pre-renewal experiment exists.",
+    expectedCadence: "daily (0 14 * * *)",
+    livenessWindowMs: 30 * HOUR,
+    registeredAt: "2026-11-22T00:00:00Z",
+  },
+  {
     id: "shopcx-drift-reconcile-cron",
     kind: "cron",
     owner: "retention",

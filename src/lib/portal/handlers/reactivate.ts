@@ -47,10 +47,23 @@ export const reactivate: RouteHandler = async ({ auth, route, req }) => {
       properties: { shopify_contract_id: String(contractId), nextBillingDate },
       createNote: true,
     });
+    // Out-of-stock flavors swapped on restart — same behaviour + same note as the win-back journey.
+    const { crisisSwapNote } = await import("@/lib/crisis-restart-swap");
+    const swapNote = crisisSwapNote(r.crisisSwaps);
+    if (swapNote) {
+      await logPortalAction({
+        workspaceId: auth.workspaceId, customerId: customer.id,
+        eventType: "portal.subscription.crisis_swapped_on_restart",
+        summary: swapNote,
+        properties: { shopify_contract_id: String(contractId), crisis_swaps: r.crisisSwaps.map((x) => ({ crisis_id: x.crisisId, from: x.fromLabel, to: x.toLabel, ok: x.ok, error: x.error ?? null })) },
+        createNote: true,
+      });
+    }
   }
 
   return jsonOk({
     ok: true, route, contractId,
+    crisisSwaps: r.crisisSwaps.filter((x) => x.ok).map((x) => ({ from: x.fromLabel, to: x.toLabel, expectedRestock: x.expectedRestock })),
     patch: { status: "ACTIVE", nextBillingDate, portalReactivatedAt: new Date().toISOString() },
   });
 };

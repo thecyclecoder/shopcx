@@ -42,5 +42,14 @@ Callers (the M2 reminder sends) ask `assignArm` / `getArm` whether a customer is
 
 The harness is a first-class node under the `retention` function in [[control-tower-node-registry]] (`STATIC_TOOL_NODES` → `tool:subscriber-experiment-harness`) with a [[../tables/kill_switches]] ancestry. `assignArm` honours the switch (step 3 above). The downstream guardrails/verdict spec owns the runtime cron + heartbeat; this harness only establishes the pre-registration + the owner/switch.
 
+## Status is the real on/off switch (launch-readiness Phase 4)
+
+Reminders go out ONLY while the experiment `status` is `running`:
+
+- `isExperimentRunning(experiment)` — pure predicate (`status === 'running'`).
+- `assignArm` returns **null unless running** — the gate sits BEFORE the stored-arm read, so `stopped`/`complete` halts ALL further reminders (new AND existing assignees); the sticky assignment row is preserved for measurement. `draft` sends nothing.
+- `setExperimentStatus(workspaceId, slug, status, { by, reason })` — the ONLY sanctioned writer of `status`, recording who/why (`status_changed_by/_reason/_at`). `createExperiment` still defaults to `draft`; launch is a deliberate flip to `running`. North star: no silent proxy flip.
+- `recordExperimentVerdict(...)` — flips to `complete` + persists the terminal verdict (`verdict`/`verdict_detail`/`verdict_at`) in one write; called by [[../inngest/subscriber-experiment-guardrails]].
+
 ## Related
-[[../tables/customer_lifecycle_experiments]] · [[../tables/customer_lifecycle_experiment_assignments]] · [[../tables/customer_links]] · [[../tables/kill_switches]] · [[control-tower-node-registry]] · [[kill-switch-resolver]] · [[storefront-experiments]] (the visitor-grain sibling this is deliberately NOT)
+[[../tables/customer_lifecycle_experiments]] · [[../tables/customer_lifecycle_experiment_assignments]] · [[../tables/customer_links]] · [[../tables/kill_switches]] · [[control-tower-node-registry]] · [[kill-switch-resolver]] · [[subscriber-experiment-guardrails]] · [[storefront-experiments]] (the visitor-grain sibling this is deliberately NOT)

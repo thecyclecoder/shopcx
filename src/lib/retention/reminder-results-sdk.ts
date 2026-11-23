@@ -82,11 +82,11 @@ export interface ArmResults {
   /** Assigned person-groups in this arm. */
   customerGroups: number;
   engagement: ArmEngagement;
-  /** Σ net revenue (charges − settled refunds) in-window, in cents. */
+  /** Σ net merchandise revenue (paid-order merchandise − settled refunds) in-window, in cents. */
   netRevenueCents: number;
-  /** Mean 90-day net revenue per person-group, in cents (the PRIMARY metric). */
+  /** Mean 90-day net MERCHANDISE revenue per person-group, in cents (the PRIMARY metric, ex tax/shipping). */
   netRevenuePerCustomerCents: number;
-  /** Σ gross charges in-window, in cents. */
+  /** Σ merchandise charges in-window (ex tax/shipping), in cents. */
   grossRevenueCents: number;
   /** Σ settled refunds netted out, in cents. */
   refundsCents: number;
@@ -108,6 +108,11 @@ export interface ReminderGuardrails {
   /** Coarse health read: 'ok' until a secondary metric on treatment breaches holdout. */
   status: "ok" | "watch";
   notes: string[];
+  /** True when the guardrail cron has auto-paused the test (status='stopped' by 'guardrail'). The
+   *  PERSISTED trip supersedes the derived `status` once the cron has run. */
+  tripped: boolean;
+  /** The persisted trip reason (from the experiment's status_changed_reason), null until a trip. */
+  trippedReason: string | null;
 }
 
 /**
@@ -123,7 +128,10 @@ export interface ReminderVerdict {
   leadingArm: ExperimentArm | null;
   /** Treatment − holdout net revenue per customer, in cents (the primary-metric delta). */
   netRevenuePerCustomerLiftCents: number;
-  derived: true;
+  /** The PERSISTED terminal verdict label once the cron has recorded it (null while derived). */
+  verdict: string | null;
+  /** false once the persisted verdict/guardrail engine has run; true for the pre-evaluation fallback. */
+  derived: boolean;
 }
 
 export interface ReminderTestResults {
@@ -269,7 +277,7 @@ export function deriveGuardrails(
     status = "watch";
   }
 
-  return { requiredNPerArm: requiredN, treatmentN, holdoutN, sampleComplete, smsOptOuts, status, notes };
+  return { requiredNPerArm: requiredN, treatmentN, holdoutN, sampleComplete, smsOptOuts, status, notes, tripped: false, trippedReason: null };
 }
 
 /** Derive the verdict from the harness experiment status + the primary metric. PURE. */
@@ -290,8 +298,35 @@ export function deriveVerdict(
     concluded,
     leadingArm,
     netRevenuePerCustomerLiftCents: lift,
+    verdict: null,
     derived: true,
   };
+}
+
+/**
+ * Prefer the PERSISTED verdict/guardrail state the guardrail cron wrote, falling back to the derived
+ * values only before the first evaluation (spec Phase 5). PURE — given the experiment row + the
+ * derived shapes, overlay the persisted fields when present.
+ */
+export function overlayPersisted(
+  experiment: CustomerLifecycleExperimentRow | null,
+  guardrails: ReminderGuardrails,
+  verdict: ReminderVerdict,
+): { guardrails: ReminderGuardrails; verdict: ReminderVerdict } {
+  if (!experiment) return { guardrails, verdict };
+
+  // Guardrail: a status of 'stopped' flipped by the guardrail cron is the persisted trip.
+  const stoppedByGuardrail = experiment.status === "stopped" && experiment.status_changed_by === "guardrail";
+  const g: ReminderGuardrails = stoppedByGuardrail
+    ? { ...guardrails, status: "watch", tripped: true, trippedReason: experiment.status_changed_reason ?? "guardrail trip" }
+    : guardrails;
+
+  // Verdict: once the cron records a verdict label it supersedes the derived lead.
+  const v: ReminderVerdict = experiment.verdict
+    ? { ...verdict, verdict: experiment.verdict, concluded: true, derived: false }
+    : verdict;
+
+  return { guardrails: g, verdict: v };
 }
 
 /* ------------------------------------------------------------------------------------------------
@@ -348,8 +383,11 @@ export async function getReminderTestResults(
     holdout: buildArmResults(metrics.arms.holdout, engagement.holdout),
   };
 
-  const guardrails = deriveGuardrails(experiment, arms, engagement);
-  const verdict = deriveVerdict(experiment, arms);
+  // Derived first (the pre-evaluation fallback), then overlay the PERSISTED verdict/guardrail state
+  // the guardrail cron wrote (spec Phase 5 — persisted supersedes derived once the cron has run).
+  const derivedGuardrails = deriveGuardrails(experiment, arms, engagement);
+  const derivedVerdict = deriveVerdict(experiment, arms);
+  const { guardrails, verdict } = overlayPersisted(experiment, derivedGuardrails, derivedVerdict);
 
   return {
     generatedAt: asOf.toISOString(),

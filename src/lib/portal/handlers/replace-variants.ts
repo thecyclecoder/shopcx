@@ -8,6 +8,10 @@ import { enrichItemTitles, subSwapVariant, subAddItem, subChangeQuantity, subRem
 // [[bootstrap]] hides these, but a crafted request that names a suppressed
 // variant directly must still be rejected. See [[../mutation-guard]].
 import { assertNewVariantsSelectable } from "@/lib/portal/mutation-guard";
+// Server-side consumable + in-stock rule (CEO 2026-11-22) — the shared helper the
+// next-order journey also enforces. A crafted request naming an out-of-stock /
+// Shipping-Protection / free-gift / mystery / digital variant is rejected here too.
+import { assertSwappableConsumable } from "@/lib/portal/editable-catalog";
 
 function s(v: unknown): string { return typeof v === "string" ? v.trim() : ""; }
 
@@ -140,6 +144,16 @@ export const replaceVariants: RouteHandler = async ({ auth, route, req }) => {
         error: "variant_not_selectable",
         detail: "One or more variants are not currently selectable via the portal.",
         variantIds: selectable.blocked,
+      }, 400);
+    }
+    // Consumable + in-stock rule: never Shipping Protection / free-gift / Mystery /
+    // digital / out-of-stock. Enforced server-side on BOTH surfaces (not just the UI).
+    const swappable = await assertSwappableConsumable(auth.workspaceId, newVariantIdsForSuppressionCheck);
+    if (!swappable.ok) {
+      return jsonErr({
+        error: "variant_not_swappable",
+        detail: "One or more variants are out of stock or can't be added to a subscription.",
+        variantIds: swappable.blocked,
       }, 400);
     }
   }

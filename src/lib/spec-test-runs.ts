@@ -1027,6 +1027,7 @@ async function evaluateAutoFoldGate(workspaceId: string): Promise<AutoFoldGateEv
         status: p.status,
         build_sha: p.build_sha ?? null,
         merge_sha: p.merge_sha ?? null,
+        spec_slug: s.slug,
       })),
     );
     if (!containment.ok) {
@@ -1381,6 +1382,7 @@ export async function findFoldedSpecsFailingPhaseContainment(
         status: p.status,
         build_sha: p.build_sha,
         merge_sha: p.merge_sha,
+        spec_slug: s.slug,
       })),
     );
     if (!report.ok) out.push({ slug: s.slug, failures: report.failures });

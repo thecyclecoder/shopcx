@@ -1,0 +1,1 @@
+- **Workspace feature access: hide sidebar items until the workspace is given access** · verified 2026-11-22 · → [[../libraries/workspace-features]]

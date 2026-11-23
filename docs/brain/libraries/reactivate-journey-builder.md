@@ -41,3 +41,5 @@ returns the real result message. First order processes tomorrow.
   The protection filter was also case-sensitive (`startsWith("insure")` vs real SKU `Insure01`).
   `GET /api/journey/[token]` now passes `session.subscription_id` through `buildJourneySteps`, and
   `/step` + `/complete` pass it into [[winback-reactivate-choice]].
+
+**2026-11-22:** the step subtitle appends the out-of-stock notice from [[crisis-restart-swap]] `crisisNotice` when the target sub carries a crisis flavor.

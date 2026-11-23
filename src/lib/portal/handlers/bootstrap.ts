@@ -1,11 +1,12 @@
 import type { RouteHandler } from "@/lib/portal/types";
 import { jsonOk, logPortalAction } from "@/lib/portal/helpers";
 import { createAdminClient } from "@/lib/supabase/admin";
-// Portal availability lever — some variants are IN STOCK but must not be
-// selectable via any new-choice path (crisis: preserve inventory for existing
-// renewers). Applied to the swap/add catalog here AND server-side in
-// replaceVariants. See [[../mutation-guard]].
-import { getSuppressedVariantIds } from "@/lib/portal/mutation-guard";
+// Swap/add catalog comes from the SHARED editable-catalog helper — the SAME
+// filtered list the next-order journey shows (products_available_to_add, Shipping
+// Protection excluded by id, suppressed + out-of-stock + non-consumable variants
+// dropped). See [[../editable-catalog]]. The availability lever ([[../mutation-guard]]
+// `getSuppressedVariantIds`) and the in-stock/consumable rule both live there now.
+import { loadEditableCatalog } from "@/lib/portal/editable-catalog";
 
 // Soft deadline for OPTIONAL bootstrap enrichments. The whole /api/portal
 // Lambda is capped at Vercel's 30s ceiling (see src/app/api/portal/route.ts);
@@ -165,36 +166,21 @@ export const bootstrap: RouteHandler = async ({ auth, route }) => {
     productIds.length && auth.workspaceId
       ? withBootstrapTimeout(
           (async () => {
-            const [{ data: products }, suppressed] = await Promise.all([
-              admin
-                .from("products")
-                .select(
-                  "id, shopify_product_id, title, handle, image_url, variants, rating, rating_count",
-                )
-                .eq("workspace_id", auth.workspaceId)
-                .in("shopify_product_id", productIds),
-              getSuppressedVariantIds(auth.workspaceId),
-            ]);
-            if (!products) return [] as unknown[];
-            return products
-              .map((p) => ({
-                internalId: p.id,
-                productId: p.shopify_product_id,
-                title: p.title,
-                handle: p.handle,
-                image: { src: p.image_url || "", alt: p.title },
-                rating: {
-                  value: p.rating || 0,
-                  count: (p.rating_count || 0) + reviewBump,
-                },
-                variants: (Array.isArray(p.variants) ? p.variants : []).filter(
-                  (v: { id?: unknown; inventory_quantity?: number }) => {
-                    if (suppressed.has(String(v.id ?? ""))) return false;
-                    return v.inventory_quantity == null || v.inventory_quantity > 0;
-                  },
-                ),
-              }))
-              .filter((p) => (p.variants as unknown[]).length > 0);
+            const editable = await loadEditableCatalog(auth.workspaceId!, admin);
+            return editable.products.map((p) => ({
+              internalId: p.internalId,
+              productId: p.productId,
+              title: p.title,
+              handle: p.handle,
+              image: { src: p.imageUrl || "", alt: p.title },
+              rating: {
+                value: p.rating,
+                count: p.ratingCount + reviewBump,
+              },
+              // Preserve the raw JSONB variant shape the client expects; the shared
+              // helper has already dropped suppressed / out-of-stock / non-consumable.
+              variants: p.variants.map((v) => v.raw),
+            }));
           })(),
           [] as unknown[],
         )

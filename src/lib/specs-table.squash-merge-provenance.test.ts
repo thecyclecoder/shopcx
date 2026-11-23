@@ -138,3 +138,51 @@ test("mergeIsSquashOnMain: refuses a malformed sha rather than shelling out", as
   assert.equal(await mergeIsSquashOnMain("not-a-sha", makeDeps({ containment: "contained", onMain: true, parents: 1 })), false);
   assert.equal(await mergeIsSquashOnMain(null, makeDeps({ containment: "contained", onMain: true, parents: 1 })), false);
 });
+
+// ── Rewritten-branch fallback (mergeCarriesSpecBuild) ─────────────────────────────────────────────
+// A REAL (two-parent) merge on main whose stamped build SHA no longer resolves (the build branch was
+// rebased/rebuilt after the stamp, then deleted). Accepted only when the merge introduced a
+// `Spec: <slug>` build commit; every other shape still fails closed.
+function rewrittenDeps(opts: { logHit: boolean; containment?: "git-error" | "not-contained" }): ResolveBranchRefDeps {
+  return {
+    runGitCmd: async (args) => {
+      if (args[0] === "fetch") return { code: 0, stdout: "", stderr: "" };
+      if (args[0] === "rev-parse") return { code: 0, stdout: `${MAIN_REF}\n`, stderr: "" };
+      if (args[0] === "rev-list") return { code: 0, stdout: `${MERGE_SHA} p1 p2\n`, stderr: "" }; // real merge
+      if (args[0] === "log") {
+        assert.ok(args.includes(`--grep=^Spec: my-spec$`));
+        assert.ok(args.includes(`${MERGE_SHA}^1..${MERGE_SHA}`));
+        return { code: 0, stdout: opts.logHit ? "deadbeef\n" : "", stderr: "" };
+      }
+      if (args[0] === "merge-base") {
+        if (args[2] === MERGE_SHA) return { code: 0, stdout: "", stderr: "" }; // merge is on main
+        if (opts.containment === "not-contained") return { code: 1, stdout: "", stderr: "" };
+        return { code: 128, stdout: "", stderr: "fatal: Not a valid commit name" };
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    },
+  };
+}
+
+test("rewritten branch: unresolvable build SHA + merge introduced a Spec: trailer commit → allowed", async () => {
+  const res = await verifyPhasesContainedByMerges([shipped({ spec_slug: "my-spec" })], rewrittenDeps({ logHit: true }));
+  assert.deepEqual(res, { ok: true });
+});
+
+test("rewritten branch: no Spec: trailer commit in the merge → still fails closed", async () => {
+  const res = await verifyPhasesContainedByMerges([shipped({ spec_slug: "my-spec" })], rewrittenDeps({ logHit: false }));
+  assert.equal(res.ok, false);
+});
+
+test("rewritten branch: fallback never rescues a build SHA that resolves and is genuinely not contained", async () => {
+  const res = await verifyPhasesContainedByMerges(
+    [shipped({ spec_slug: "my-spec" })],
+    rewrittenDeps({ logHit: true, containment: "not-contained" }),
+  );
+  assert.equal(res.ok, false);
+});
+
+test("rewritten branch: without spec_slug the fallback is off (legacy callers unchanged)", async () => {
+  const res = await verifyPhasesContainedByMerges([shipped()], rewrittenDeps({ logHit: true }));
+  assert.equal(res.ok, false);
+});

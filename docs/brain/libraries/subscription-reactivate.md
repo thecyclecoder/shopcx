@@ -53,3 +53,5 @@ Never throws: typed refusals (`needs_payment_method`, `needs_address`) and error
   Clicks on "Yes, restart" restarted nothing while the page said "we'll email you".
 - A card or address problem is NOT auto-resolved here: the customer is told plainly, and an
   internal ticket note flags it for follow-up (only when the session has a `ticket_id`).
+
+**2026-11-22:** after a successful restart, lines under an active crisis are swapped to the crisis default and enrolled for swap-back; the result carries `crisisSwaps`. See [[crisis-restart-swap]].

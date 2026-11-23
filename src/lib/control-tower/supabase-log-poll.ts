@@ -36,6 +36,7 @@ import {
   isForeignGoTrueAuthLogNoise,
   isForeignSupabasePostgresAdhocSkuSalesRoundTypeNoise,
   isForeignSupabasePostgresAdhocMonthlyRevenueSnapshotsToCharTextNoise,
+  isForeignSupabaseRealtimeMessagesPartitionNoise,
   isForeignSupabasePostgresMissingControlTowerEventsLookupNoise,
   isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise,
   isForeignSupabasePostgresMissingProductsTemplateSuffixLookupNoise,
@@ -188,6 +189,7 @@ import {
   isForeignSupabasePostgresMissingSpecsCurrentPhaseAdhocNoise,
   isForeignSupabasePostgresMissingSpecsPhaseAdhocNoise,
   isForeignSupabasePostgresMissingSpecsMergedAtAdhocNoise,
+  isForeignSupabasePostgresMissingSpecsGoalSlugAdhocNoise,
   isForeignSupabasePostgresMissingSpecsMergeShaDirectRestLookupNoise,
   isForeignSupabasePostgresMissingSpecsReviewStatusAdhocNoise,
   isForeignSupabasePostgresMissingSpecsFlagsAdhocNoise,
@@ -2005,6 +2007,16 @@ const LOG_QUERIES: LogQuery[] = [
       // shape) still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingSpecsMergedAtAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
+      // against `public.specs.goal_slug`. The `specs` table exists but has NEVER had a
+      // `goal_slug` column — a spec's goal linkage is modeled on `specs.milestone_id` /
+      // `goal_branch_sha`, not a slug string on the row, and every ShopCX reader goes
+      // through the specs-table SDK (which never selects `goal_slug`). Pinned to the exact
+      // column-missing message AND a SELECT-on-specs shape (bare OR PostgREST CTE wrapper)
+      // — a column-missing on any other table, a different column on `specs`, a JOIN
+      // through `spec_phases`, or a non-SELECT write still pages (Control Tower signature
+      // `supabase-logs:089b48e5daedc132`).
+      if (isForeignSupabasePostgresMissingSpecsGoalSlugAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
       // against `public.specs.merge_sha`. The `specs` table exists but has NEVER had a
       // `merge_sha` column — the shipped-with merge SHA is modeled per-phase on
       // `spec_phases.build_sha` (phase-pr-provenance), not on the `specs` row. Pinned to
@@ -3006,6 +3018,15 @@ const LOG_QUERIES: LogQuery[] = [
       // ([[../specs/error-feed-drop-adhoc-monthly-revenue-snapshots-to-char-text]], signature
       // `supabase-logs:b979de40e41e6ba2`).
       if (isForeignSupabasePostgresAdhocMonthlyRevenueSnapshotsToCharTextNoise(message, query)) return null;
+      // Foreign-app noise: Supabase Realtime's internal `realtime.authorize(...)` function
+      // raises `no partition of relation "messages" found for row` when its partition-maintenance
+      // job lags a day boundary. The `messages` relation lives in the Supabase-managed `realtime`
+      // schema (not our app) and `realtime.authorize(` is a Supabase-internal function we cannot
+      // patch — there is no ShopCX lever. Narrowly gated to the partition message AND the
+      // `realtime.authorize(` query, so a genuine partition/relation error on one of our own
+      // tables still pages ([[../specs/error-feed-drop-realtime-messages-partition-authorize-noise]],
+      // signature `supabase-logs:53b2577e5d5336aa`).
+      if (isForeignSupabaseRealtimeMessagesPartitionNoise(message, query)) return null;
       return {
         keyParts: ["postgres", severity, message],
         title: `postgres ${severity}: ${message}`,
