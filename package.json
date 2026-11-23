@@ -335,6 +335,7 @@
     "test:error-feed-crisis-customer-actions-contract-id-noise": "tsx --test src/lib/control-tower/error-feed.crisis-customer-actions-contract-id-noise.test.ts",
     "test:error-feed-adhoc-monthly-revenue-snapshots-to-char-text-noise": "tsx --test src/lib/control-tower/error-feed.adhoc-monthly-revenue-snapshots-to-char-text-noise.test.ts",
     "test:error-feed-returns-free-label-noise": "tsx --test src/lib/control-tower/error-feed.returns-free-label-noise.test.ts",
+    "test:error-feed-returns-refund-amount-cents-noise": "tsx --test src/lib/control-tower/error-feed.returns-refund-amount-cents-noise.test.ts",
     "test:error-feed-returns-shopify-customer-id-noise": "tsx --test src/lib/control-tower/error-feed.returns-shopify-customer-id-noise.test.ts",
     "test:error-feed-customers-display-name-noise": "tsx --test src/lib/control-tower/error-feed.customers-display-name-noise.test.ts",
     "test:error-feed-loyalty-transactions-customer-id-noise": "tsx --test src/lib/control-tower/error-feed.loyalty-transactions-customer-id-noise.test.ts",
