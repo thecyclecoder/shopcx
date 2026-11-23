@@ -17,6 +17,7 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { loadEditableCatalog } from "@/lib/portal/editable-catalog";
 import { resolveSubscriptionPricing } from "@/lib/pricing";
+import { priceSubscription } from "@/lib/commerce/price";
 
 export interface NextOrderEditableItem {
   title: string;
@@ -105,7 +106,7 @@ export async function buildNextOrderJourneySteps(
   // should let the customer act on it (same inclusion the cancel builder uses).
   const { data: subs } = await admin
     .from("subscriptions")
-    .select("id, shopify_contract_id, items, next_billing_date, status, billing_interval, billing_interval_count, created_at, is_internal, delivery_price_cents, pricing_offer_id")
+    .select("id, shopify_contract_id, items, next_billing_date, status, billing_interval, billing_interval_count, created_at, is_internal, comp, delivery_price_cents, pricing_offer_id, applied_discounts, shipping_protection_added, shipping_protection_amount_cents")
     .in("customer_id", allCustomerIds)
     .eq("workspace_id", workspaceId)
     .in("status", ["active", "paused"])
@@ -132,11 +133,13 @@ export async function buildNextOrderJourneySteps(
     }
   }
 
-  // Price each sub's lines + total through the SAME engine the renewal bills with.
-  // Internal subs resolve via resolveSubscriptionPricing (exact, rule-aware); other
-  // engines keep their stored (vendor-baked) line prices as the authoritative figure.
+  // Price each sub's lines + total through the ONE money resolver the Portal uses (priceSubscription,
+  // src/lib/commerce/price.ts), so the journey total matches the Portal for EVERY engine. Internal
+  // subs still resolve their per-line display via resolveSubscriptionPricing (exact, rule-aware);
+  // non-internal (ShopCX/Appstle) lines carry `price_cents`, so priceSubscription sums them (the old
+  // hand-sum of `items[].price` resolved ShopCX subs to no amount).
   const subscriptions: NextOrderSubscription[] = await Promise.all((subs || []).map(async sub => {
-    const rawItems = (sub.items as { title: string; variant_title?: string; variant_id?: string; quantity?: number; price?: string | number }[] || []);
+    const rawItems = (sub.items as { title: string; variant_title?: string; variant_id?: string; quantity?: number; price?: string | number; price_cents?: number }[] || []);
     const nonProtection = rawItems.filter(i => !isShippingProtection(i.title));
 
     let items: NextOrderEditableItem[];
@@ -163,9 +166,16 @@ export async function buildNextOrderJourneySteps(
         variant_title: i.variant_title,
         variant_id: i.variant_id ? String(i.variant_id) : undefined,
         quantity: i.quantity || 1,
-        price: typeof i.price === "number" ? `$${i.price.toFixed(2)}` : (i.price ?? null),
+        price: typeof i.price_cents === "number" ? `$${(i.price_cents / 100).toFixed(2)}` : (typeof i.price === "number" ? `$${i.price.toFixed(2)}` : (i.price ?? null)),
       }));
-      total = nonProtection.reduce((sum, i) => sum + (parseFloat(String(i.price ?? "0")) * (i.quantity || 1)), 0);
+      // Total from the one money resolver (merch after discounts + shipping + protection), same as
+      // the Portal. Fall back to the hand-sum only if a line can't be priced (PriceInvariantError).
+      try {
+        const { pricing } = await priceSubscription(workspaceId, sub as Record<string, unknown>);
+        total = pricing.total_cents / 100;
+      } catch {
+        total = nonProtection.reduce((sum, i) => sum + ((typeof i.price_cents === "number" ? i.price_cents / 100 : parseFloat(String(i.price ?? "0"))) * (i.quantity || 1)), 0);
+      }
     }
 
     const freq = sub.billing_interval && sub.billing_interval_count
