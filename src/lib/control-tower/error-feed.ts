@@ -3995,6 +3995,53 @@ export function isForeignSupabasePostgresUuidIlikeOnTicketsIdAdhocNoise(
 }
 
 /**
+ * Foreign-app noise — the `director_activity.workspace_id` twin of
+ * `isForeignSupabasePostgresUuidIlikeOnTicketsIdAdhocNoise`. Postgres rejects a uuid-column
+ * ILIKE with `operator does not exist: uuid ~~* unknown` when a Supabase Studio Table Editor
+ * quick-filter / direct-REST `?workspace_id=ilike.*` probe ILIKEs the `director_activity.workspace_id`
+ * uuid column. No ShopCX code path produces it — every in-tree reader filters
+ * `director_activity.workspace_id` with a well-formed uuid equality, never ILIKE. The resulting
+ * ERROR is repair work for a query no code owns (Control Tower signature
+ * `supabase-logs:655d56e7e5279554`) and is the last unfiltered member of the uuid-ILIKE
+ * foreign-noise family.
+ *
+ * Narrowly gated so:
+ *   - a uuid-ILIKE operator-missing error on ANY OTHER table still pages,
+ *   - a DIFFERENT operator-missing error on `director_activity` still pages,
+ *   - the same message attached to a non-SELECT statement on `director_activity` (INSERT /
+ *     UPDATE / DELETE / DDL — a real code-bug shape) still pages.
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before `keyParts`
+ * is constructed — a capture-time drop (returns `null` → no error_event, no loop_alert, no
+ * signature).
+ */
+export function isForeignSupabasePostgresUuidIlikeOnDirectorActivityWorkspaceIdAdhocNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  if (stripped !== "operator does not exist: uuid ~~* unknown") return false;
+  // Quote-stripped + lowercased so `"public"."director_activity"` collapses to
+  // `public.director_activity` and `"workspace_id" ilike` collapses to `workspace_id ilike`,
+  // covering both the bare and the double-quoted PostgREST-wrapper forms with one shape predicate.
+  const q = (query ?? "").trim().toLowerCase().replace(/"/g, "");
+  if (!q) return false;
+  // The uuid-workspace_id ILIKE marker — the tell that distinguishes the Studio-click/REST
+  // quick-filter against the uuid column from any equality join/filter our own code issues.
+  if (!/\bworkspace_id\s+ilike\b/.test(q)) return false;
+  const bareSelect =
+    /^select\b[\s\S]*\bfrom\s+(?:public\.)?director_activity\b/.test(q);
+  // PostgREST wraps direct-REST row reads as `WITH pgrst_source AS ( SELECT ... FROM
+  // public.director_activity ... )` — the branch requires the wrapped op to be a SELECT so a
+  // PostgREST INSERT/UPDATE inside the same envelope (a real code-write) stays captured/paged.
+  const pgrstCte =
+    /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+public\.director_activity\b/.test(q);
+  return bareSelect || pgrstCte;
+}
+
+/**
  * Foreign-app noise — Postgres rejecting a malformed-uuid EQUALITY read on `tickets.id` with
  * `invalid input syntax for type uuid: "<garbage>"`. This is the equality twin of
  * `isForeignSupabasePostgresUuidLikeOnTicketsIdAdhocNoise`: instead of a `id LIKE` operator
