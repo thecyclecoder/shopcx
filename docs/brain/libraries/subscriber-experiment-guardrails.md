@@ -41,6 +41,18 @@ the anytime-valid test OR a hard floor (`HARD_FLOORS`). Takes two `ArmResults`
   both arms clearing `netRevenueMinN` (50).
 - **The SMS STOP opt-out floor stays ABSOLUTE** (`smsOptOutRate` 0.05) — the holdout sends no SMS, so
   there is no holdout baseline to net against.
+- **The SMS opt-out rate counts POST-reminder STOPs only** (first-run fix, 2026-11-24). The rate is
+  `treatment.engagement.smsOptOutsAfterReminder / treatment.engagement.smsSent` — customers who were
+  actually TEXTED a reminder (`sms_status` 'scheduled'|'sent') and THEN opted out of SMS marketing
+  (their `customers.sms_marketing_status` flipped to `unsubscribed` after `sms_scheduled_send_at`),
+  over customers actually texted. It no longer uses `smsSuppressedStop` (customers ALREADY
+  unsubscribed at send time), which never got a reminder and so can't be an opt-out the test caused —
+  counting it false-tripped the guardrail on the first live run (15 already-unsubscribed + 34 texted
+  with 0 real STOPs read as ~31% and paused the test). Already-unsubscribed rows are excluded from
+  BOTH numerator and denominator (they are `suppressed_stop`, never sent/scheduled). The
+  post-reminder count is computed in [[reminder-results-sdk]] `rollupEngagement` /
+  `fetchSmsOptOuts` and surfaced on the dashboard as **"STOP replies to reminder texts"**, with
+  **"already unsubscribed before run"** (`smsAlreadyUnsubscribed`) shown separately as informational.
 - Net-revenue only trips on a material relative drop (`netRevenueRelativeDrop`) with ≥`netRevenueMinN`/arm.
 
 ### `evaluateVerdict(treatment, holdout, alpha?)` — pure → `VerdictResult`

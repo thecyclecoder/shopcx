@@ -25,6 +25,10 @@ export interface NextOrderEditableItem {
   variant_id?: string;
   quantity: number;
   price?: string | null;
+  /** False when this is the LAST real product line on the sub — removing it would empty the
+   *  subscription, which is a cancel, not an edit. The mini-site hides Remove and steers to
+   *  skip/cancel instead (Portal parity, src/lib/portal/handlers/remove-line-item.ts). */
+  removable?: boolean;
 }
 
 export interface NextOrderSubscription {
@@ -85,6 +89,34 @@ const SHIPPING_PROTECTION_KEYWORDS = ["shipping protection", "route", "shipping 
 function isShippingProtection(title: string): boolean {
   const t = (title || "").toLowerCase();
   return SHIPPING_PROTECTION_KEYWORDS.some(kw => t.includes(kw));
+}
+
+type LineLike = { title?: string | null; variant_id?: string | number | null };
+
+/**
+ * Would removing `variantId` strip the LAST real product line off the subscription? Shipping
+ * Protection lines never count as product lines (same exclusion the Portal's remove guard uses,
+ * src/lib/portal/handlers/remove-line-item.ts), so a sub carrying one product + Shipping Protection
+ * is still "single product". Mirrors that guard so the journey and the Portal agree: a single-product
+ * sub can't be emptied via Remove — the customer skips or cancels instead.
+ *
+ * Accepts either a sub-like object with `items`, or the item array directly. With a `variantId`, it
+ * only reports "last" when that id IS a product line AND no product line would remain; targeting a
+ * non-product (e.g. Shipping Protection) or an unknown line is never "last". With no `variantId`, it
+ * answers "does the sub have exactly one product line?".
+ */
+export function isLastProductLine(
+  sub: { items?: LineLike[] | null } | LineLike[] | null | undefined,
+  variantId: string | number | null | undefined,
+): boolean {
+  const items = Array.isArray(sub) ? sub : sub?.items ?? [];
+  const products = (items ?? []).filter(i => !isShippingProtection(i?.title ?? ""));
+  if (products.length === 0) return false;
+  if (variantId != null && String(variantId) !== "") {
+    const target = products.find(i => String(i?.variant_id ?? "") === String(variantId));
+    if (!target) return false; // removing a non-product / unknown line never strips the last product
+  }
+  return products.length <= 1;
 }
 
 export async function buildNextOrderJourneySteps(
@@ -177,6 +209,11 @@ export async function buildNextOrderJourneySteps(
         total = nonProtection.reduce((sum, i) => sum + ((typeof i.price_cents === "number" ? i.price_cents / 100 : parseFloat(String(i.price ?? "0"))) * (i.quantity || 1)), 0);
       }
     }
+
+    // Mark each line non-removable when it is the LAST product line (Portal parity). `items` here is
+    // already product-only (Shipping Protection filtered out above), so isLastProductLine resolves to
+    // "exactly one product line left" — the mini-site then hides Remove and steers to skip/cancel.
+    items = items.map(it => ({ ...it, removable: !isLastProductLine(items, it.variant_id) }));
 
     const freq = sub.billing_interval && sub.billing_interval_count
       ? `Every ${sub.billing_interval_count} ${sub.billing_interval}${sub.billing_interval_count > 1 ? "s" : ""}`

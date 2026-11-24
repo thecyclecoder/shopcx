@@ -134,6 +134,9 @@ export interface ReminderLedgerRow {
   email_status: string | null;
   sms_status: string | null;
   sms_suppression_reason: string | null;
+  /** When the consented text was scheduled/sent (TCPA send instant) — the baseline a post-reminder
+   *  SMS opt-out is measured against. Null for rows that never texted. */
+  sms_scheduled_send_at: string | null;
 }
 
 /**
@@ -148,7 +151,7 @@ export async function listReminderLedger(
   const { data, error } = await admin
     .from("pre_renewal_reminders")
     .select(
-      "group_id, customer_id, experiment_arm, status, channels, journey_session_id, email_status, sms_status, sms_suppression_reason",
+      "group_id, customer_id, experiment_arm, status, channels, journey_session_id, email_status, sms_status, sms_suppression_reason, sms_scheduled_send_at",
     )
     .eq("workspace_id", workspaceId);
   if (error) throw new Error(`listReminderLedger(${workspaceId}): ${error.message}`);

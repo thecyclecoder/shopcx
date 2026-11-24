@@ -145,15 +145,21 @@ export function evaluateGuardrails(
       reason: tripped ? `treatment refund rate ${(pT * 100).toFixed(1)}% vs holdout ${(pH * 100).toFixed(1)}% (excess ${((pT - pH) * 100).toFixed(1)}pts)` : "" });
   }
 
-  // SMS STOP opt-out rate (treatment is the only arm that sends; holdout ≈ 0).
+  // SMS STOP opt-out rate (treatment is the only arm that sends; holdout ≈ 0). The rate is
+  // post-reminder STOP replies (customers texted a reminder who THEN opted out) over customers
+  // actually TEXTED — NOT the already-unsubscribed-at-send-time count, which never got a text and so
+  // was never an opt-out the reminder caused. Counting that pre-existing suppression false-tripped the
+  // guardrail on the first live run (2026-11-24: 15 already-unsubscribed, 0 real STOPs, paused anyway).
+  // Already-unsubscribed rows (`suppressed_stop`) are excluded from BOTH numerator and denominator —
+  // they never reach sent/scheduled. Holdout sends no texts, so only the absolute floor applies.
   {
-    const tReminded = treatment.engagement.reminded;
-    const pT = tReminded > 0 ? treatment.engagement.smsSuppressedStop / tReminded : 0;
-    const hReminded = holdout.engagement.reminded;
-    const pH = hReminded > 0 ? holdout.engagement.smsSuppressedStop / hReminded : 0;
-    const tripped = proportionHarmTripped(pT, tReminded, pH, hReminded, alpha) || pT >= HARD_FLOORS.smsOptOutRate;
+    const tTexted = treatment.engagement.smsSent;
+    const pT = tTexted > 0 ? treatment.engagement.smsOptOutsAfterReminder / tTexted : 0;
+    const hTexted = holdout.engagement.smsSent;
+    const pH = hTexted > 0 ? holdout.engagement.smsOptOutsAfterReminder / hTexted : 0;
+    const tripped = proportionHarmTripped(pT, tTexted, pH, hTexted, alpha) || pT >= HARD_FLOORS.smsOptOutRate;
     signals.push({ key: "sms_opt_out", tripped, treatment: pT, holdout: pH,
-      reason: tripped ? `treatment SMS STOP opt-out rate ${(pT * 100).toFixed(1)}%` : "" });
+      reason: tripped ? `treatment SMS STOP opt-out rate ${(pT * 100).toFixed(1)}% (STOP replies to reminder texts)` : "" });
   }
 
   // Net merchandise revenue per person — trip only on a material relative DROP vs holdout with a

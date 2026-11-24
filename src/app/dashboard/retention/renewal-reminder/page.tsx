@@ -9,7 +9,7 @@ type ExperimentArm = "treatment" | "holdout";
 
 interface ArmEngagement {
   reminded: number; emailsSent: number; smsSent: number;
-  smsSuppressedStop: number; smsSuppressedNoConsent: number;
+  smsSuppressedStop: number; smsSuppressedNoConsent: number; smsOptOutsAfterReminder: number;
   opened: number; edited: number; swapped: number; skipped: number; cancelled: number; saved: number;
 }
 interface ArmResults {
@@ -27,7 +27,7 @@ interface ArmResults {
 interface ReminderGuardrails {
   requiredNPerArm: number | null;
   treatmentN: number; holdoutN: number;
-  sampleComplete: boolean; smsOptOuts: number;
+  sampleComplete: boolean; smsOptOutsAfterReminder: number; smsAlreadyUnsubscribed: number;
   status: "ok" | "watch"; notes: string[];
 }
 interface ReminderVerdict {
@@ -186,7 +186,8 @@ export default function RenewalReminderResults() {
                   Sample {g.treatmentN.toLocaleString()} / {g.holdoutN.toLocaleString()}
                   {g.requiredNPerArm != null && ` (need ${g.requiredNPerArm.toLocaleString()}/arm${g.sampleComplete ? " — reached" : ""})`}
                 </span>
-                <span className="text-slate-500">SMS opt-outs: {g.smsOptOuts}</span>
+                <span className="text-slate-500">STOP replies to reminder texts: {g.smsOptOutsAfterReminder}</span>
+                <span className="text-slate-400">(already unsubscribed before run: {g.smsAlreadyUnsubscribed})</span>
               </div>
               {g.notes.length > 0 && (
                 <ul className="mt-1 list-inside list-disc text-xs text-amber-700">

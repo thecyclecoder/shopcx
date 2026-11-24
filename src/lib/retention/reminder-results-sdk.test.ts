@@ -33,6 +33,7 @@ function ledgerRow(over: Partial<ReminderLedgerRow>): ReminderLedgerRow {
     email_status: "sent",
     sms_status: null,
     sms_suppression_reason: null,
+    sms_scheduled_send_at: null,
     ...over,
   };
 }
@@ -62,6 +63,7 @@ function emptyEngagement(): ArmEngagement {
     smsSent: 0,
     smsSuppressedStop: 0,
     smsSuppressedNoConsent: 0,
+    smsOptOutsAfterReminder: 0,
     opened: 0,
     edited: 0,
     swapped: 0,
@@ -115,6 +117,35 @@ test("rollupEngagement attributes journey lifecycle events to the ledger's arm; 
   assert.equal(e.holdout.edited, 0);
 });
 
+test("rollupEngagement counts only POST-reminder opt-outs, never already-unsubscribed customers", () => {
+  const textedAt = "2026-11-24T18:00:00.000Z";
+  const rows: ReminderLedgerRow[] = [
+    // Texted, then opted out AFTER the send → the one real post-reminder opt-out.
+    ledgerRow({ customer_id: "optout-after", sms_status: "scheduled", sms_scheduled_send_at: textedAt }),
+    // Texted, still subscribed → not an opt-out.
+    ledgerRow({ customer_id: "still-sub", sms_status: "sent", sms_scheduled_send_at: textedAt }),
+    // Already unsubscribed before the run → suppressed, never texted → informational only.
+    ledgerRow({ customer_id: "pre-stop", sms_status: "suppressed_stop", sms_scheduled_send_at: null }),
+  ];
+  const optOuts = new Map<string, string | null>([
+    ["optout-after", "2026-11-25T09:00:00.000Z"], // after the text
+  ]);
+  const e = rollupEngagement(rows, [], optOuts);
+  assert.equal(e.treatment.smsSent, 2);
+  assert.equal(e.treatment.smsOptOutsAfterReminder, 1);
+  assert.equal(e.treatment.smsSuppressedStop, 1);
+});
+
+test("rollupEngagement does NOT count an opt-out stamped before the text was sent", () => {
+  const rows: ReminderLedgerRow[] = [
+    ledgerRow({ customer_id: "c1", sms_status: "scheduled", sms_scheduled_send_at: "2026-11-24T18:00:00.000Z" }),
+  ];
+  // The flip predates the send → not caused by the reminder.
+  const optOuts = new Map<string, string | null>([["c1", "2026-11-20T10:00:00.000Z"]]);
+  const e = rollupEngagement(rows, [], optOuts);
+  assert.equal(e.treatment.smsOptOutsAfterReminder, 0);
+});
+
 test("buildArmResults derives refund rate from refunded groups / total groups", () => {
   const withRefunds = buildArmResults(
     metrics("treatment", { customerGroups: 10, refundedCustomerGroups: 2, grossRevenueCents: 50000, refundsCents: 3000 }),
@@ -140,7 +171,10 @@ test("deriveGuardrails flags sample completion and watches a worse treatment ref
   const g = deriveGuardrails(experiment, { treatment, holdout }, { treatment: treatment.engagement, holdout: holdout.engagement });
   assert.equal(g.requiredNPerArm, 100);
   assert.equal(g.sampleComplete, true);
-  assert.equal(g.smsOptOuts, 3);
+  // The 3 suppressed_stop customers were already unsubscribed BEFORE the run — informational only,
+  // never counted as a reminder-caused opt-out.
+  assert.equal(g.smsAlreadyUnsubscribed, 3);
+  assert.equal(g.smsOptOutsAfterReminder, 0);
   assert.equal(g.status, "watch");
   assert.ok(g.notes.some((n) => n.includes("refund")));
 });
