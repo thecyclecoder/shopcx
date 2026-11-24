@@ -59,6 +59,7 @@ import {
   isForeignSupabasePostgresMissingReturnsShopifyCustomerIdColumnAdhocNoise,
   isForeignSupabasePostgresMissingReturnsRefundOnColumnAdhocNoise,
   isForeignSupabasePostgresMissingTicketsMergedIntoTicketIdColumnAdhocNoise,
+  isForeignSupabasePostgresMissingTicketsAssigneeTypeColumnAdhocNoise,
   isForeignSupabasePostgresMissingFraudCasesUpdatedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingAgentActionRequestsUpdatedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingFraudCasesCustomerIdColumnAdhocNoise,
@@ -3033,6 +3034,14 @@ const LOG_QUERIES: LogQuery[] = [
       // name on another table, or a non-SELECT write still surfaces / pages on first sighting
       // (Control Tower signature `supabase-logs:71ee0b69a27e12cf`).
       if (isForeignSupabasePostgresMissingTicketsMergedIntoTicketIdColumnAdhocNoise(message, query)) return null;
+      // Same foreign direct-REST shape on the same table, different foreign-expected column: a
+      // stale/foreign client reading `tickets.assignee_type` — our `tickets` table never owned
+      // an `assignee_type` column and no ShopCX code path names it. Narrowly gated to the exact
+      // column-missing message AND a SELECT-on-tickets shape (bare OR PostgREST CTE wrapper) — a
+      // column-missing on a live `tickets` column, the same column name on another table, or a
+      // non-SELECT write still surfaces / pages on first sighting (Control Tower signature
+      // `supabase-logs:4c8819ba3f4b0f49`).
+      if (isForeignSupabasePostgresMissingTicketsAssigneeTypeColumnAdhocNoise(message, query)) return null;
       // Same foreign direct-REST shape on a different table: a stale/foreign client reading
       // `specs.spec_slug` (the real column is the bare `slug`). Narrowly gated to the exact
       // column-missing message AND a SELECT-on-specs shape (bare OR PostgREST CTE wrapper)
