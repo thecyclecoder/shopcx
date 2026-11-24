@@ -1,0 +1,1 @@
+- **Drop foreign direct-REST subscriptions.billing_provider column-missing noise at capture** · verified 2026-11-24 · → [[../libraries/error-feed]]

@@ -1,0 +1,955 @@
+{
+ "generated_at": "2026-11-23",
+ "source": "product_reviews (published + featured, rating 4-5, n=2826 of 3494) for Superfood Tabs",
+ "method": "keyword buckets + manual read; phrases are verbatim substrings of review bodies",
+ "situations": [
+  {
+   "product_handle": "superfood-tabs",
+   "product_id": "221d272d-a6c5-4a5d-86ff-ac693926c992",
+   "slug": "tried-everything",
+   "situation": "Tried everything before and nothing stuck",
+   "who": "Adults who have cycled through diets, plans and other products",
+   "goal": "Find something simple they can stay consistent with",
+   "noticed": "Fewer cravings and less between-meal hunger made healthy habits easier to keep",
+   "timeframe": "Often within the first week or two, and many have stayed with it for years",
+   "verbatim_phrase": "I have been a yo-yo dieter and have tried so many things to have that not happen. SuperTabs are the only thing that works",
+   "review_ids": [
+    "56b6eef8-dcdc-4979-aff3-a8371e286e26",
+    "72726ecd-47ba-45a6-bbb9-e4bf4c395334",
+    "786ad7bb-4c96-4cc0-8279-5cdbdf70aca0",
+    "c12cd92e-936d-476b-bb86-684e8465050f",
+    "e653e052-3900-4ff0-a814-2f49f9cad540",
+    "ef1830f6-0bae-48c7-823e-4cf6dc274088"
+   ],
+   "quotes": [
+    {
+     "review_id": "e653e052-3900-4ff0-a814-2f49f9cad540",
+     "reviewer": "Mindy S.",
+     "rating": 5,
+     "verified_purchase": true,
+     "featured": true,
+     "verbatim_phrase": "Most of the things I tried worked but were not lifestyle changes (i.e. diet pills) so the excess weight eventually returned. The Superfoods Tabs were different for me",
+     "compliance_ok": false,
+     "compliance_note": "incentivized review (coupon) - disclose or skip"
+    },
+    {
+     "review_id": "c12cd92e-936d-476b-bb86-684e8465050f",
+     "reviewer": "Jody K.",
+     "rating": 5,
+     "verified_purchase": true,
+     "featured": false,
+     "verbatim_phrase": "I have been a yo-yo dieter and have tried so many things to have that not happen. SuperTabs are the only thing that works",
+     "compliance_ok": true,
+     "compliance_note": ""
+    },
+    {
+     "review_id": "72726ecd-47ba-45a6-bbb9-e4bf4c395334",
+     "reviewer": "Charlene T.",
+     "rating": 5,
+     "verified_purchase": true,
+     "featured": false,
+     "verbatim_phrase": "I tried everything before and this is the only product that has helped me.",
+     "compliance_ok": true,
+     "compliance_note": ""
+    },
+    {
+     "review_id": "ef1830f6-0bae-48c7-823e-4cf6dc274088",
+     "reviewer": "Jne S.",
+     "rating": 5,
+     "verified_purchase": false,
+     "featured": false,
+     "verbatim_phrase": "I’m 65 and have tried to diet for decades. Note the word “try”. I’ve tried everything, read almost everything. THIS works!",
+     "compliance_ok": true,
+     "compliance_note": ""
+    },
+    {
+     "review_id": "786ad7bb-4c96-4cc0-8279-5cdbdf70aca0",
+     "reviewer": "Donna B.",
+     "rating": 5,
+     "verified_purchase": false,
+     "featured": false,
+     "verbatim_phrase": "I've tried coffee, green tea, kava kava, all sorts of rearranging my diet to not have that afternoon energy dip...none of these worked.",
+     "compliance_ok": true,
+     "compliance_note": ""
+    },
+    {
+     "review_id": "56b6eef8-dcdc-4979-aff3-a8371e286e26",
+     "reviewer": "Emily D.",
+     "rating": 5,
+     "verified_purchase": false,
+     "featured": false,
+     "verbatim_phrase": "I am so glad that I finally found something that works!",
+     "compliance_ok": true,
+     "compliance_note": ""
+    }
+   ],
+   "compliance_ok": true,
+   "compliance_note": "Situation framing is structure/function only. Use only quotes with compliance_ok=true in public copy; results vary."
+  },
+  {
+   "product_handle": "superfood-tabs",
+   "product_id": "221d272d-a6c5-4a5d-86ff-ac693926c992",
+   "slug": "keeping-it-off",
+   "situation": "Keeping results going after reaching a goal",
+   "who": "People who have hit a goal and don't want to slide back",
+   "goal": "Stay on track long term with an easy daily habit",
+   "noticed": "Appetite stays in check; many have kept going for years",
+   "timeframe": "Months to years",
+   "verbatim_phrase": "I have kept it off for over 2 years.",
+   "review_ids": [
+    "36bf6b6c-339c-4ac5-8b25-ab704164d70a",
+    "3a25d166-6f0d-465b-ae5d-f68d07d0de68",
+    "98d1ab02-5a0f-4493-af79-0da9f6c0027c"
+   ],
+   "quotes": [
+    {
+     "review_id": "98d1ab02-5a0f-4493-af79-0da9f6c0027c",
+     "reviewer": "Samantha O.",
+     "rating": 5,
+     "verified_purchase": true,
+     "featured": true,
+     "verbatim_phrase": "I have kept it off for over 2 years.",
+     "compliance_ok": true,
+     "compliance_note": ""
+    },
+    {
+     "review_id": "3a25d166-6f0d-465b-ae5d-f68d07d0de68",
+     "reviewer": "Charlene T.",
+     "rating": 5,
+     "verified_purchase": true,
+     "featured": true,
+     "verbatim_phrase": "It helps me not to munch all day. I have been taking it for about 4 yrs and it is helping me maintain my weight.",
+     "compliance_ok": true,
+     "compliance_note": ""
+    },
+    {
+     "review_id": "36bf6b6c-339c-4ac5-8b25-ab704164d70a",
+     "reviewer": "Lucy G.",
+     "rating": 5,
+     "verified_purchase": true,
+     "featured": true,
+     "verbatim_phrase": "I drink 20oz of water with 1 tablet every morning before my coffee.",
+     "compliance_ok": true,
+     "compliance_note": ""
+    }
+   ],
+   "compliance_ok": true,
+   "compliance_note": "Situation framing is structure/function only. Use only quotes with compliance_ok=true in public copy; results vary."
+  },
+  {
+   "product_handle": "superfood-tabs",
+   "product_id": "221d272d-a6c5-4a5d-86ff-ac693926c992",
+   "slug": "big-event",
+   "situation": "Getting ready for a wedding or big event",
+   "who": "Brides-to-be and family members of the bride with a date on the calendar",
+   "goal": "Feel lighter and less bloated before the big day",
+   "noticed": "Less bloating and fewer cravings while sticking to a plan",
+   "timeframe": "Weeks to months before the event",
+   "verbatim_phrase": "I drink one every day and it helps",
+   "review_ids": [
+    "a8873cfd-c171-41f6-9db2-721b9d833eec",
+    "c27101ec-c1f6-49e4-8003-d2a78fd39ba4",
+    "ca8fbe82-e683-4b02-9021-29e9a7bacbbf"
+   ],
+   "quotes": [
+    {
+     "review_id": "a8873cfd-c171-41f6-9db2-721b9d833eec",
+     "reviewer": "Khrstil S.",
+     "rating": 5,
+     "verified_purchase": false,
+     "featured": false,
+     "verbatim_phrase": "I drink one every day and it helps",
+     "compliance_ok": true,
+     "compliance_note": ""
+    },
+    {
+     "review_id": "ca8fbe82-e683-4b02-9021-29e9a7bacbbf",
+     "reviewer": "Jacquelyn B.",
+     "rating": 5,
+     "verified_purchase": false,
+     "featured": false,
+     "verbatim_phrase": "My little sister is getting married in sept and needed to find help to get this weight off.",
+     "compliance_ok": true,
+     "compliance_note": ""
+    },
+    {
+     "review_id": "c27101ec-c1f6-49e4-8003-d2a78fd39ba4",
+     "reviewer": "Lisa S.",
+     "rating": 5,
+     "verified_purchase": false,
+     "featured": false,
+     "verbatim_phrase": "I now fit into the pants I wanted to for so long.",
+     "compliance_ok": true,
+     "compliance_note": ""
+    }
+   ],
+   "compliance_ok": true,
+   "compliance_note": "Situation framing is structure/function only. Use only quotes with compliance_ok=true in public copy; results vary."
+  },
+  {
+   "product_handle": "superfood-tabs",
+   "product_id": "221d272d-a6c5-4a5d-86ff-ac693926c992",
+   "slug": "menopause",
+   "situation": "Menopause and perimenopause",
+   "who": "Women in perimenopause, menopause or post-menopause",
+   "goal": "Ease the bloating and cravings that showed up with midlife changes",
+   "noticed": "Less bloating, fewer cravings, more energy",
+   "timeframe": "Days to weeks",
+   "verbatim_phrase": "Since menopause they have aided i digestion, reduced hinger, and regularity.",
+   "review_ids": [
+    "89dada93-664f-4f51-84b4-eac3c808b381",
+    "cdb24a56-09c6-47ff-bcf9-3fe76d84e9da",
+    "e4a1c97f-5fe1-4f25-b500-60fa97f2e111",
+    "e94a92f8-5bed-45d6-a91a-a7da1e04cd27"
+   ],
+   "quotes": [
+    {
+     "review_id": "e94a92f8-5bed-45d6-a91a-a7da1e04cd27",
+     "reviewer": "lisa B.",
+     "rating": 5,
+     "verified_purchase": true,
+     "featured": false,
+     "verbatim_phrase": "Since menopause they have aided i digestion, reduced hinger, and regularity.",
+     "compliance_ok": true,
+     "compliance_note": ""
+    },
+    {
+     "review_id": "cdb24a56-09c6-47ff-bcf9-3fe76d84e9da",
+     "reviewer": "Heidi K.",
+     "rating": 5,
+     "verified_purchase": false,
+     "featured": false,
+     "verbatim_phrase": "I feel better than I have in ages - as a post menopausal woman!",
+     "compliance_ok": true,
+     "compliance_note": ""
+    },
+    {
+     "review_id": "89dada93-664f-4f51-84b4-eac3c808b381",
+     "reviewer": "kristen J.",
+     "rating": 5,
+     "verified_purchase": false,
+     "featured": false,
+     "verbatim_phrase": "They have helped my constant bloated feeling, cravings, energy, which has helped me drop a few pounds. as a peri-menopausal lady that is huge!",
+     "compliance_ok": true,
+     "compliance_note": ""
+    },
+    {
+     "review_id": "e4a1c97f-5fe1-4f25-b500-60fa97f2e111",
+     "reviewer": "Cindy C.",
+     "rating": 4,
+     "verified_purchase": false,
+     "featured": false,
+     "verbatim_phrase": "These tablets give me energy and keep the cravings away.",
+     "compliance_ok": true,
+     "compliance_note": ""
+    }
+   ],
+   "compliance_ok": true,
+   "compliance_note": "Situation framing is structure/function only. Use only quotes with compliance_ok=true in public copy; results vary."
+  },
+  {
+   "product_handle": "superfood-tabs",
+   "product_id": "221d272d-a6c5-4a5d-86ff-ac693926c992",
+   "slug": "active-50-plus",
+   "situation": "Staying active in your 60s and 70s",
+   "who": "Adults 55+, including grandparents and people still working",
+   "goal": "Keep energy up through the day without jitters",
+   "noticed": "Steady daytime energy and an easy daily habit",
+   "timeframe": "Day to day; some have used it for 5+ years",
+   "verbatim_phrase": "people always ask me where I get all my energy at 55",
+   "review_ids": [
+    "03816e57-16fe-485f-9726-9f76ad82c059",
+    "5d786513-421f-4cba-8329-a6f0cb9958ee",
+    "9233be8b-ea21-4baf-97fd-6aed10c0366a",
+    "955fb909-dc84-4507-ad72-d304ed3a5982",
+    "cdface51-4da2-4ad9-a388-4fd9ea68f482"
+   ],
+   "quotes": [
+    {
+     "review_id": "9233be8b-ea21-4baf-97fd-6aed10c0366a",
+     "reviewer": "Jennifer H.",
+     "rating": 5,
+     "verified_purchase": true,
+     "featured": true,
+     "verbatim_phrase": "people always ask me where I get all my energy at 55",
+     "compliance_ok": true,
+     "compliance_note": ""
+    },
+    {
+     "review_id": "03816e57-16fe-485f-9726-9f76ad82c059",
+     "reviewer": "Beth D.",
+     "rating": 5,
+     "verified_purchase": true,
+     "featured": false,
+     "verbatim_phrase": "I am 64 and have 2 little grand babies.i need a lot of energy and these make it happen",
+     "compliance_ok": true,
+     "compliance_note": ""
+    },
+    {
+     "review_id": "cdface51-4da2-4ad9-a388-4fd9ea68f482",
+     "reviewer": "Dorothy Z.",
+     "rating": 5,
+     "verified_purchase": true,
+     "featured": false,
+     "verbatim_phrase": "I am a 77 year old Substitute teacher and I use my Superfood Tab every day & find it helps to keep my energy level from dropping during the day.",
+     "compliance_ok": true,
+     "compliance_note": ""
+    },
+    {
+     "review_id": "5d786513-421f-4cba-8329-a6f0cb9958ee",
+     "reviewer": "Stephanie G.",
+     "rating": 5,
+     "verified_purchase": false,
+     "featured": false,
+     "verbatim_phrase": "I get the energy to move this 74 yo. to accomplish much in my day.",
+     "compliance_ok": true,
+     "compliance_note": ""
+    },
+    {
+     "review_id": "955fb909-dc84-4507-ad72-d304ed3a5982",
+     "reviewer": "Beth D.",
+     "rating": 5,
+     "verified_purchase": false,
+     "featured": false,
+     "verbatim_phrase": "I am 62 and trying to stay fit .",
+     "compliance_ok": true,
+     "compliance_note": ""
+    }
+   ],
+   "compliance_ok": true,
+   "compliance_note": "Situation framing is structure/function only. Use only quotes with compliance_ok=true in public copy; results vary."
+  },
+  {
+   "product_handle": "superfood-tabs",
+   "product_id": "221d272d-a6c5-4a5d-86ff-ac693926c992",
+   "slug": "busy-parents",
+   "situation": "Busy parents juggling work and kids",
+   "who": "Working moms and parents of young kids",
+   "goal": "Get through the day with energy and stay on track without much time to plan meals",
+   "noticed": "Energy back and an easy way to stay on track",
+   "timeframe": "First week",
+   "verbatim_phrase": "I’m a mother of 3. Working full time. It’s hard to find Find time to eat the proper foods.",
+   "review_ids": [
+    "88b53c12-a64f-4ab4-be56-336e6006def9",
+    "ca4ff8d4-492c-43b9-9b27-ed3c245f563c"
+   ],
+   "quotes": [
+    {
+     "review_id": "ca4ff8d4-492c-43b9-9b27-ed3c245f563c",
+     "reviewer": "Amanda J.",
+     "rating": 5,
+     "verified_purchase": false,
+     "featured": false,
+     "verbatim_phrase": "I’m a mother of 3. Working full time. It’s hard to find Find time to eat the proper foods.",
+     "compliance_ok": true,
+     "compliance_note": ""
+    },
+    {
+     "review_id": "88b53c12-a64f-4ab4-be56-336e6006def9",
+     "reviewer": "Amanda S.",
+     "rating": 4,
+     "verified_purchase": false,
+     "featured": false,
+     "verbatim_phrase": "These have been a saving grace with 5 kids",
+     "compliance_ok": true,
+     "compliance_note": ""
+    },
+    {
+     "review_id": "88b53c12-a64f-4ab4-be56-336e6006def9",
+     "reviewer": "Amanda S.",
+     "rating": 4,
+     "verified_purchase": false,
+     "featured": false,
+     "verbatim_phrase": "I have gotten a ton of energy back.",
+     "compliance_ok": true,
+     "compliance_note": ""
+    }
+   ],
+   "compliance_ok": true,
+   "compliance_note": "Situation framing is structure/function only. Use only quotes with compliance_ok=true in public copy; results vary."
+  },
+  {
+   "product_handle": "superfood-tabs",
+   "product_id": "221d272d-a6c5-4a5d-86ff-ac693926c992",
+   "slug": "after-pregnancy",
+   "situation": "After having a baby",
+   "who": "Moms who still feel stuck with pregnancy weight or belly bloat, months or years later",
+   "goal": "Feel like themselves again",
+   "noticed": "Less belly bloat and more energy",
+   "timeframe": "About two months for most of those who mention it",
+   "verbatim_phrase": "It has helped me so much by loosing the postpartum belly, and makes me feel more energized!",
+   "review_ids": [
+    "3967bec0-19ee-46df-89ba-dda0f4735c5a",
+    "e2be0b44-8db4-47fc-8434-aa7b5aed681f"
+   ],
+   "quotes": [
+    {
+     "review_id": "3967bec0-19ee-46df-89ba-dda0f4735c5a",
+     "reviewer": "Megbruce09",
+     "rating": 5,
+     "verified_purchase": false,
+     "featured": false,
+     "verbatim_phrase": "It has helped me so much by loosing the postpartum belly, and makes me feel more energized!",
+     "compliance_ok": true,
+     "compliance_note": ""
+    },
+    {
+     "review_id": "e2be0b44-8db4-47fc-8434-aa7b5aed681f",
+     "reviewer": "Kristen H.",
+     "rating": 5,
+     "verified_purchase": false,
+     "featured": false,
+     "verbatim_phrase": "I was never able to lose that extra 15 to 20 lb I gained during pregnancy and it's been years of just accepting that's the way it was going to be.",
+     "compliance_ok": false,
+     "compliance_note": "contains: 20 lb"
+    }
+   ],
+   "compliance_ok": true,
+   "compliance_note": "Situation framing is structure/function only. Use only quotes with compliance_ok=true in public copy; results vary."
+  },
+  {
+   "product_handle": "superfood-tabs",
+   "product_id": "221d272d-a6c5-4a5d-86ff-ac693926c992",
+   "slug": "quit-soda",
+   "situation": "Kicking a soda, diet soda or energy-drink habit",
+   "who": "People who rely on soda, diet pop or energy drinks",
+   "goal": "Swap the habit for something that still tastes like a treat",
+   "noticed": "Stopped reaching for soda; drinks more water instead",
+   "timeframe": "First week",
+   "verbatim_phrase": "It helped me get over my addiction to diet soda.",
+   "review_ids": [
+    "2569c7c0-93d7-45d7-81cd-94f96611723a",
+    "44dbeb30-f3b3-4174-bf43-d84840ba7e56",
+    "56551032-823a-4de5-80ec-052d05ca69f3",
+    "9901a99c-9d01-46c7-b0ea-da4d0133b779"
+   ],
+   "quotes": [
+    {
+     "review_id": "56551032-823a-4de5-80ec-052d05ca69f3",
+     "reviewer": "Snowbaby0991",
+     "rating": 5,
+     "verified_purchase": true,
+     "featured": false,
+     "verbatim_phrase": "It helped me get over my addiction to diet soda.",
+     "compliance_ok": true,
+     "compliance_note": ""
+    },
+    {
+     "review_id": "9901a99c-9d01-46c7-b0ea-da4d0133b779",
+     "reviewer": "Nancy T.",
+     "rating": 5,
+     "verified_purchase": true,
+     "featured": false,
+     "verbatim_phrase": "they helped me to start drinking water and kick the diet pop habit!",
+     "compliance_ok": true,
+     "compliance_note": ""
+    },
+    {
+     "review_id": "44dbeb30-f3b3-4174-bf43-d84840ba7e56",
+     "reviewer": "Liz C.",
+     "rating": 5,
+     "verified_purchase": true,
+     "featured": false,
+     "verbatim_phrase": "Helps me drink less soda",
+     "compliance_ok": true,
+     "compliance_note": ""
+    },
+    {
+     "review_id": "2569c7c0-93d7-45d7-81cd-94f96611723a",
+     "reviewer": "Heidi M.",
+     "rating": 5,
+     "verified_purchase": false,
+     "featured": false,
+     "verbatim_phrase": "I don’t even crave my energy drinks anymore!",
+     "compliance_ok": true,
+     "compliance_note": ""
+    }
+   ],
+   "compliance_ok": true,
+   "compliance_note": "Situation framing is structure/function only. Use only quotes with compliance_ok=true in public copy; results vary."
+  },
+  {
+   "product_handle": "superfood-tabs",
+   "product_id": "221d272d-a6c5-4a5d-86ff-ac693926c992",
+   "slug": "hate-plain-water",
+   "situation": "People who hate drinking plain water",
+   "who": "Anyone who struggles to hit their water goal",
+   "goal": "Drink more water every day",
+   "noticed": "Water became easy to drink",
+   "timeframe": "Immediately",
+   "verbatim_phrase": "I drink more water because I love the mixed berry. Plain water is boring.",
+   "review_ids": [
+    "5139ae62-0d98-4424-aa69-6636cf021004",
+    "87cbb873-201c-4e8a-a4ba-83fec5947c65",
+    "9e237334-29d9-4d08-89a7-ff6c87252bfa",
+    "ca23b43d-aa75-4d7f-9c45-34e4d71bb107"
+   ],
+   "quotes": [
+    {
+     "review_id": "87cbb873-201c-4e8a-a4ba-83fec5947c65",
+     "reviewer": "Terry L.",
+     "rating": 5,
+     "verified_purchase": true,
+     "featured": false,
+     "verbatim_phrase": "I drink more water because I love the mixed berry. Plain water is boring.",
+     "compliance_ok": true,
+     "compliance_note": ""
+    },
+    {
+     "review_id": "ca23b43d-aa75-4d7f-9c45-34e4d71bb107",
+     "reviewer": "Penny B.",
+     "rating": 5,
+     "verified_purchase": true,
+     "featured": false,
+     "verbatim_phrase": "I can’t stand the taste of plain water.",
+     "compliance_ok": true,
+     "compliance_note": ""
+    },
+    {
+     "review_id": "9e237334-29d9-4d08-89a7-ff6c87252bfa",
+     "reviewer": "Bonnie B.",
+     "rating": 5,
+     "verified_purchase": false,
+     "featured": false,
+     "verbatim_phrase": "I finally found a way to drink water, which by the way I hate.",
+     "compliance_ok": true,
+     "compliance_note": ""
+    },
+    {
+     "review_id": "5139ae62-0d98-4424-aa69-6636cf021004",
+     "reviewer": "Susie C.",
+     "rating": 5,
+     "verified_purchase": false,
+     "featured": false,
+     "verbatim_phrase": "I searched for years trying to find something that would help me drink water… I FINALLY found it!!!",
+     "compliance_ok": true,
+     "compliance_note": ""
+    }
+   ],
+   "compliance_ok": true,
+   "compliance_note": "Situation framing is structure/function only. Use only quotes with compliance_ok=true in public copy; results vary."
+  },
+  {
+   "product_handle": "superfood-tabs",
+   "product_id": "221d272d-a6c5-4a5d-86ff-ac693926c992",
+   "slug": "afternoon-slump",
+   "situation": "Beating the 3pm slump at work",
+   "who": "Office workers, teachers, nurses on long shifts, people who drive for a living",
+   "goal": "Get through the afternoon without coffee crashes or vending-machine snacks",
+   "noticed": "Smooth afternoon energy and fewer afternoon cravings",
+   "timeframe": "Same day",
+   "verbatim_phrase": "No cravings, no bloating and a healthy boost of energy around 3pm to finish out my day.",
+   "review_ids": [
+    "9899f2c7-1fcf-45be-bac4-ba2f9f56b99e",
+    "c93cef06-d34f-4ebf-b5dc-45915e91ab46",
+    "f3e72848-2b60-4cbb-9ba4-93838ca33b76",
+    "f52a92d1-8123-4d11-a07c-5a2fcf709fdf"
+   ],
+   "quotes": [
+    {
+     "review_id": "f3e72848-2b60-4cbb-9ba4-93838ca33b76",
+     "reviewer": "Anne H.",
+     "rating": 5,
+     "verified_purchase": true,
+     "featured": true,
+     "verbatim_phrase": "No cravings, no bloating and a healthy boost of energy around 3pm to finish out my day.",
+     "compliance_ok": true,
+     "compliance_note": ""
+    },
+    {
+     "review_id": "f52a92d1-8123-4d11-a07c-5a2fcf709fdf",
+     "reviewer": "Megs h.",
+     "rating": 5,
+     "verified_purchase": true,
+     "featured": false,
+     "verbatim_phrase": "It gives me a big afternoon pickup that last until bedtime.",
+     "compliance_ok": true,
+     "compliance_note": ""
+    },
+    {
+     "review_id": "9899f2c7-1fcf-45be-bac4-ba2f9f56b99e",
+     "reviewer": "Patricia B.",
+     "rating": 5,
+     "verified_purchase": true,
+     "featured": false,
+     "verbatim_phrase": "If I begin to feel that afternoon slump I make sure to add another one to my bottle.",
+     "compliance_ok": true,
+     "compliance_note": ""
+    },
+    {
+     "review_id": "c93cef06-d34f-4ebf-b5dc-45915e91ab46",
+     "reviewer": "SUE N.",
+     "rating": 5,
+     "verified_purchase": false,
+     "featured": false,
+     "verbatim_phrase": "Am RN, night shift, 65 years young and makes me just feel good!",
+     "compliance_ok": true,
+     "compliance_note": ""
+    }
+   ],
+   "compliance_ok": true,
+   "compliance_note": "Situation framing is structure/function only. Use only quotes with compliance_ok=true in public copy; results vary."
+  },
+  {
+   "product_handle": "superfood-tabs",
+   "product_id": "221d272d-a6c5-4a5d-86ff-ac693926c992",
+   "slug": "intermittent-fasting",
+   "situation": "Intermittent fasting, keto or one meal a day",
+   "who": "People following IF, keto or OMAD",
+   "goal": "Get through the fasting window without fighting hunger",
+   "noticed": "Easier to hold off until the eating window",
+   "timeframe": "First weeks",
+   "verbatim_phrase": "These really work to reduce bloating and make intermittent fasting easier!",
+   "review_ids": [
+    "2485ec25-bf45-4546-b132-f0147e3b2e4d",
+    "36e84d56-96d2-4005-b915-f8b0db27aaa2",
+    "6a7892cf-933b-4e4c-ad7d-736115460db1"
+   ],
+   "quotes": [
+    {
+     "review_id": "36e84d56-96d2-4005-b915-f8b0db27aaa2",
+     "reviewer": "Dylan",
+     "rating": 5,
+     "verified_purchase": true,
+     "featured": false,
+     "verbatim_phrase": "These really work to reduce bloating and make intermittent fasting easier!",
+     "compliance_ok": true,
+     "compliance_note": ""
+    },
+    {
+     "review_id": "2485ec25-bf45-4546-b132-f0147e3b2e4d",
+     "reviewer": "Genevieve",
+     "rating": 5,
+     "verified_purchase": false,
+     "featured": false,
+     "verbatim_phrase": "I intermittent fast every day until 1pm easily without being hungry due to these!",
+     "compliance_ok": true,
+     "compliance_note": ""
+    },
+    {
+     "review_id": "6a7892cf-933b-4e4c-ad7d-736115460db1",
+     "reviewer": "Carolyn M.",
+     "rating": 5,
+     "verified_purchase": false,
+     "featured": false,
+     "verbatim_phrase": "I eat one meal a day (Keto) and these tabs help me to stay on track with no urge to snack in the afternoon.",
+     "compliance_ok": true,
+     "compliance_note": ""
+    }
+   ],
+   "compliance_ok": true,
+   "compliance_note": "Situation framing is structure/function only. Use only quotes with compliance_ok=true in public copy; results vary."
+  },
+  {
+   "product_handle": "superfood-tabs",
+   "product_id": "221d272d-a6c5-4a5d-86ff-ac693926c992",
+   "slug": "sweet-tooth",
+   "situation": "Sweet tooth and sugar cravings",
+   "who": "People who eat well but can't shake sweets, or snack after lunch and at night",
+   "goal": "Quiet sugar cravings",
+   "noticed": "Fewer cravings for sweets and junk food",
+   "timeframe": "Days to weeks",
+   "verbatim_phrase": "I always ate healthy, no fried foods, lots of fresh fruits and vegetables but still wanted sweets.  Superfood drinks helped me to kick that craving",
+   "review_ids": [
+    "61600c4a-c3f4-45ca-b1a8-aea9079cd47f",
+    "913c62bd-4e9c-4299-8456-6f9503a0b1fb",
+    "c9c7b732-6c08-44a1-bfe9-a0ceb026fa3e"
+   ],
+   "quotes": [
+    {
+     "review_id": "61600c4a-c3f4-45ca-b1a8-aea9079cd47f",
+     "reviewer": "Ellen S.",
+     "rating": 5,
+     "verified_purchase": true,
+     "featured": false,
+     "verbatim_phrase": "I always ate healthy, no fried foods, lots of fresh fruits and vegetables but still wanted sweets.  Superfood drinks helped me to kick that craving",
+     "compliance_ok": true,
+     "compliance_note": ""
+    },
+    {
+     "review_id": "913c62bd-4e9c-4299-8456-6f9503a0b1fb",
+     "reviewer": "Lexi R.",
+     "rating": 4,
+     "verified_purchase": true,
+     "featured": false,
+     "verbatim_phrase": "But it kicks my after lunch sugar cravings!",
+     "compliance_ok": true,
+     "compliance_note": ""
+    },
+    {
+     "review_id": "c9c7b732-6c08-44a1-bfe9-a0ceb026fa3e",
+     "reviewer": "Katrina F.",
+     "rating": 5,
+     "verified_purchase": true,
+     "featured": false,
+     "verbatim_phrase": "I don’t crave sweets like I used to and I don’t feel near as hungry as I did before!",
+     "compliance_ok": true,
+     "compliance_note": ""
+    }
+   ],
+   "compliance_ok": true,
+   "compliance_note": "Situation framing is structure/function only. Use only quotes with compliance_ok=true in public copy; results vary."
+  },
+  {
+   "product_handle": "superfood-tabs",
+   "product_id": "221d272d-a6c5-4a5d-86ff-ac693926c992",
+   "slug": "bloating-tight-clothes",
+   "situation": "Bloating that makes clothes feel tight",
+   "who": "People whose stomach feels puffy or tight by the end of the day",
+   "goal": "Feel flatter and more comfortable in their clothes",
+   "noticed": "Less bloating; clothes fit better",
+   "timeframe": "First few days to weeks",
+   "verbatim_phrase": "I use 2-3 tablets a day and I don't ever feel bloated or weighted down, even at the end of the day. My clothes fit better",
+   "review_ids": [
+    "4f69ddeb-9bae-40c5-858a-230db5ecd67b",
+    "5befec51-de1d-4371-b676-1be6f228761b",
+    "7eab99e1-bf61-42aa-8359-d3b8d8d9ba37"
+   ],
+   "quotes": [
+    {
+     "review_id": "5befec51-de1d-4371-b676-1be6f228761b",
+     "reviewer": "Madelyne M.",
+     "rating": 5,
+     "verified_purchase": false,
+     "featured": false,
+     "verbatim_phrase": "I use 2-3 tablets a day and I don't ever feel bloated or weighted down, even at the end of the day. My clothes fit better",
+     "compliance_ok": true,
+     "compliance_note": ""
+    },
+    {
+     "review_id": "7eab99e1-bf61-42aa-8359-d3b8d8d9ba37",
+     "reviewer": "Emma",
+     "rating": 5,
+     "verified_purchase": false,
+     "featured": false,
+     "verbatim_phrase": "so far my clothes are starting to fit much better within the past 2 months.",
+     "compliance_ok": true,
+     "compliance_note": ""
+    },
+    {
+     "review_id": "4f69ddeb-9bae-40c5-858a-230db5ecd67b",
+     "reviewer": "Francine M.",
+     "rating": 5,
+     "verified_purchase": false,
+     "featured": false,
+     "verbatim_phrase": "My bloat is gone!",
+     "compliance_ok": true,
+     "compliance_note": ""
+    }
+   ],
+   "compliance_ok": true,
+   "compliance_note": "Situation framing is structure/function only. Use only quotes with compliance_ok=true in public copy; results vary."
+  },
+  {
+   "product_handle": "superfood-tabs",
+   "product_id": "221d272d-a6c5-4a5d-86ff-ac693926c992",
+   "slug": "workout-routine",
+   "situation": "Gym, walking or workout routine",
+   "who": "People who walk, run or lift regularly",
+   "goal": "A tasty way to hydrate and get energy around workouts",
+   "noticed": "Energy before and after workouts and better hydration",
+   "timeframe": "Same day",
+   "verbatim_phrase": "These tabs taste and make me feel energized before, during and after a workout.",
+   "review_ids": [
+    "320509be-8393-4dc0-9b7f-8c98edab7741",
+    "fe36c209-69d1-4225-976c-c1b915e60c41",
+    "fe8cb29b-2223-43c4-a27a-b4902c9c4750"
+   ],
+   "quotes": [
+    {
+     "review_id": "fe8cb29b-2223-43c4-a27a-b4902c9c4750",
+     "reviewer": "Leslie M.",
+     "rating": 5,
+     "verified_purchase": true,
+     "featured": false,
+     "verbatim_phrase": "These tabs taste and make me feel energized before, during and after a workout.",
+     "compliance_ok": true,
+     "compliance_note": ""
+    },
+    {
+     "review_id": "fe36c209-69d1-4225-976c-c1b915e60c41",
+     "reviewer": "Lori H.",
+     "rating": 5,
+     "verified_purchase": true,
+     "featured": false,
+     "verbatim_phrase": "I drink one every morning as a way to hydrate after my walk.",
+     "compliance_ok": true,
+     "compliance_note": ""
+    },
+    {
+     "review_id": "320509be-8393-4dc0-9b7f-8c98edab7741",
+     "reviewer": "megan p.",
+     "rating": 5,
+     "verified_purchase": true,
+     "featured": false,
+     "verbatim_phrase": "It's a must have in my workout water bottle!",
+     "compliance_ok": true,
+     "compliance_note": ""
+    }
+   ],
+   "compliance_ok": true,
+   "compliance_note": "Situation framing is structure/function only. Use only quotes with compliance_ok=true in public copy; results vary."
+  },
+  {
+   "product_handle": "superfood-tabs",
+   "product_id": "221d272d-a6c5-4a5d-86ff-ac693926c992",
+   "slug": "travel",
+   "situation": "Travel and on the go",
+   "who": "Frequent travelers, road-trippers and drivers",
+   "goal": "A healthy drink without packing powders or a blender",
+   "noticed": "Easy to carry, keeps routine going away from home",
+   "timeframe": "Immediately",
+   "verbatim_phrase": "We used to take ingredients for smoothies & a blender when traveling. Now all we do is pop the tube in my purse & we have a healthy drink every AM.",
+   "review_ids": [
+    "384e4a26-78e9-4ba6-94e9-94b3961ccf1c",
+    "4c1d3fc2-8d62-4f68-9eb3-4fc915981666",
+    "e5d545eb-f767-4086-b9d6-1d4f7ecad783"
+   ],
+   "quotes": [
+    {
+     "review_id": "384e4a26-78e9-4ba6-94e9-94b3961ccf1c",
+     "reviewer": "Jacki",
+     "rating": 5,
+     "verified_purchase": false,
+     "featured": false,
+     "verbatim_phrase": "We used to take ingredients for smoothies & a blender when traveling. Now all we do is pop the tube in my purse & we have a healthy drink every AM.",
+     "compliance_ok": true,
+     "compliance_note": ""
+    },
+    {
+     "review_id": "e5d545eb-f767-4086-b9d6-1d4f7ecad783",
+     "reviewer": "Adrienne A.",
+     "rating": 5,
+     "verified_purchase": false,
+     "featured": false,
+     "verbatim_phrase": "I had forgotten to pack them when I went on vacation and let me tell you, I definitely noticed a difference not taking",
+     "compliance_ok": true,
+     "compliance_note": ""
+    },
+    {
+     "review_id": "4c1d3fc2-8d62-4f68-9eb3-4fc915981666",
+     "reviewer": "Kat",
+     "rating": 4,
+     "verified_purchase": false,
+     "featured": false,
+     "verbatim_phrase": "I drive for a living so it's easy on the go",
+     "compliance_ok": true,
+     "compliance_note": ""
+    }
+   ],
+   "compliance_ok": true,
+   "compliance_note": "Situation framing is structure/function only. Use only quotes with compliance_ok=true in public copy; results vary."
+  },
+  {
+   "product_handle": "superfood-tabs",
+   "product_id": "221d272d-a6c5-4a5d-86ff-ac693926c992",
+   "slug": "couples-families",
+   "situation": "Doing it together with a partner or family",
+   "who": "Couples and families building healthier habits together",
+   "goal": "Share a simple daily routine",
+   "noticed": "Partners and kids enjoy it too",
+   "timeframe": "Ongoing",
+   "verbatim_phrase": "Every morning my husband and I drink them. Gets us going !",
+   "review_ids": [
+    "32345a52-163f-43d5-a633-8760be78d14f",
+    "5991b0a0-e38d-4ced-9e37-cd3380cde86c",
+    "75f0ced3-72d9-409a-be80-c0af0285f14e"
+   ],
+   "quotes": [
+    {
+     "review_id": "32345a52-163f-43d5-a633-8760be78d14f",
+     "reviewer": "Corrie P.",
+     "rating": 5,
+     "verified_purchase": true,
+     "featured": false,
+     "verbatim_phrase": "Every morning my husband and I drink them. Gets us going !",
+     "compliance_ok": true,
+     "compliance_note": ""
+    },
+    {
+     "review_id": "75f0ced3-72d9-409a-be80-c0af0285f14e",
+     "reviewer": "Gina P.",
+     "rating": 4,
+     "verified_purchase": true,
+     "featured": false,
+     "verbatim_phrase": "I love superfood tabs, my daughter loves them, too!",
+     "compliance_ok": true,
+     "compliance_note": ""
+    },
+    {
+     "review_id": "5991b0a0-e38d-4ced-9e37-cd3380cde86c",
+     "reviewer": "Brenda W.",
+     "rating": 5,
+     "verified_purchase": false,
+     "featured": false,
+     "verbatim_phrase": "My husband is a football ref. He drinks it to stay hydrated.",
+     "compliance_ok": true,
+     "compliance_note": ""
+    }
+   ],
+   "compliance_ok": true,
+   "compliance_note": "Situation framing is structure/function only. Use only quotes with compliance_ok=true in public copy; results vary."
+  },
+  {
+   "product_handle": "superfood-tabs",
+   "product_id": "221d272d-a6c5-4a5d-86ff-ac693926c992",
+   "slug": "coffee-swap",
+   "situation": "Swapping or cutting back on coffee",
+   "who": "Coffee drinkers who want energy without the jitters or crash",
+   "goal": "Steady energy without the coffee rollercoaster",
+   "noticed": "Steady energy and mood; some dropped coffee entirely",
+   "timeframe": "Within weeks",
+   "verbatim_phrase": "it gives me energy so I don’t need coffee.",
+   "review_ids": [
+    "2716a2c2-c286-4a28-9d72-d80161679dfe",
+    "27d5e4af-5c80-42df-a6ed-e6eec17330ff",
+    "2ca6e424-0f73-421f-9fb8-9a74baf19655",
+    "786ad7bb-4c96-4cc0-8279-5cdbdf70aca0"
+   ],
+   "quotes": [
+    {
+     "review_id": "27d5e4af-5c80-42df-a6ed-e6eec17330ff",
+     "reviewer": "Phia M.",
+     "rating": 5,
+     "verified_purchase": true,
+     "featured": true,
+     "verbatim_phrase": "it gives me energy so I don’t need coffee.",
+     "compliance_ok": true,
+     "compliance_note": ""
+    },
+    {
+     "review_id": "2ca6e424-0f73-421f-9fb8-9a74baf19655",
+     "reviewer": "Jennifer H.",
+     "rating": 5,
+     "verified_purchase": true,
+     "featured": true,
+     "verbatim_phrase": "My daily “coffee” hate coffee don’t do it never have never will!",
+     "compliance_ok": true,
+     "compliance_note": ""
+    },
+    {
+     "review_id": "2716a2c2-c286-4a28-9d72-d80161679dfe",
+     "reviewer": "Maximos S.",
+     "rating": 5,
+     "verified_purchase": false,
+     "featured": false,
+     "verbatim_phrase": "Started taking it around 2 months ago in the morning and completely stopped drinking coffee.",
+     "compliance_ok": true,
+     "compliance_note": ""
+    },
+    {
+     "review_id": "786ad7bb-4c96-4cc0-8279-5cdbdf70aca0",
+     "reviewer": "Donna B.",
+     "rating": 5,
+     "verified_purchase": false,
+     "featured": false,
+     "verbatim_phrase": "There is no weird caffeine high & consequent crash",
+     "compliance_ok": true,
+     "compliance_note": ""
+    }
+   ],
+   "compliance_ok": true,
+   "compliance_note": "Situation framing is structure/function only. Use only quotes with compliance_ok=true in public copy; results vary."
+  }
+ ]
+}

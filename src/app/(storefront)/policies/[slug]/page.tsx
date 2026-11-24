@@ -2,35 +2,42 @@
  * Storefront policy page — /policies/{slug}.
  *
  * Renders the customer-facing markdown from the `policies` table for the
- * active workspace. Source of truth is shared with the AI orchestrator —
- * when policy text is updated, both this public page AND the AI's
- * operating policy update in lockstep.
+ * active workspace, via the policies SDK (`getPolicyCustomerFacing`). Source
+ * of truth is shared with the AI orchestrator — when policy text is updated,
+ * both this public page AND the AI's operating policy update in lockstep.
  *
  * Customer-facing ONLY. The `internal_summary` and `rules` fields exist
- * but are never rendered here.
+ * but are never rendered here (and never exceptions the team can grant —
+ * the public page states the standard policy only).
+ *
+ * Look: shared legal-page design (peach title band, policy sidebar + "On this
+ * page" contents, white text card, support box). Same design as the Shopify
+ * theme's /policies/* pages — see legal.css.
  */
 import { notFound } from "next/navigation";
 import { cacheLife } from "next/cache";
 import type { Metadata } from "next";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { getPolicyCustomerFacing } from "@/lib/policies";
 import { renderPolicyMarkdown } from "../_lib/markdown";
+import "../_lib/legal.css";
 
-// Allowlist + nice display title fallback. We deliberately keep this fixed
-// rather than rendering arbitrary slugs — these are the canonical 5 policies.
-const VALID_SLUGS = ["returns", "refunds", "subscriptions", "exchanges", "crisis", "privacy", "terms"] as const;
-type PolicySlug = typeof VALID_SLUGS[number];
+// Allowlist + display labels. We deliberately keep this fixed rather than
+// rendering arbitrary slugs. `label` is the sidebar name, `short` the mobile pill.
+const POLICY_LINKS = [
+  { slug: "returns", label: "Returns & Money-Back Guarantee", short: "Returns" },
+  { slug: "refunds", label: "Refunds", short: "Refunds" },
+  { slug: "subscriptions", label: "Subscriptions", short: "Subscriptions" },
+  { slug: "exchanges", label: "Exchanges & Replacements", short: "Replacements" },
+  { slug: "order-cancellation", label: "Order Cancellation", short: "Cancellation" },
+  { slug: "crisis", label: "Out-of-Stock Substitutions", short: "Out of stock" },
+  { slug: "privacy", label: "Privacy Policy", short: "Privacy" },
+  { slug: "terms", label: "Terms & Conditions", short: "Terms" },
+] as const;
+type PolicySlug = typeof POLICY_LINKS[number]["slug"];
+const VALID_SLUGS: readonly string[] = POLICY_LINKS.map((l) => l.slug);
 
-// Display titles for cross-links. Names match what's in the policies table
-// but kept here so the link block renders without a second DB call.
-const POLICY_LINKS: { slug: PolicySlug; label: string }[] = [
-  { slug: "subscriptions", label: "Subscriptions" },
-  { slug: "returns", label: "Returns & Money-Back Guarantee" },
-  { slug: "refunds", label: "Refunds" },
-  { slug: "exchanges", label: "Exchanges & Replacements" },
-  { slug: "crisis", label: "Out-of-Stock Substitutions" },
-  { slug: "privacy", label: "Privacy Policy" },
-  { slug: "terms", label: "Terms & Conditions" },
-];
+const SUPPORT_EMAIL = "hello@superfoodscompany.com";
 
 interface PageProps {
   params: Promise<{ slug: string }>;
@@ -49,23 +56,15 @@ async function loadPolicy(slug: string) {
     .single();
   if (!ws) return null;
 
-  const { data } = await admin
-    .from("policies")
-    .select("slug, name, customer_summary, version, effective_at, updated_at")
-    .eq("workspace_id", ws.id)
-    .eq("slug", slug)
-    .eq("is_active", true)
-    .is("superseded_by", null)
-    .order("version", { ascending: false })
-    .limit(1)
-    .maybeSingle();
-  return data ? { ...data, workspace_name: ws.name } : null;
+  const policy = await getPolicyCustomerFacing(admin, ws.id, slug);
+  return policy ? { ...policy, workspace_name: ws.name as string } : null;
 }
 
 export async function generateMetadata({ params }: PageProps): Promise<Metadata> {
   "use cache";
   cacheLife({ stale: 3600, revalidate: 3600, expire: 3600 });
   const { slug } = await params;
+  if (!VALID_SLUGS.includes(slug)) return { title: "Policy not found" };
   const policy = await loadPolicy(slug);
   if (!policy) return { title: "Policy not found" };
   return {
@@ -79,50 +78,79 @@ export default async function PolicyPage({ params }: PageProps) {
   "use cache";
   cacheLife({ stale: 3600, revalidate: 3600, expire: 3600 });
   const { slug } = await params;
-  if (!VALID_SLUGS.includes(slug as PolicySlug)) return notFound();
+  if (!VALID_SLUGS.includes(slug)) return notFound();
 
-  const policy = await loadPolicy(slug);
+  const policy = await loadPolicy(slug as PolicySlug);
   if (!policy) return notFound();
 
-  const html = renderPolicyMarkdown(policy.customer_summary);
+  const { html, headings } = renderPolicyMarkdown(policy.customer_summary);
   const updated = new Date(policy.updated_at).toLocaleDateString("en-US", {
     year: "numeric", month: "long", day: "numeric",
   });
 
   return (
-    <main className="mx-auto max-w-3xl px-6 py-12 md:py-20">
-      <nav className="mb-8 text-sm text-zinc-500">
-        <a href="/" className="hover:text-zinc-900">Home</a>
-        <span className="mx-2">/</span>
-        <span>{policy.name}</span>
-      </nav>
-      <article
-        className="policy-article"
-        dangerouslySetInnerHTML={{ __html: html }}
-      />
+    <div className="lp">
+      <div className="lp-brand">
+        <a href="/">{policy.workspace_name}</a>
+      </div>
 
-      <section className="mt-16 border-t border-zinc-200 pt-8">
-        <h2 className="text-sm font-semibold uppercase tracking-wide text-zinc-500 mb-4">Other Policies</h2>
-        <ul className="space-y-2">
-          {POLICY_LINKS.filter(l => l.slug !== slug).map(l => (
-            <li key={l.slug}>
-              <a
-                href={`/policies/${l.slug}`}
-                className="text-emerald-700 underline-offset-2 hover:underline"
-              >
-                {l.label}
-              </a>
-            </li>
-          ))}
-        </ul>
+      <section className="lp-hero">
+        <span className="lp-eyebrow">Our policies</span>
+        <h1>{policy.name}</h1>
+        <div className="lp-meta">
+          Last updated {updated} · <a href={`mailto:${SUPPORT_EMAIL}`}>Questions? We&apos;re here to help</a>
+        </div>
       </section>
 
-      <footer className="mt-12 border-t border-zinc-200 pt-6 text-sm text-zinc-500">
-        Last updated {updated}.{" "}
-        <a href="mailto:support@superfoodscompany.com" className="text-emerald-700 underline-offset-2 hover:underline">
-          Questions? Contact support.
-        </a>
-      </footer>
-    </main>
+      <nav className="lp-pills" aria-label="Policies">
+        {POLICY_LINKS.map((l) => (
+          <a key={l.slug} href={`/policies/${l.slug}`} aria-current={l.slug === slug ? "page" : undefined}>
+            {l.short}
+          </a>
+        ))}
+      </nav>
+
+      <div className="lp-wrap">
+        <aside className="lp-side">
+          <h4>Policies</h4>
+          <ul className="lp-nav">
+            {POLICY_LINKS.map((l) => (
+              <li key={l.slug}>
+                <a href={`/policies/${l.slug}`} aria-current={l.slug === slug ? "page" : undefined}>
+                  {l.label}
+                </a>
+              </li>
+            ))}
+          </ul>
+          {headings.length > 1 && headings.length <= 12 && (
+            <>
+              <h4>On this page</h4>
+              <ul className="lp-toc">
+                {headings.map((h) => (
+                  <li key={h.id}>
+                    <a href={`#${h.id}`}>{h.text}</a>
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
+        </aside>
+
+        <main>
+          <article className="lp-card">
+            <div className="lp-body" dangerouslySetInnerHTML={{ __html: html }} />
+          </article>
+          <div className="lp-help">
+            <div>
+              <b>Still have a question?</b>
+              <span>Our customer success team is happy to help.</span>
+            </div>
+            <a className="lp-btn" href={`mailto:${SUPPORT_EMAIL}`}>Contact support</a>
+          </div>
+        </main>
+      </div>
+
+      <p className="lp-foot">© {new Date().getFullYear()} {policy.workspace_name}. All rights reserved.</p>
+    </div>
   );
 }

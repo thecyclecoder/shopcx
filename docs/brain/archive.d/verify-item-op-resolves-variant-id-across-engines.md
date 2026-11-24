@@ -1,0 +1,1 @@
+- **verifyActionInDB item-op cases canonicalize variant IDs across engines** · verified 2026-11-24 · → [[../libraries/action-executor]]

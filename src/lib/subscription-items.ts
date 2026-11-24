@@ -1097,7 +1097,7 @@ export async function subAddOneTimeGift(
   variantId: string,
   quantity: number = 1,
   opts: { free?: boolean; priceCents?: number | null } = {},
-): Promise<{ success: boolean; error?: string; free_confirmed?: boolean; backend?: "internal" | "gift_order" }> {
+): Promise<{ success: boolean; error?: string; free_confirmed?: boolean; backend?: "internal" | "gift_order" | "shopcx" }> {
   // ⭐ appstle_retired chokepoint (no-op while the switch is off): a retired-Appstle sub is rebuilt
   // on ShopCX from our mirror first, and the op continues on the shopcx branch below.
   {
@@ -1128,7 +1128,21 @@ export async function subAddOneTimeGift(
   // The cycle-scoped path is for gifts attached to a renewal (the portal's one-time add-ons and
   // the cancel-flow save offer), where shipping with the order IS the intent.
   if (!free) {
-    return { success: false, error: "Paid one-time add-ons need an internal sub or a charged order.", backend: "gift_order" };
+    // A PAID add-on rides the next renewal and is charged with it. A ShopCX-billed contract supports
+    // that natively as a cycle-scoped line (shopcxAddOneTimeLine at the item price), so the customer
+    // gets it with the order they were promised. Refusing here sent a $29.95 tumbler out free on
+    // 2026-11-24 (Janet, contract 54133162157) when it could simply have been added to her Dec 21 order.
+    const { resolveBillingSource } = await import("@/lib/internal-subscription");
+    if ((await resolveBillingSource(workspaceId, contractId)) === "shopcx") {
+      const price = opts.priceCents;
+      if (price == null || !Number.isFinite(price) || price <= 0) {
+        return { success: false, error: "A paid one-time add-on needs a positive priceCents.", backend: "shopcx" };
+      }
+      const { shopcxAddOneTimeLine } = await import("@/lib/commerce/shopcx-line-ops");
+      const r = await shopcxAddOneTimeLine(workspaceId, contractId, variantId, qty, Math.round(price));
+      return { success: r.success, error: r.error, free_confirmed: false, backend: "shopcx" };
+    }
+    return { success: false, error: "Paid one-time add-ons need an internal or ShopCX-billed sub, or a charged order.", backend: "gift_order" };
   }
   const shopifyVariantId = await resolveShopifyVariantId(variantId);
   if (!shopifyVariantId) {

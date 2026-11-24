@@ -358,13 +358,32 @@ export async function specsMaxUpdatedAt(workspaceId: string): Promise<Date | nul
  * overlay (short_circuit / merged_pr flags) is read whole-workspace on every board render. Same
  * shape the PostgREST reader ships, just without the preamble.
  *
+ * db-roadmap-reads-skip-folded-specs — `excludeFolded` joins `public.specs` and drops every card
+ * state whose spec has been folded off the board (`specs.status = 'folded'`). The standing passes and
+ * directors only ever overlay active-spec slugs, so a folded spec's frozen card row is pure wire cost
+ * (~1,500 rows/call, measured 21% of project egress). An orphan card state with no matching `specs`
+ * row (LEFT JOIN → NULL status) is kept: `IS DISTINCT FROM 'folded'` is true for NULL, so the filter
+ * only ever removes a provably-folded spec.
+ *
  * Returns:
  *   - `Array<row>` on success (empty array when no card_state rows exist for the workspace)
  *   - `null` on pool unavailable / query error (caller falls back to the supabase-js `.from()` path)
  */
 export async function listSpecCardStates<C extends QueryResultRow = QueryResultRow>(
   workspaceId: string,
+  opts: { excludeFolded?: boolean } = {},
 ): Promise<C[] | null> {
+  if (opts.excludeFolded) {
+    return pgQuery<C>(
+      `SELECT cs.workspace_id, cs.spec_slug, cs.status, cs.phase_states, cs.flags, cs.last_merge_sha, cs.updated_at
+         FROM public.spec_card_state cs
+         LEFT JOIN public.specs s
+           ON s.workspace_id = cs.workspace_id AND s.slug = cs.spec_slug
+         WHERE cs.workspace_id = $1
+           AND s.status IS DISTINCT FROM 'folded'`,
+      [workspaceId],
+    );
+  }
   const rows = await pgQuery<C>(
     `SELECT workspace_id, spec_slug, status, phase_states, flags, last_merge_sha, updated_at
        FROM public.spec_card_state

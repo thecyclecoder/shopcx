@@ -51,7 +51,14 @@ A reminder text is only ever **scheduled** for an instant provably between **9:0
 - **Target 11:00 on the recipient's LOCAL calendar date** (`localDateKey` → `computeSendInstant`), targeting `PRE_RENEWAL_SMS_LOCAL_HOUR` (11:00). If that instant is already past or `<16 min` away (`SMS_MIN_SCHEDULE_LEAD_MS`), roll to **11:00 local TOMORROW** (Twilio `SendAt` allows up to 7 days). We **always** return a `SendAt` — a passed slot can never fall through to an immediate (possibly-night) send.
 - **Fail-closed guard.** Immediately before `sendSMS`, `maybeSendConsentedSms` re-asserts `isWithinSmsSendWindow(sendAt, tz)` ([[marketing-text-timezone]], window = `[SMS_WINDOW_START_HOUR 9, SMS_WINDOW_END_HOUR 20)`); if it ever fails (DST / resolver edge) the send is suppressed `suppressed_quiet_hours` rather than risk a breach. 11:00 local always passes, so this is defense-in-depth.
 
-The send goes via [[twilio]] `sendSMS` **always with `SendAt`**. The ledger records `channel='sms'`, `sms_resolved_timezone` + `sms_timezone_source`, `sms_scheduled_send_at`, and the suppression reason (`suppressed_no_timezone` / `suppressed_quiet_hours` / consent reasons).
+The send goes via [[twilio]] `sendSMS` **always with `SendAt` AND the marketing Messaging Service**. The ledger records `channel='sms'`, `sms_resolved_timezone` + `sms_timezone_source`, `sms_scheduled_send_at`, and the suppression reason (`suppressed_no_timezone` / `suppressed_quiet_hours` / `suppressed_no_messaging_service` / consent reasons).
+
+### Scheduled text goes through the marketing Messaging Service (launch-readiness Phase 1)
+
+A computed `SendAt` only protects the customer if Twilio actually **holds** the message until then — and Twilio only schedules messages sent through a Messaging Service. So `runPreRenewalRemindersForWorkspace` reads `workspaces.twilio_marketing_messaging_service_sid` (the same column [[../inngest/marketing-text]] uses) alongside the workspace name/color/phone and threads it through `sendTreatmentReminder` → `maybeSendConsentedSms` → `sendSMS(..., { sendAt, messagingServiceSid })`.
+
+- **No Messaging Service configured → no text (email still goes).** `maybeSendConsentedSms` returns `suppressed_no_messaging_service` before any consent/timezone work when the SID is null — a scheduled text with no Messaging Service cannot be held to the window, so we suppress rather than risk `sendSMS`'s own hard refusal (or, on a bare number, an immediate 7-8 AM send).
+- **`sendSMS` is the backstop for every caller.** It returns `{ success: false, error: 'scheduled_send_requires_messaging_service' }` for ANY `sendAt` without a `messagingServiceSid`, never falling back to an immediate send. See [[../integrations/twilio]] § Scheduled sends. The only other `sendAt` caller, `marketing-text.ts`, already passes `campaign.messaging_service_sid`.
 
 ### House SMS block layout
 

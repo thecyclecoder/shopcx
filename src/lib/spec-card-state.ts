@@ -157,8 +157,21 @@ export function isOverrideStatus(status: string | null | undefined): boolean {
 // brain-roadmap `dbRowToSpecCard`; the spec-detail page reads `spec.card.phases` directly (no overlay onto the
 // retired `spec_card_state.phase_states` slot).
 
-/** Every spec_card_state row for a workspace, keyed by spec slug — the board's DB-first read. */
-export async function getSpecCardStates(workspaceId: string): Promise<Record<string, SpecCardState>> {
+/**
+ * Every spec_card_state row for a workspace, keyed by spec slug — the board's DB-first read.
+ *
+ * db-roadmap-reads-skip-folded-specs — pass `{ excludeFolded: true }` to drop every card state whose
+ * spec has been folded off the board. The box standing passes + directors only ever overlay active
+ * slugs, so folded card rows were ~1,500 rows/call of pure wire cost (21% of project egress). The
+ * pooled path does the join server-side ([[pg-pool]] `listSpecCardStates`); the supabase-js fallback
+ * can't join, so it reads the cheap folded-slug index ([[specs-table]] `listArchivedSpecIndex` —
+ * slug/title/date only, no phases) and drops those slugs in-memory. Default (no option) keeps the
+ * full folded-inclusive read for callers that need it.
+ */
+export async function getSpecCardStates(
+  workspaceId: string,
+  opts: { excludeFolded?: boolean } = {},
+): Promise<Record<string, SpecCardState>> {
   // spec-read-eff-pool — Phase 2 of docs/brain/specs/spec-read-efficiency-for-scaling-fleet.md.
   // Pooled straggler read — one pooled query strips the PostgREST preamble off the full-workspace
   // scan every board render fires. `null` = pool unavailable / query error → fall through to the
@@ -166,7 +179,7 @@ export async function getSpecCardStates(workspaceId: string): Promise<Record<str
   let rows: SpecCardState[] | null = null;
   try {
     const { listSpecCardStates } = await import("@/lib/pg-pool");
-    const pooled = await listSpecCardStates<SpecCardState>(workspaceId);
+    const pooled = await listSpecCardStates<SpecCardState>(workspaceId, { excludeFolded: opts.excludeFolded });
     if (pooled !== null) rows = pooled;
   } catch {
     /* fall through to supabase-js .from() */
@@ -178,6 +191,18 @@ export async function getSpecCardStates(workspaceId: string): Promise<Record<str
       .select("workspace_id, spec_slug, status, phase_states, flags, last_merge_sha, updated_at")
       .eq("workspace_id", workspaceId);
     rows = (data ?? []) as SpecCardState[];
+    // The supabase-js path can't join specs, so filter folded slugs in-memory off the cheap archive
+    // index (slug-only, no phases jsonb crosses the wire). Best-effort: a read error leaves the full
+    // set — over-fetching is always safe, hiding a live card never is.
+    if (opts.excludeFolded && rows.length) {
+      try {
+        const { listArchivedSpecIndex } = await import("@/lib/specs-table");
+        const foldedSlugs = new Set((await listArchivedSpecIndex(workspaceId)).map((r) => r.slug));
+        if (foldedSlugs.size) rows = rows.filter((r) => !foldedSlugs.has(r.spec_slug));
+      } catch {
+        /* leave the full set — over-fetching is safe */
+      }
+    }
   }
   const out: Record<string, SpecCardState> = {};
   for (const r of rows) out[r.spec_slug] = r;

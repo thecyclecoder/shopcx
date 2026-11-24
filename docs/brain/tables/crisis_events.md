@@ -64,9 +64,32 @@ const { count } = await admin.from("crisis_events")
   .gte("created_at", since);
 ```
 
+## Substitution behavior — the order row is NOT what shipped during a crisis
+
+While a crisis is **active**, Amplifier ships the affected (out-of-stock) SKU as an **alternative
+flavor** — the crisis's `default_swap_title` / `default_swap_variant_id`. But `orders.line_items`
+still records the **ordered** variant, so a line showing "Cocoa shipped" is the ordered flavor, NOT
+what the warehouse actually put in the box.
+
+The [[../libraries/crisis-substitution]] helper flags these lines: a line is `likely_substituted`
+when its `variant_id`/`sku` matches a crisis's `affected_variant_id`/`affected_sku`, the crisis
+covered the ship (status `active`, or `resolved` on/after `orders.amplifier_shipped_at`), and the
+order shipped on or after the crisis's `created_at`. The likely-shipped flavor is `default_swap_title`.
+Sol's order context (`getCustomerAccount`) and June's ground-truth / `remedy_state` brief
+(`getCxOrders` / `formatCxOrders`) both surface a `[LIKELY SHIPPED AS <flavor> — crisis substitution]`
+note on such a line.
+
+**Rule for June + Sol:** a customer's wrong-flavor report on a `likely_substituted` line is TRUE —
+it is OUR fault (the substitution), never a false claim. Do not cite the order row to deny it; handle
+it on the crisis white-glove path. Ground truth: Yukiko Ban (tickets e159a032 / 3488aabf) — June
+ruled her Hazelnut-for-Cocoa report false three times because the order row said Cocoa.
+
 ## Gotchas
 
-_None documented. Probe before assuming — see [[../README]] § Probing technique._
+- **The ordered variant on `orders.line_items` is not the shipped flavor during a crisis** — see
+  the Substitution behavior section above. Read `likely_substituted` (via
+  [[../libraries/crisis-substitution]]), never the raw order line, as ground truth for what shipped.
+- Probe before assuming — see [[../README]] § Probing technique.
 
 ---
 

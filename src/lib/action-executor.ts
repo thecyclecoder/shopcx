@@ -119,7 +119,7 @@ export interface ActionParams {
   return_id?: string;
   // add_one_time_gift — a one-time item on the sub's NEXT renewal that drops
   // off after it ships (never recurs). `free` defaults true (a $0 gift); set
-  // false + base_price_cents for a paid one-time add-on (internal only).
+  // false + base_price_cents for a paid one-time add-on (internal and ShopCX-billed subs).
   free?: boolean;
   pause_days?: number | string; // model/journey configs may send "60" as a string — coerce with Number() before use
   // Shipping address — used by update_shipping_address (and as an
@@ -2160,7 +2160,7 @@ export const directActionHandlers: Record<
    * add_one_time_gift — add a ONE-TIME item to the sub's NEXT renewal that
    * rides one order then drops off (does NOT recur). `free` defaults true (a
    * $0 goodwill gift, e.g. "add a frother as a gift with my next order"); set
-   * false + base_price_cents for a paid one-time add-on (internal subs).
+   * false + base_price_cents for a paid one-time add-on (internal and ShopCX-billed subs; it is charged with that renewal).
    *
    * Internal-aware via subAddOneTimeGift. On an Appstle sub a FREE gift that
    * can't be confirmed as $0 is rolled back and returns success:false — a gift
@@ -5807,6 +5807,48 @@ export async function verifyActionInDB(
       type Line = { variant_id?: string | number; quantity?: number; price_cents?: number };
       const items = (sub?.items || []) as Line[];
 
+      // Canonicalize BOTH sides to the internal variant UUID before comparing.
+      // Internal-engine subs store subscriptions.items[].variant_id as our catalog
+      // UUID (e.g. dc100894-… Peach Mango), but the orchestrator's action carries the
+      // Shopify NUMERIC variant id (e.g. 42614433513645), so a raw String===String
+      // never matches — a swap/add/remove/qty op that ACTUALLY LANDED verified FALSE,
+      // the self-heal loop retried a now-absent old variant ("Variant 6ab0ddac-… not on
+      // subscription"), and the resolved ticket false-escalated (ai:fix / ai:fix-fail)
+      // while the customer got a "we ran into a small issue" cliffhanger (ticket
+      // f6c18f31, Sara Kasemeier, sub 9abe2bc2, contract internal-b5c2cee7436841a3 —
+      // SL→Peach Mango swap landed on line dc100894 but verified false against
+      // new_variant_id 42614433513645). `canon()` mirrors the item-op handlers'
+      // resolveVariant (src/lib/internal-subscription.ts): a value already in UUID shape
+      // IS the canonical id (idempotent); a Shopify numeric id maps to the catalog UUID
+      // via product_variants.shopify_variant_id. Read through ctx.admin + the same
+      // workspace scope as the rest of this verifier (not resolveVariant's own admin
+      // client) so the resolution is tenant-scoped and testable. Falls back to the raw
+      // value when workspaceId is absent (callers that pass only { admin, ticketId }) or
+      // the catalog lookup misses — preserving prior behavior rather than regressing.
+      // Mirrors the add_one_time_gift backend-shape fix (ticket 6a8ddfd9).
+      const canonCache = new Map<string, string>();
+      const canon = async (raw: string | number | undefined | null): Promise<string> => {
+        const s = String(raw ?? "");
+        if (!s) return "";
+        const cached = canonCache.get(s);
+        if (cached !== undefined) return cached;
+        let resolved = s;
+        // Only a non-UUID (a Shopify numeric id) needs mapping — a UUID is already the
+        // canonical internal variant id. Match resolveVariant's column selection.
+        if (ctx.workspaceId && !isSubscriptionUuid(s)) {
+          const { data: v } = await admin
+            .from("product_variants")
+            .select("id")
+            .eq("workspace_id", ctx.workspaceId)
+            .eq("shopify_variant_id", s)
+            .maybeSingle();
+          if (v?.id) resolved = String(v.id);
+        }
+        canonCache.set(s, resolved);
+        return resolved;
+      };
+      const itemVids = await Promise.all(items.map(i => canon(i.variant_id)));
+
       if (action.type === "swap_variant") {
         // Post-swap: the target line's variant_id should equal
         // action.new_variant_id; the pre-swap variant_id should be gone
@@ -5814,12 +5856,14 @@ export async function verifyActionInDB(
         // the invariant the spec names: NEW is present).
         const newVid = action.new_variant_id || (action as { new_id?: string }).new_id;
         if (!newVid) return true;
-        return items.some(i => String(i.variant_id) === String(newVid));
+        const target = await canon(newVid);
+        return itemVids.includes(target);
       }
 
       if (action.type === "add_item") {
         if (!action.variant_id) return true;
-        return items.some(i => String(i.variant_id) === String(action.variant_id));
+        const target = await canon(action.variant_id);
+        return itemVids.includes(target);
       }
 
       if (action.type === "add_one_time_gift") {
@@ -5836,14 +5880,16 @@ export async function verifyActionInDB(
       if (action.type === "remove_item") {
         const vid = action.variant_id || (action as { variantId?: string }).variantId;
         if (!vid) return true;
-        return !items.some(i => String(i.variant_id) === String(vid));
+        const target = await canon(vid);
+        return !itemVids.includes(target);
       }
 
       if (action.type === "change_quantity" || action.type === "change_item_quantity") {
         if (!action.variant_id || action.quantity == null) return true;
-        const line = items.find(i => String(i.variant_id) === String(action.variant_id));
-        if (!line) return false;
-        return Number(line.quantity) === Number(action.quantity);
+        const target = await canon(action.variant_id);
+        const idx = itemVids.indexOf(target);
+        if (idx === -1) return false;
+        return Number(items[idx].quantity) === Number(action.quantity);
       }
 
       // update_line_item_price — base-price restore. Compare price_cents
@@ -5856,9 +5902,10 @@ export async function verifyActionInDB(
       // still passes the handler's own success flag; verifyActionInDB
       // stays conservative and reads only what the action declared.
       if (action.variant_id == null || action.base_price_cents == null) return true;
-      const line = items.find(i => String(i.variant_id) === String(action.variant_id));
-      if (!line) return false;
-      return Number(line.price_cents) === Number(action.base_price_cents);
+      const priceTarget = await canon(action.variant_id);
+      const priceIdx = itemVids.indexOf(priceTarget);
+      if (priceIdx === -1) return false;
+      return Number(items[priceIdx].price_cents) === Number(action.base_price_cents);
     }
     default:
       // Fail-safe: no verification wired for this action type yet —

@@ -29,7 +29,7 @@ Every mutation POSTs to `src/app/api/journey/[token]/edit/route.ts`, which dispa
 |---|---|
 | swap / swap_product | `executeLineItemAction` ([[../libraries/remedy-actions]]) → `subSwapVariant` ([[../libraries/subscription-items]]) |
 | change quantity | `executeLineItemAction` → `subChangeQuantity` |
-| remove | `executeLineItemAction` → `subRemoveItem` |
+| remove | `executeLineItemAction` → `subRemoveItem`. Removing the only item is refused up front with a `last_item` validation message (swap, skip or cancel instead), and the page hides Remove when one item is left, so it never raises an "apply manually" alert. |
 | add item | `subAddItem` ([[../libraries/subscription-items]]) |
 | skip | `subscriptionSkipNextOrder` (`src/lib/commerce/subscription.ts`) |
 | change date | `subscriptionUpdateNextBillingDate` |

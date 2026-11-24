@@ -26,6 +26,8 @@ Standard Twilio basic auth: `Authorization: Basic base64(SID:TOKEN)`.
 
 `MessagingServiceSid` (marketing) vs `From=+1...` (transactional) — separate sender pools so marketing throughput doesn't congest transactional.
 
+**Scheduled sends REQUIRE a Messaging Service (`sendSMS` hard-refuses otherwise).** Twilio only honours `SendAt` (`ScheduleType=fixed`, 15 min–7 days out) for messages sent through a Messaging Service. A `SendAt` from a bare `From` number is rejected or sent immediately — for the pre-renewal reminder's 13:00 UTC run that's 7-8 AM local, a breach of the CEO's 9 AM-local legal rule. So `sendSMS(workspaceId, to, body, { sendAt })` returns `{ success: false, error: 'scheduled_send_requires_messaging_service' }` WITHOUT calling Twilio whenever `sendAt` is set and `messagingServiceSid` is empty — it NEVER falls back to an immediate send. The marketing Messaging Service lives on `workspaces.twilio_marketing_messaging_service_sid` (read by [[../inngest/marketing-text]] and [[../libraries/pre-renewal-reminders]]). Guard test: `npm run test:twilio-scheduled-send-guard`.
+
 ## Rate limits + retry
 
 - ~100 messages/sec per long code / short code / Messaging Service.

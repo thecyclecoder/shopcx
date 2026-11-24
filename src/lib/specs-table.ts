@@ -304,6 +304,11 @@ export interface ListSpecsFilter {
    *  spec-read-egress-scope-and-cursor: when omitted, a `status` filter NARROWS the default — see
    *  [[scopeForFilter]]. Passing `scope` explicitly always wins. */
   scope?: SpecScope;
+  /** db-roadmap-reads-skip-folded-specs — the in-flight filter: when `true`, read only non-folded
+   *  specs (equivalent to `scope='active'`, i.e. `status IS NULL OR status <> 'folded'`). The named
+   *  intent for standing-pass / director callers that never act on folded specs; `[[scopeForFilter]]`
+   *  maps it onto the cheap server-side `'active'` row set. An explicit `scope` still wins. */
+  excludeFolded?: boolean;
 }
 
 /** The server-side row sets `list_specs_with_phases(p_scope)` understands. */
@@ -332,6 +337,9 @@ const SPEC_SCOPES = ["active", "archived", "all"] as const;
  */
 export function scopeForFilter(filter: ListSpecsFilter): SpecScope {
   if (filter.scope) return filter.scope;
+  // db-roadmap-reads-skip-folded-specs — the in-flight filter maps to the cheap `'active'` row set
+  // (`status <> 'folded'`), the same server-side predicate `getActiveSpecs` already rides.
+  if (filter.excludeFolded) return "active";
   if (filter.status === "folded") return "archived";
   if (filter.status === "deferred") return "active";
   return "all";

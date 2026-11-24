@@ -1,0 +1,1 @@
+- **Playbook takeover: replies send, escalation clears, merge keeps step** · verified 2026-11-24 · → [[../libraries/playbook-executor]]

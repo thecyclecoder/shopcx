@@ -14,6 +14,7 @@ import assert from "node:assert/strict";
 import {
   detectPlaybookSuperseder,
   playbookSupersedeReasonPhrase,
+  csDirectorNoteSupersedesPlaybook,
   CS_DIRECTOR_VERDICT_NOTE_PREFIX,
 } from "./playbook-supersede-guard";
 
@@ -52,6 +53,50 @@ test("both signals present → agent_reply outranks (human reply is the stronger
 test("reason phrases match the sysNote wording contract", () => {
   assert.match(playbookSupersedeReasonPhrase("agent_reply"), /human agent has replied/);
   assert.match(playbookSupersedeReasonPhrase("director_resolution"), /CS Director has resolved/);
+});
+
+// ── Phase 3 of playbook-takeover-replies-and-clears-escalation ──
+// Only a CS-Director note written AFTER the current playbook started supersedes it; an older
+// verdict that arrived through a merge does not.
+
+test("inherited playbook + an OLDER merged verdict → NOT superseded (Juliana 22be5796 bug)", () => {
+  // The merged-in '[CS Director review]' note pre-dates the playbook start the inherited
+  // playbook_context carries — it is NOT the current lane and must not clear the playbook.
+  const playbookStartedAt = "2026-11-24T11:09:00.000Z";
+  const olderMergedVerdictAt = "2026-11-23T02:38:00.000Z";
+  assert.equal(
+    csDirectorNoteSupersedesPlaybook(olderMergedVerdictAt, playbookStartedAt),
+    false,
+    "an older merged verdict must not supersede the inherited playbook",
+  );
+  // Fed through the predicate it yields no supersede.
+  assert.equal(
+    detectPlaybookSuperseder({
+      hasExternalAgentReply: false,
+      hasCsDirectorResolutionNote: csDirectorNoteSupersedesPlaybook(olderMergedVerdictAt, playbookStartedAt),
+    }),
+    null,
+  );
+});
+
+test("a FRESH June verdict written after the playbook started → superseded", () => {
+  const playbookStartedAt = "2026-11-24T11:09:00.000Z";
+  const freshVerdictAt = "2026-11-24T12:30:00.000Z";
+  assert.equal(csDirectorNoteSupersedesPlaybook(freshVerdictAt, playbookStartedAt), true);
+  assert.equal(
+    detectPlaybookSuperseder({
+      hasExternalAgentReply: false,
+      hasCsDirectorResolutionNote: csDirectorNoteSupersedesPlaybook(freshVerdictAt, playbookStartedAt),
+    }),
+    "director_resolution",
+  );
+});
+
+test("no director note → never supersedes; legacy row with no start stamp → any note counts", () => {
+  assert.equal(csDirectorNoteSupersedesPlaybook(null, "2026-11-24T11:09:00.000Z"), false);
+  assert.equal(csDirectorNoteSupersedesPlaybook("2026-11-24T11:09:00.000Z", null), true);
+  // Unparseable timestamps fail safe to the prior (unfiltered) behavior.
+  assert.equal(csDirectorNoteSupersedesPlaybook("not-a-date", "2026-11-24T11:09:00.000Z"), true);
 });
 
 test("verdict-note prefix matches buildCsDirectorVerdictNote's actual header", () => {

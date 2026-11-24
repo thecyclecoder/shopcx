@@ -61,7 +61,8 @@ const { count } = await admin.from("knowledge_base")
 
 ## Gotchas
 
-_None documented. Probe before assuming — see [[../README]] § Probing technique._
+- **Write content through [[../libraries/support-content]]** (`updateKbArticleContent`). The AI reads articles via `kb_chunks` embeddings, so a raw `content` update without a re-chunk leaves RAG quoting the old text. New raw writes fail `check:support-content-sdk-compliance`.
+- Superfood Tabs caffeine is 100mg in every flavor (CEO-confirmed 2026-11-24). Older copy said Mixed Berry was 40mg.
 
 ---
 

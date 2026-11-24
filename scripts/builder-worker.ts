@@ -999,6 +999,21 @@ function shAsync(cmd: string, args: string[], opts: { timeout?: number; idleTime
   });
 }
 
+// mario-fix-tsc-oom: every build-lane `npx tsc --noEmit` spawn used the Node default heap (~4GB). A
+// worktree that adds a large generated surface (the trigger case: an MCP server) tips tsc past that
+// ceiling → "FATAL ERROR: Ineffective mark-compacts near heap limit … JavaScript heap out of memory",
+// which false-fails the build as if it were a type error (and, because the resulting 'tsc failed …'
+// error has no self-verify signature, re-queues forever). Route EVERY build-lane tsc spawn through this
+// one helper so it runs with --max-old-space-size=8192, spread onto any existing NODE_OPTIONS rather
+// than clobbering it. Same shared 10-min hard-cap timeout; failure-handling branches are unchanged.
+function runRepoTsc(cwd: string): Promise<{ code: number; out: string; err: string; killed?: "idle" | "hardcap" }> {
+  return shAsync("npx", ["tsc", "--noEmit"], {
+    timeout: 10 * 60 * 1000,
+    cwd,
+    env: { ...process.env, NODE_OPTIONS: [process.env.NODE_OPTIONS, "--max-old-space-size=8192"].filter(Boolean).join(" ") },
+  });
+}
+
 // A fresh box has no git identity → `git commit` errors. Repo-local config is shared across worktrees.
 function ensureGitIdentity() {
   sh("git", ["config", "user.email", "builder@shopcx.ai"]);
@@ -4290,7 +4305,7 @@ async function isOriginMainTscClean(tag: string): Promise<boolean> {
       return true;
     }
     sh("ln", ["-sfn", resolve(REPO_DIR, "node_modules"), resolve(mainWt, "node_modules")]);
-    const r = await shAsync("npx", ["tsc", "--noEmit"], { timeout: 10 * 60 * 1000, cwd: mainWt });
+    const r = await runRepoTsc(mainWt);
     console.log(`${tag} base-poison main-check: origin/main tsc ${r.code === 0 ? "CLEAN" : "BROKEN"}`);
     return r.code === 0;
   } catch (e) {
@@ -11849,7 +11864,7 @@ async function runFoldJob(job: Job) {
       return;
     }
 
-    const tsc = await shAsync("npx", ["tsc", "--noEmit"], { timeout: 10 * 60 * 1000, cwd: wt });
+    const tsc = await runRepoTsc(wt);
     if (tsc.code !== 0) {
       await setFoldRows(job.id, "folding", { status: "pending", job_id: null });
       await update(job.id, { status: "failed", error: "tsc failed", log_tail: (tsc.out + tsc.err).slice(-2000) });
@@ -12102,7 +12117,7 @@ async function runGoalFoldJob(job: Job) {
       return;
     }
 
-    const tsc = await shAsync("npx", ["tsc", "--noEmit"], { timeout: 10 * 60 * 1000, cwd: wt });
+    const tsc = await runRepoTsc(wt);
     if (tsc.code !== 0) {
       await update(job.id, { status: "failed", error: "tsc failed", log_tail: (tsc.out + tsc.err).slice(-2000) });
       return;
@@ -21749,7 +21764,7 @@ async function runPrResolveJob(job: Job) {
       return;
     }
     // 4) the resolved merge MUST compile — the tsc gate. Never push a broken merge.
-    const tsc = await shAsync("npx", ["tsc", "--noEmit"], { timeout: 10 * 60 * 1000, cwd: wt });
+    const tsc = await runRepoTsc(wt);
     if (tsc.code !== 0) {
       await escalate(`tsc failed on the resolved merge: ${(tsc.out + tsc.err).slice(-400)}`);
       return;
@@ -29547,10 +29562,7 @@ async function dispatchJob(job: Job) {
       // "tsc-gate the reconciled tree before running repo-wide checks" the spec's Phase 1
       // "What" section calls out — cheap when the base is green, saves an entire claude session's
       // worth of tokens when it isn't.
-      const tscGate = await shAsync("npx", ["tsc", "--noEmit"], {
-        timeout: 10 * 60 * 1000,
-        cwd: wt,
-      });
+      const tscGate = await runRepoTsc(wt);
       if (tscGate.code !== 0) {
         // base-poison-verify-main-alone — the reconciled tree (branch + main) fails tsc. That does NOT prove
         // main is broken: a STALE branch (built before a breaking main change — e.g. a goal promotion that
@@ -30472,7 +30484,7 @@ async function dispatchJob(job: Job) {
     }
 
     // completed path: gate on tsc (in the worktree)
-    const tsc = await shAsync("npx", ["tsc", "--noEmit"], { timeout: 10 * 60 * 1000, cwd: wt });
+    const tsc = await runRepoTsc(wt);
     if (tsc.code !== 0) {
       await update(job.id, { status: "failed", error: "tsc failed", log_tail: (tsc.out + tsc.err).slice(-2000) });
       return;
@@ -30722,7 +30734,7 @@ async function dispatchJob(job: Job) {
           await update(job.id, { claude_session_id: repair.session, claude_session_config_dir: configDir });
         }
         // A repair that broke tsc must not slip through — same shape as the self-verify loop's re-gate.
-        const tscAfter = await shAsync("npx", ["tsc", "--noEmit"], { timeout: 10 * 60 * 1000, cwd: wt });
+        const tscAfter = await runRepoTsc(wt);
         if (tscAfter.code !== 0) {
           await update(job.id, {
             status: "failed",
@@ -30968,7 +30980,7 @@ async function dispatchJob(job: Job) {
         }
         // A repair that broke tsc must not slip through — re-run the tsc gate exactly the same shape
         // as the top-level gate at :25031-25034 so a regression bounces to `failed` immediately.
-        const tscAfter = await shAsync("npx", ["tsc", "--noEmit"], { timeout: 10 * 60 * 1000, cwd: wt });
+        const tscAfter = await runRepoTsc(wt);
         if (tscAfter.code !== 0) {
           await update(job.id, {
             status: "failed",

@@ -44,17 +44,39 @@ Stamps the ticket onto a playbook: `active_playbook_id = playbookId`, `playbook_
 
 `seed_context` merges shallow-into an empty fresh context (a starting playbook has no prior context), so callers can pass whatever the target playbook's step 0 reads (e.g. `refund` reads `order_id`; `assisted-purchase-classic` reads `subscription_id`). Non-object values are ignored (guarded to `{}`).
 
+**Takeover de-escalation + start stamp** ([[../specs/playbook-takeover-replies-and-clears-escalation]] Phases 2–3). After the playbook write, `startPlaybook`:
+
+- **Phase 3** — stamps `playbook_context.playbook_started_at = now` so the merge-supersede guard in [[../inngest/unified-ticket-handler]] can tell a CURRENT June verdict from an older one carried in through a merge (see [[playbook-supersede-guard]] `csDirectorNoteSupersedesPlaybook`). Merge inheritance carries `playbook_context` forward, so the stamp travels with an inherited playbook.
+- **Phase 2** — the playbook now OWNS the ticket, so an escalation from an EARLIER turn is cleared: `deescalateTicket` ([[tickets-mutate]]) releases `escalated_to` (keeping `escalated_at`/`escalation_reason` as history), `dismissFounderEscalationCardsForTicket` ([[notification-hygiene]]) dismisses any open CS-Director escalate-to-founder CEO card for the ticket (by its `cs-director-founder:<ticketId>` dedupe key — no raw `.from()` scan), and an internal sysNote `[System] Escalation cleared: the playbook owns this ticket now.` records it. Escalations the playbook raises LATER (`escalate_api_failure`, stand-firm exhaustion) run after this point and are unaffected. The whole block is best-effort (wrapped in try/catch) so a cleanup failure never blocks the start. Ground truth: Doreen Johnson (b5aaff03) sat escalated to the CEO from 02:38 while her 11:09 reply started the Refund playbook.
+
 ### `routeIntentToPlaybook` — function
 
 ```ts
 async function routeIntentToPlaybook(
   admin: Admin, workspaceId: string, ticketId: string, intent: string,
-): Promise<{ routed: boolean; playbook_id?: string; playbook_name?: string }>
+  customerMessage?: string,
+  personality?: { name?: string; tone?: string; sign_off?: string | null } | null,
+): Promise<{ routed: boolean; playbook_id?: string; playbook_name?: string; result?: PlaybookExecResult }>
 ```
 
-Phase 2 of [[../specs/every-inbound-handled-within-30-min]]. Checks if the classified inbound intent matches any active playbook's `trigger_intents` list; if so and no playbook is currently active on the ticket, the function calls `startPlaybook` deterministically and returns `{ routed: true, playbook_id, playbook_name }`. Otherwise returns `{ routed: false, reason }`. This closes the gap where refund-intent messages (e.g., "refund_request", "unwanted_charge", "charged_without_permission") were being routed to a bare cancel journey instead of the Refund playbook's tier ladder. Ground truth: ticket 09f7257a (Angelica Devine, 2026-10-07) — her message matched the Refund playbook's trigger intents exactly, yet Sol and Sonnet both routed to a cancel journey and called it out-of-policy, skipping the playbook's tier exceptions. The deterministic intent router is called from `unified-ticket-handler` before Sol/Sonnet dispatch and moves intent→playbook routing from a heuristic decision to an authoritative trigger-match.
+Phase 2 of [[../specs/every-inbound-handled-within-30-min]]. Checks if the classified inbound intent matches any active playbook's `trigger_intents` list; if so and no playbook is currently active on the ticket, the function calls `startPlaybook` deterministically, executes step 0 (passing the inbound `customerMessage` + `personality` so the first step composes a real reply), and returns `{ routed: true, playbook_id, playbook_name, result }`. Otherwise returns `{ routed: false, reason }`. **The step-0 `result` is now RETURNED, not discarded** — Phase 1 of [[../specs/playbook-takeover-replies-and-clears-escalation]]. Previously the router ran `executePlaybookStep` and threw its result away, so the customer got nothing and the ticket stalled at step 1 while sitting escalated in the CEO queue (Juliana Fradlis 22be5796, Doreen Johnson b5aaff03). The caller (`unified-ticket-handler`) hands the returned `result` to `deliverRoutedPlaybookFirstReply` to ship the reply + auto-advance. This closes the gap where refund-intent messages (e.g., "refund_request", "unwanted_charge", "charged_without_permission") were being routed to a bare cancel journey instead of the Refund playbook's tier ladder. Ground truth: ticket 09f7257a (Angelica Devine, 2026-10-07) — her message matched the Refund playbook's trigger intents exactly, yet Sol and Sonnet both routed to a cancel journey and called it out-of-policy, skipping the playbook's tier exceptions. The deterministic intent router is called from `unified-ticket-handler` before Sol/Sonnet dispatch and moves intent→playbook routing from a heuristic decision to an authoritative trigger-match.
 
 **Crisis-enrollment guard** (ticket cbdde02c — April McEntire, LTV $2891.87, tagged `hard:crisis-enrollment`). When a matched playbook is a **stand-firm playbook** (`stand_firm_max > 0` — i.e. the Refund playbook with its OOP tier ladder) AND the ticket's customer has an **active crisis enrollment**, the router returns `{ routed: false, reason: "crisis_customer_defers_to_orchestrator" }` instead of starting the ladder. Standing firm on a crisis-confirmed customer is exactly what the Crisis Policy white-glove rule forbids; deferring makes `unified-ticket-handler` fall through to the Sonnet orchestrator, whose crisis-aware `pickOrchestratorModel()` ([[model-picker]]) runs the white-glove direct crisis-return path (`create_return` `free_label=true`, no tenure check, no stand-firm). The active-enrollment predicate (`hasActiveCrisisEnrollment`) is the **same** `crisis_customer_actions` read model-picker uses for its `hard:crisis-enrollment` signal (`tier3_response IS NULL` · `paused_at IS NULL` · `removed_item_at IS NULL` · `cancelled = false`); the two must stay in lockstep. The read fires only on a stand-firm hit, so the common non-crisis / non-stand-firm path pays no extra query. Ground truth: on cbdde02c the un-guarded router stood firm 4 rounds ("Stand firm 1/3 … reached max, ticket left pending") and escalated a loyal customer to BBB/review threats before Sol finally fired the correct free-label crisis return. Covered by `playbook-executor.crisis-defers-stand-firm.test.ts`.
+
+### `deliverRoutedPlaybookFirstReply` — function
+
+```ts
+async function deliverRoutedPlaybookFirstReply(args: {
+  first: PlaybookExecResult;
+  sendReply: (body: string) => Promise<void>;
+  postSysNote: (msg: string) => Promise<void>;
+  execNextStep: () => Promise<PlaybookExecResult>;
+  beforeStep?: () => Promise<boolean>;
+  maxAutoAdvance?: number;
+}): Promise<{ repliesSent: number; finalAction: PlaybookExecResult["action"] }>
+```
+
+Phase 1 of [[../specs/playbook-takeover-replies-and-clears-escalation]]. The shared, unit-testable core of the intent→playbook router's send path in [[../inngest/unified-ticket-handler]]: posts the first step's `systemNote`, sends its `response`, then keeps calling `execNextStep` while `action === "advance"` and the step produced no response (up to `maxAutoAdvance`, default 10) — the same auto-advance shape as the main playbook branch. The caller injects the real send path (`sendWithDelay`), `sysNote`, the `executePlaybookStep` closure, and a `beforeStep` guard (wired to `newerActivity` so a newer inbound halts the loop), keeping the loop logic testable without the Inngest handler. A refund-intent on a fresh ticket turns a silent step-0 `advance` into one outbound policy reply at `playbook_step 4`. Covered by `playbook-executor.router-first-reply.test.ts`.
 
 ### `PlaybookExecResult` — interface
 

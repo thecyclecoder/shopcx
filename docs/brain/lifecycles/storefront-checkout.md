@@ -8,7 +8,8 @@ See [[../lifecycles/storefront-checkout]] for the system map.
 
 - PDP: `(storefront)` route group, SSG + per-product ISR. See `src/app/(storefront)/_lib/render-page.tsx`.
 - Pixel: `src/lib/storefront-pixel.ts` + `/api/pixel` endpoint.
-- Cart: `/api/cart` + [[../tables/cart_drafts]].
+- Cart: `/api/cart` + [[../tables/cart_drafts]]. Pricing is the shared `priceCartLines` chokepoint (`src/lib/shopping-agent/cart.ts`) — the same code the AI shopping agent's `build_cart` tool calls (no duplicated pricing).
+- **AI shopping-agent entry point ([[ai-shopping-agent]]):** ChatGPT/Claude/Grok's `build_cart` tool writes a [[../tables/cart_drafts]] row via `buildCartForAgent` and returns a checkout URL tagged `utm_source=<chatgpt|claude|grok>` + `utm_medium=ai_agent`, so an AI-sourced cart finishes on THIS same checkout (Braintree/Avalara/OTP/CAPI unchanged) and shows up as its own channel (`aiChannelBreakdown`) in the storefront funnel.
 - Tax: [[../integrations/avalara]].
 - Payment: [[../integrations/braintree]] (vault + sale).
 - Order create: writes [[../tables/orders]] + [[../tables/transactions]].

@@ -3546,8 +3546,10 @@ export async function routeIntentToPlaybook(
   workspaceId: string,
   ticketId: string,
   intent: string,
+  customerMessage: string = "",
+  personality: { name?: string; tone?: string; sign_off?: string | null } | null = null,
 ): Promise<
-  | { routed: true; playbook_id: string; playbook_name: string }
+  | { routed: true; playbook_id: string; playbook_name: string; result: PlaybookExecResult }
   | {
       routed: false;
       reason:
@@ -3628,18 +3630,64 @@ export async function routeIntentToPlaybook(
     }
     await startPlaybook(admin, ticketId, pb.id as string);
     // Execute step 0 so the playbook's first reply ships THIS turn (matching the shape
-    // handlePlaybook in action-executor.ts uses when it dispatches a new playbook).
+    // handlePlaybook in action-executor.ts uses when it dispatches a new playbook). Pass
+    // the inbound customer message + personality so the first step composes a real reply
+    // rather than an empty-message probe, and RETURN the result to the caller: the old
+    // code discarded it, so the customer got nothing and the ticket stalled at step 1.
+    let result: PlaybookExecResult;
     try {
-      await executePlaybookStep(workspaceId, ticketId, "", null);
+      result = await executePlaybookStep(workspaceId, ticketId, customerMessage, personality);
     } catch {
       // Step-level failure is contained — the ticket is now on the playbook and the next
       // inbound turn will re-enter executePlaybookStep normally. We do not unwind the
-      // startPlaybook write because the ticket is already on the playbook's ladder.
+      // startPlaybook write because the ticket is already on the playbook's ladder; surface
+      // a terminal result so the caller doesn't try to send a reply that never rendered.
+      result = { action: "complete", systemNote: "Playbook started but the first step could not run." };
     }
-    return { routed: true, playbook_id: pb.id as string, playbook_name: pb.name as string };
+    return { routed: true, playbook_id: pb.id as string, playbook_name: pb.name as string, result };
   }
 
   return { routed: false, reason: "no_match" };
+}
+
+/**
+ * Deliver a router-started playbook's first reply + auto-advance — the shared core of the
+ * intent→playbook router's send path in unified-ticket-handler. Posts the first step's
+ * systemNote, sends its response, then keeps executing steps while `action === "advance"`
+ * (and the step produced no response) up to the auto-advance cap — the same shape as the
+ * main playbook branch's auto-advance loop. The caller injects the real send path
+ * (sendWithDelay), sysNote, and executePlaybookStep closure so this stays unit-testable
+ * without the Inngest handler; the loop logic that turns a silent step-0 advance into "one
+ * outbound policy reply at playbook_step 4" lives here.
+ */
+export async function deliverRoutedPlaybookFirstReply(args: {
+  first: PlaybookExecResult;
+  sendReply: (body: string) => Promise<void>;
+  postSysNote: (msg: string) => Promise<void>;
+  execNextStep: () => Promise<PlaybookExecResult>;
+  beforeStep?: () => Promise<boolean>;
+  maxAutoAdvance?: number;
+}): Promise<{ repliesSent: number; finalAction: PlaybookExecResult["action"] }> {
+  const { first, sendReply, postSysNote, execNextStep, beforeStep, maxAutoAdvance = 10 } = args;
+  let repliesSent = 0;
+  if (first.systemNote) await postSysNote(first.systemNote);
+  if (first.response) {
+    await sendReply(first.response);
+    repliesSent++;
+  }
+  let cur = first;
+  let advCount = 0;
+  while (cur.action === "advance" && !cur.response && advCount < maxAutoAdvance) {
+    advCount++;
+    if (beforeStep && !(await beforeStep())) break;
+    cur = await execNextStep();
+    if (cur.systemNote) await postSysNote(cur.systemNote);
+    if (cur.response) {
+      await sendReply(cur.response);
+      repliesSent++;
+    }
+  }
+  return { repliesSent, finalAction: cur.action };
 }
 
 export async function startPlaybook(
@@ -3647,7 +3695,7 @@ export async function startPlaybook(
   opts?: { seed_context?: Record<string, unknown> },
 ): Promise<void> {
   const [{ data: ticket }, { data: playbook }] = await Promise.all([
-    admin.from("tickets").select("tags").eq("id", ticketId).single(),
+    admin.from("tickets").select("tags, workspace_id").eq("id", ticketId).single(),
     admin.from("playbooks").select("name").eq("id", playbookId).single(),
   ]);
   const tags = (ticket?.tags as string[]) || [];
@@ -3659,14 +3707,46 @@ export async function startPlaybook(
 
   const seedContext =
     opts?.seed_context && typeof opts.seed_context === "object" ? opts.seed_context : {};
+  // Phase 3 (playbook-takeover-replies-and-clears-escalation) — stamp WHEN this playbook started
+  // into playbook_context. The merge-supersede guard in unified-ticket-handler only counts a
+  // '[CS Director review]' note as authoritative if it was written AFTER this timestamp; merge
+  // inheritance carries playbook_context forward, so an older verdict that arrived through a merge
+  // (and pre-dates the playbook start) no longer wrongly clears the inherited playbook.
+  const playbookContext = { ...seedContext, playbook_started_at: new Date().toISOString() };
 
   await admin.from("tickets").update({
     active_playbook_id: playbookId,
     playbook_step: 0,
-    playbook_context: seedContext,
+    playbook_context: playbookContext,
     playbook_exceptions_used: 0,
     tags: newTags,
   }).eq("id", ticketId);
+
+  // Phase 2 — a playbook takeover clears a stale escalation from an EARLIER turn. The playbook now
+  // owns the ticket, so an escalation raised before it started (e.g. Doreen's 02:38 CEO escalation
+  // while her 11:09 reply started the Refund playbook) must not keep the ticket parked in the CEO
+  // queue. deescalateTicket releases ownership (leaves escalated_at/reason as history); we also
+  // dismiss any open CS-Director escalate-to-founder CEO card for this ticket. Escalations the
+  // playbook raises LATER (escalate_api_failure, stand-firm exhaustion) run after this point and
+  // are unaffected. Best-effort — a de-escalation failure must not block the playbook start.
+  try {
+    const { deescalateTicket } = await import("@/lib/tickets-mutate");
+    await deescalateTicket(admin, ticketId);
+    const workspaceId = (ticket?.workspace_id as string | null) ?? null;
+    if (workspaceId) {
+      const { dismissFounderEscalationCardsForTicket } = await import("@/lib/notification-hygiene");
+      await dismissFounderEscalationCardsForTicket(admin, workspaceId, ticketId);
+    }
+    await admin.from("ticket_messages").insert({
+      ticket_id: ticketId,
+      direction: "outbound",
+      visibility: "internal",
+      author_type: "system",
+      body: "[System] Escalation cleared: the playbook owns this ticket now.",
+    });
+  } catch {
+    // De-escalation is a cleanup step — never fail the playbook start because it could not run.
+  }
 }
 
 // ══════════════════════════════════════════════════════════════════
