@@ -81,6 +81,20 @@ sweep" — the sweep fails toward keeping. Pinned in `src/lib/notification-hygie
 Run it manually with `scripts/_run-notif-hygiene.ts` (dry by default; prints what it would KEEP,
 which is the part worth reading).
 
+## Targeted dismissals
+
+### `dismissFounderEscalationCardsForTicket` — dismiss escalation cards when playbook takes over
+
+```ts
+async function dismissFounderEscalationCardsForTicket(
+  admin: Admin,
+  workspaceId: string,
+  ticketId: string,
+): Promise<number>
+```
+
+Dismisses all open CS-Director escalate-to-founder dashboard notification cards for a specific ticket, matched by the `cs-director-founder:<ticketId>` dedupe key. Returns the count of rows updated. Called by [[../libraries/playbook-executor]] `startPlaybook` ([[../specs/playbook-takeover-replies-and-clears-escalation]] Phase 2) to clean up escalation cards when a playbook takes ownership — an open card pointing to an escalation that is now being handled by the playbook should not remain on the dashboard. The whole cleanup block in `startPlaybook` is best-effort (wrapped in try/catch), so a dismissal failure never blocks the playbook start.
+
 ---
 
 [[../README]] · [[../../CLAUDE]]
