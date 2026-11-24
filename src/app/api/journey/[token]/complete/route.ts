@@ -1411,9 +1411,18 @@ async function sendCrisisConfirmation(
   const { data: ws } = await admin.from("workspaces")
     .select("name").eq("id", wsId).single();
 
-  const { data: crisis } = await admin.from("crisis_events")
-    .select("affected_product_title, expected_restock_date")
-    .eq("id", metadata.crisisId as string).single();
+  // Only look up the crisis event when crisisId is a valid uuid. A missing or
+  // malformed id would serialize to the string "undefined" in the .eq filter,
+  // producing a `WHERE id = 'undefined'` query that Postgres rejects with a
+  // uuid-cast error. When the guard fails we leave `crisis` null so the
+  // existing restockDate='soon' / affectedItem='your item' fallbacks apply.
+  const isValidUuid = typeof metadata.crisisId === "string"
+    && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(metadata.crisisId);
+  const { data: crisis } = isValidUuid
+    ? await admin.from("crisis_events")
+        .select("affected_product_title, expected_restock_date")
+        .eq("id", metadata.crisisId as string).single()
+    : { data: null };
 
   const firstName = customer.first_name || "there";
   const restockDate = crisis?.expected_restock_date
