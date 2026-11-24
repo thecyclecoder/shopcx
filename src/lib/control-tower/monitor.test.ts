@@ -2613,6 +2613,7 @@ function baselineAssertionInputs(overrides: Partial<AssertionInputs>): Assertion
     escalatedWaiting: 0,
     oldestEscalatedAt: null,
     oldestEscalatedCreatedAt: null,
+    oldestEscalatedUpdatedAt: null,
     latestTriageJobAt: null,
     oldestEscalatedHandled: false,
     latestSpecTestJobAt: null,
@@ -2672,15 +2673,18 @@ test("evalOutputAssertion escalation-idle: oldest escalation already handled (co
 
 test("evalOutputAssertion escalation-idle: genuinely un-picked-up escalation past the grace still REDS", () => {
   // Same aged escalation, but nothing covers it — no triage_runs row and no inflight/parked job.
-  // This is real idle-while-work and the tile must go red.
+  // The cron has demonstrably ticked since the ticket last changed state (beat 1h ago, state change
+  // 5h ago), so this is real idle-while-work and the tile must go red.
   const escalatedAt = new Date(Date.now() - 5 * ONE_HOUR_MS).toISOString();
+  const latest: LoopHistoryRow = { ran_at: new Date(Date.now() - ONE_HOUR_MS).toISOString(), ok: true, produced: null, detail: null, duration_ms: null };
   const verdict = evalOutputAssertion(
     "escalation-idle",
     ESCALATION_IDLE_LOOP,
-    null,
+    latest,
     baselineAssertionInputs({
       escalatedWaiting: 1,
       oldestEscalatedAt: escalatedAt,
+      oldestEscalatedUpdatedAt: escalatedAt,
       oldestEscalatedHandled: false,
     }),
   );
@@ -2714,18 +2718,71 @@ test("evalOutputAssertion escalation-idle: genuinely long wait (both escalated_a
   // The ticket row is as old as its escalation — the wait is real, not an artifact of a backdated
   // escalated_at. Flooring by created_at must NOT mask this; the tile still goes red.
   const seventeenHoursAgo = new Date(Date.now() - 17 * ONE_HOUR_MS).toISOString();
+  // The cron ticked 1h ago — well after the ticket's 17h-old state change — so the cron-tick grace
+  // doesn't apply and the genuine long wait still reds.
+  const latest: LoopHistoryRow = { ran_at: new Date(Date.now() - ONE_HOUR_MS).toISOString(), ok: true, produced: null, detail: null, duration_ms: null };
   const verdict = evalOutputAssertion(
     "escalation-idle",
     ESCALATION_IDLE_LOOP,
-    null,
+    latest,
     baselineAssertionInputs({
       escalatedWaiting: 1,
       oldestEscalatedAt: seventeenHoursAgo,
       oldestEscalatedCreatedAt: seventeenHoursAgo,
+      oldestEscalatedUpdatedAt: seventeenHoursAgo,
       oldestEscalatedHandled: false,
     }),
   );
   assert.ok(verdict, "expected a red verdict for a genuinely long wait");
+  assert.equal(verdict?.violation.reason, "idle_while_work");
+});
+
+test("evalOutputAssertion escalation-idle: just-re-routed ticket (stale escalated_at/created_at, recent updated_at, cron hasn't ticked since) stays GREEN", () => {
+  // The 22be5796 shape: a merged / founder→routine re-routed ticket whose escalated_at AND created_at
+  // both pre-date (17h ago) when it actually joined the routine-escalated queue. Its updated_at (4m
+  // ago) marks that state change, and the hourly cron's latest beat (2h ago) is OLDER than the state
+  // change — the cron has not had a tick since the ticket became routine-eligible, so the next tick
+  // will enqueue June's review on schedule. Reding now is a false page; the tile must stay green
+  // (control-tower-escalation-idle-require-cron-tick-since-ticket Phase 1).
+  const seventeenHoursAgo = new Date(Date.now() - 17 * ONE_HOUR_MS).toISOString();
+  const fourMinAgo = new Date(Date.now() - 4 * 60_000).toISOString();
+  const latest: LoopHistoryRow = { ran_at: new Date(Date.now() - 2 * ONE_HOUR_MS).toISOString(), ok: true, produced: null, detail: null, duration_ms: null };
+  const verdict = evalOutputAssertion(
+    "escalation-idle",
+    ESCALATION_IDLE_LOOP,
+    latest,
+    baselineAssertionInputs({
+      escalatedWaiting: 1,
+      oldestEscalatedAt: seventeenHoursAgo,
+      oldestEscalatedCreatedAt: seventeenHoursAgo,
+      oldestEscalatedUpdatedAt: fourMinAgo,
+      oldestEscalatedHandled: false,
+    }),
+  );
+  assert.equal(verdict, null);
+});
+
+test("evalOutputAssertion escalation-idle: cron HAS ticked since the ticket's state change and it was skipped → still REDS", () => {
+  // Companion to the just-re-routed grace: same stale escalated_at/created_at and a recent updated_at,
+  // but now the latest cron beat (1m ago) POST-DATES the ticket's updated_at (4m ago). The cron had a
+  // real tick after the ticket joined the queue and still didn't enqueue it — genuine idle-while-work,
+  // so the tile reds.
+  const seventeenHoursAgo = new Date(Date.now() - 17 * ONE_HOUR_MS).toISOString();
+  const fourMinAgo = new Date(Date.now() - 4 * 60_000).toISOString();
+  const latest: LoopHistoryRow = { ran_at: new Date(Date.now() - 60_000).toISOString(), ok: true, produced: null, detail: null, duration_ms: null };
+  const verdict = evalOutputAssertion(
+    "escalation-idle",
+    ESCALATION_IDLE_LOOP,
+    latest,
+    baselineAssertionInputs({
+      escalatedWaiting: 1,
+      oldestEscalatedAt: seventeenHoursAgo,
+      oldestEscalatedCreatedAt: seventeenHoursAgo,
+      oldestEscalatedUpdatedAt: fourMinAgo,
+      oldestEscalatedHandled: false,
+    }),
+  );
+  assert.ok(verdict, "expected a red verdict once the cron has ticked since the state change");
   assert.equal(verdict?.violation.reason, "idle_while_work");
 });
 
