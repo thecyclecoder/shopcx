@@ -133,6 +133,7 @@ import {
   isForeignSupabasePostgresMissingJourneySessionsExpiresAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingJourneySessionsTriggerIntentColumnAdhocNoise,
   isForeignSupabasePostgresMissingJourneySessionsJourneyNameColumnAdhocNoise,
+  isForeignSupabasePostgresMissingJourneySessionsUpdatedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingJourneyDefinitionsIntentColumnAdhocNoise,
   isForeignSupabasePostgresMissingTicketMessagesSenderTypeAdhocNoise,
   isForeignSupabasePostgresMissingTicketMessagesRoleAdhocNoise,
@@ -1367,6 +1368,18 @@ const LOG_QUERIES: LogQuery[] = [
       // `journey_definitions.journey_name`), or on `journey_sessions` via a non-SELECT
       // statement (real code-bug shape), still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingJourneySessionsJourneyNameColumnAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc `select ... updated_at ... from
+      // public.journey_sessions` lookup by an external tool / BI / ETL client reading our
+      // `journey_sessions` table with a guessed column list, or the PostgREST CTE wrapper the
+      // same client emits. `journey_sessions` has never carried an `updated_at` column, and
+      // no ShopCX code path names it, so the resulting column-missing ERROR is foreign noise
+      // (Control Tower signature `supabase-logs:87d1a6250e77a6a4`). Same narrow-gating shape
+      // as the `expires_at` / `trigger_intent` / `journey_name` siblings on the same table:
+      // BOTH the exact column-missing message AND the SELECT-lookup shape — a column-missing
+      // error on any live `journey_sessions` column, on `updated_at` from any other table, or
+      // on `journey_sessions` via a non-SELECT statement (real code-bug shape), still
+      // surfaces / pages on first sighting.
+      if (isForeignSupabasePostgresMissingJourneySessionsUpdatedAtColumnAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc `select ... intent ... from
       // public.journey_definitions` lookup by an external tool reading our
       // `journey_definitions` table with columns it doesn't have (`intent`, `steps`), or the
