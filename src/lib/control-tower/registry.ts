@@ -264,6 +264,7 @@ export const INLINE_AGENT_IDS = {
   journeyDelivery: "ai:journey-delivery",
   fraudDetector: "ai:fraud-detector",
   orchestrator: "ai:orchestrator",
+  shoppingAgentMcp: "ai:shopping-agent-mcp",
 } as const;
 
 export interface MonitoredLoop {
@@ -1596,6 +1597,23 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     expectedCadence: "per inbound customer message",
     livenessWindowMs: 2 * HOUR,
     inlineWorkSignal: "tickets-awaiting-decision",
+    errorRateThreshold: 0.5,
+    minRunsForErrorRate: 5,
+  },
+  {
+    // The public AI shopping-agent MCP server (/api/mcp/[workspace]) — one beat per JSON-RPC
+    // request (try/finally), ok:false when the request threw. No fixed cadence (external AI apps
+    // call it), so a genuinely-idle server is GREEN; red only on an error-rate spike. Owned by the
+    // CMO (AI assistants are the new organic-discovery surface). Kill switch: the route reads
+    // resolveEffectiveSwitch("ai:shopping-agent-mcp") and returns a polite tool error when off.
+    id: INLINE_AGENT_IDS.shoppingAgentMcp,
+    kind: "inline-agent",
+    owner: "cmo",
+    label: "AI shopping-agent MCP",
+    description: "Public read-only MCP server for ChatGPT/Claude/Grok — recommends products by situation + answers from product intelligence under hard compliance guardrails.",
+    expectedCadence: "per MCP request (external AI apps)",
+    // No upstream-work backlog signal — requests are external. Liveness is error-rate only.
+    livenessWindowMs: 30 * HOUR,
     errorRateThreshold: 0.5,
     minRunsForErrorRate: 5,
   },

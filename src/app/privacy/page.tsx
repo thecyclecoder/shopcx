@@ -90,7 +90,25 @@ export default function PrivacyPage() {
         </section>
 
         <section>
-          <h2 className="text-xl font-semibold text-zinc-900 dark:text-zinc-100">8. Contact Us</h2>
+          <h2 className="text-xl font-semibold text-zinc-900 dark:text-zinc-100">8. AI Shopping Assistant (ChatGPT, Claude, Grok)</h2>
+          <p>
+            We operate a shopping assistant that AI apps — including ChatGPT, Claude and Grok — can connect
+            to over a public Model Context Protocol (MCP) endpoint. When you ask one of those assistants
+            about our products, the assistant may call our tools. This section describes exactly what that
+            assistant receives, logs and shares.
+          </p>
+          <ul className="list-disc pl-6 space-y-1">
+            <li><strong>What it receives (tool inputs):</strong> only the text you type into the assistant that it chooses to pass to a tool — for example a product name, a comparison request, or a situation you describe in your own words. We do not receive your AI account identity, your chat history, or any message you did not direct at our tools.</li>
+            <li><strong>What we log:</strong> for each tool call we store the AI app name (chatgpt / claude / grok / other), the tool used, the products returned, a count of any claims our compliance filter removed, the response latency, and the time. We deliberately do <strong>not</strong> store the free text of your situation or question, and we store <strong>no</strong> health details. This log lives in our <code>shopping_agent_calls</code> records.</li>
+            <li><strong>Health &amp; safety:</strong> our dietary-supplement products are not intended to diagnose, treat, cure, or prevent any disease. If your message mentions pregnancy, nursing, medication, being under 18, or a medical condition, the assistant returns a note to check with your doctor and makes no product recommendation.</li>
+            <li><strong>Retention:</strong> tool-call logs are retained for operational and quality-monitoring purposes and are deleted or anonymized when no longer needed. Because we never store your situation text or health details, those are not retained at all.</li>
+            <li><strong>Sharing:</strong> we do not sell this data and we do not share your tool inputs with third parties beyond the infrastructure providers that host the Service. If you complete a purchase, checkout happens on our own store under the rest of this policy.</li>
+            <li><strong>Contact:</strong> questions about the AI shopping assistant go to <a href="mailto:privacy@shopcx.ai" className="underline">privacy@shopcx.ai</a>.</li>
+          </ul>
+        </section>
+
+        <section>
+          <h2 className="text-xl font-semibold text-zinc-900 dark:text-zinc-100">9. Contact Us</h2>
           <p>
             If you have questions about this Privacy Policy, please contact us at{" "}
             <a href="mailto:privacy@shopcx.ai" className="underline">privacy@shopcx.ai</a>.
