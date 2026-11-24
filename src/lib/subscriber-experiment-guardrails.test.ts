@@ -25,6 +25,7 @@ import type { ArmResults, ArmEngagement } from "@/lib/retention/reminder-results
 function engagement(over: Partial<ArmEngagement> = {}): ArmEngagement {
   return {
     reminded: 0, emailsSent: 0, smsSent: 0, smsSuppressedStop: 0, smsSuppressedNoConsent: 0,
+    smsOptOutsAfterReminder: 0,
     opened: 0, edited: 0, swapped: 0, skipped: 0, cancelled: 0, saved: 0, ...over,
   };
 }
@@ -101,13 +102,30 @@ test("excess floor does NOT trip below the min-sample bar", () => {
   assert.equal(e.signals.find((s) => s.key === "refund")!.tripped, false);
 });
 
-test("SMS STOP opt-out floor stays ABSOLUTE on the treatment arm", () => {
-  // Treatment sends SMS; holdout sends none. A STOP rate at/above the absolute floor trips with no
-  // holdout baseline to net against.
-  const reminded = 100;
-  const stops = Math.ceil(reminded * HARD_FLOORS.smsOptOutRate); // ≥ 5%
-  const t = arm("treatment", { customerGroups: 100, engagement: engagement({ reminded, smsSuppressedStop: stops }) });
+test("SMS STOP opt-out floor stays ABSOLUTE on the treatment arm (post-reminder STOPs / texted)", () => {
+  // Treatment sends SMS; holdout sends none. A POST-reminder STOP rate at/above the absolute floor
+  // (over customers actually texted) trips with no holdout baseline to net against.
+  const texted = 100;
+  const stops = Math.ceil(texted * HARD_FLOORS.smsOptOutRate); // ≥ 5%
+  const t = arm("treatment", { customerGroups: 100, engagement: engagement({ reminded: texted, smsSent: texted, smsOptOutsAfterReminder: stops }) });
   const h = arm("holdout", { customerGroups: 100, engagement: engagement({ reminded: 100 }) });
   const e = evaluateGuardrails(t, h);
   assert.equal(e.signals.find((s) => s.key === "sms_opt_out")!.tripped, true);
+});
+
+test("already-unsubscribed customers do NOT trip the SMS floor (2026-11-24 false-trip regression)", () => {
+  // The first live run: 15 customers already unsubscribed BEFORE the run (suppressed_stop, never
+  // texted) + 34 texted a reminder with 0 later STOP replies. The old code counted the 15 as opt-outs
+  // (15/49 ≈ 31%) and paused the test. The opt-out rate is now post-reminder STOPs (0) over texted
+  // (34) = 0% → must NOT trip.
+  const t = arm("treatment", {
+    customerGroups: 100,
+    engagement: engagement({ reminded: 49, smsSent: 34, smsSuppressedStop: 15, smsOptOutsAfterReminder: 0 }),
+  });
+  const h = arm("holdout", { customerGroups: 100, engagement: engagement({ reminded: 100 }) });
+  const e = evaluateGuardrails(t, h);
+  const sms = e.signals.find((s) => s.key === "sms_opt_out")!;
+  assert.equal(sms.tripped, false);
+  assert.equal(sms.treatment, 0);
+  assert.equal(e.anyTripped, false);
 });

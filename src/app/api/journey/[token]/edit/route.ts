@@ -18,6 +18,7 @@ import { changeSubscriptionFrequency } from "@/lib/subscription-frequency";
 import { canMutateSubscription, assertNewVariantsSelectable } from "@/lib/portal/mutation-guard";
 import { shouldBlockForFailedPayment } from "@/lib/portal/failed-payment-guard";
 import { isSwappableConsumable, resolveVariantSwapContexts } from "@/lib/portal/editable-catalog";
+import { isLastProductLine } from "@/lib/next-order-journey-builder";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -42,6 +43,20 @@ type EditBody = {
 };
 
 type ResolvedSub = { id: string; contractId: string; isInternal: boolean; lastPaymentStatus: string | null };
+
+/**
+ * Is `dateStr` strictly after today? Accepts a plain YYYY-MM-DD (the mini-site's date input) or any
+ * Date-parseable string. A past or same-day date is rejected up front — the ShopCX engine refuses it
+ * at charge-time, so we never let it reach the executor + a manual ticket.
+ */
+function isFutureDate(dateStr: string): boolean {
+  const today = new Date();
+  const todayYmd = today.toISOString().slice(0, 10);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return dateStr > todayYmd;
+  const t = Date.parse(dateStr);
+  if (Number.isNaN(t)) return false;
+  return new Date(t).toISOString().slice(0, 10) > todayYmd;
+}
 
 /**
  * Resolve the subscription the customer is editing and PROVE it belongs to this
@@ -140,18 +155,33 @@ export async function POST(
     return NextResponse.json({ success: false, validationError: guardFailure.code, message: guardFailure.message });
   }
 
-  // Removing the only item would empty the subscription. That is a cancel, not an edit: the executor
-  // refuses it, so tell the customer up front instead of raising a "could not be applied" alert for a
-  // change nobody should apply (2026-11-24: a customer tapped Remove on their only item and the team got
-  // a high-severity "apply manually" card).
+  // Removing the only PRODUCT line would empty the subscription. That is a cancel, not an edit: the
+  // executor refuses it, so tell the customer up front instead of raising a "could not be applied"
+  // alert for a change nobody should apply (2026-11-24: a customer tapped Remove on their only item
+  // and the team got a high-severity "apply manually" card). Uses the SAME last-product-line predicate
+  // the Portal's remove guard uses (Shipping Protection lines don't count), so the two surfaces agree.
   if (action === "remove") {
     const { data: row } = await admin.from("subscriptions").select("items").eq("id", sub.id).maybeSingle();
-    const lines = Array.isArray(row?.items) ? (row!.items as unknown[]).length : null;
-    if (lines !== null && lines <= 1) {
+    const items = Array.isArray(row?.items) ? (row!.items as { title?: string | null; variant_id?: string | number | null }[]) : [];
+    if (isLastProductLine(items, body.variant_id)) {
       return NextResponse.json({
         success: false,
         validationError: "last_item",
         message: "This is the only item on your subscription, so it can't be removed. You can swap it for something else, skip your next order, or cancel instead.",
+      });
+    }
+  }
+
+  // A next-delivery date must be strictly in the FUTURE. The ShopCX engine's
+  // subscriptionContractSetNextBillingDate rejects a past/today date with a userError, which on the
+  // first live run (2026-11-24) fell through to raiseFailedEdit — a manual ticket for a change the
+  // customer could just re-pick. Map it to a customer-safe validation message before dispatch instead.
+  if (action === "change_date" && body.next_billing_date) {
+    if (!isFutureDate(body.next_billing_date)) {
+      return NextResponse.json({
+        success: false,
+        validationError: "date_in_past",
+        message: "Please choose a date in the future for your next delivery.",
       });
     }
   }
@@ -403,8 +433,10 @@ async function raiseFailedEdit(
     type: "system",
     title: "Next-order journey edit could not be applied",
     body: ticketId
-      ? `Ticket ${ticketId} — a "${action}" edit in the next-order journey failed to apply. Apply it manually.`
-      : `A "${action}" edit in the next-order journey failed to apply (session ${session.id}).`,
-    metadata: { severity: "high", ticket_id: ticketId, customer_id: session.customer_id, subscription_id: session.subscription_id, journey_session_id: session.id, action },
+      ? `Ticket ${ticketId} — a "${action}" edit in the next-order journey failed to apply (${error || "unknown error"}). Apply it manually.`
+      : `A "${action}" edit in the next-order journey failed to apply (session ${session.id}): ${error || "unknown error"}.`,
+    // Persist the executor's error string so a repeat failure is diagnosable from the card itself
+    // (the 2026-11-24 date change failed with NO stored reason — root-causing it meant guessing).
+    metadata: { severity: "high", ticket_id: ticketId, customer_id: session.customer_id, subscription_id: session.subscription_id, journey_session_id: session.id, action, error: error ?? null },
   });
 }
