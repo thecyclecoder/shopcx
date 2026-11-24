@@ -31,8 +31,44 @@
  * module encodes: resolve the pointer before judging the pointee.
  */
 import type { createAdminClient } from "@/lib/supabase/admin";
+import { escalateFounderDedupeKey } from "@/lib/cs-director-escalate-founder-card";
 
 type Admin = ReturnType<typeof createAdminClient>;
+
+/**
+ * Dismiss any OPEN CS-Director escalate-to-founder CEO card for a ticket — the terminal state a
+ * playbook TAKEOVER reaches (Phase 2 of playbook-takeover-replies-and-clears-escalation). When a
+ * playbook starts on a ticket (`startPlaybook`), the playbook now OWNS the ticket, so a founder
+ * escalation raised on an earlier turn is stale and must leave the CEO inbox — otherwise a ticket
+ * the playbook is actively answering keeps showing as escalated (Doreen Johnson b5aaff03).
+ *
+ * Keyed on the per-ticket `dedupe_key` the card minted with (`cs-director-founder:<ticketId>`, from
+ * {@link escalateFounderDedupeKey}) so it matches the exact open card without a metadata scan — the
+ * same key the DB's open-card partial-unique index enforces one-per-ticket on. Workspace-scoped +
+ * `dismissed=false` compare-and-set so a concurrent dismiss can't double-fire. No raw cross-table
+ * scan, no `.from()` outside this notifications SDK. Returns the number of cards dismissed (0 when
+ * none were open). Never throws on a PostgREST error — a cleanup dismiss must not block the caller.
+ */
+export async function dismissFounderEscalationCardsForTicket(
+  admin: Admin,
+  workspaceId: string,
+  ticketId: string,
+): Promise<number> {
+  const { data, error } = await admin
+    .from("dashboard_notifications")
+    .update({ dismissed: true })
+    .eq("workspace_id", workspaceId)
+    .eq("dismissed", false)
+    .eq("metadata->>dedupe_key", escalateFounderDedupeKey(ticketId))
+    .select("id");
+  if (error) {
+    console.warn(
+      `[notification-hygiene] founder-escalation dismiss failed for ticket ${ticketId}: ${error.message}`,
+    );
+    return 0;
+  }
+  return data?.length ?? 0;
+}
 
 /**
  * How long a daily recap stays in the inbox. Long enough to read over a weekend, short enough that
