@@ -1,0 +1,1 @@
+- **Drop foreign-app noise: specs.spec_review_status direct-REST column-missing SELECT** · verified 2026-11-24 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingSpecsSpecReviewStatusAdhocNoise`)
