@@ -1,0 +1,1 @@
+- **Scheduled texts must go through the marketing Messaging Service, never a bare From number** · verified 2026-11-24 · → [[../lifecycles/pre-renewal-reminder-journey]]
