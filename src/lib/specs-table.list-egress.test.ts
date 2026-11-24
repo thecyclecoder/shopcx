@@ -57,6 +57,16 @@ test("a non-status filter does not narrow the scope", () => {
   assert.equal(scopeForFilter({ milestone_id: null }), "all");
 });
 
+// db-roadmap-reads-skip-folded-specs — the in-flight filter.
+test("excludeFolded narrows to the cheap 'active' (non-folded) row set", () => {
+  assert.equal(scopeForFilter({ excludeFolded: true }), "active");
+});
+
+test("an explicit scope still wins over excludeFolded", () => {
+  assert.equal(scopeForFilter({ excludeFolded: true, scope: "all" }), "all");
+  assert.equal(scopeForFilter({ excludeFolded: true, scope: "archived" }), "archived");
+});
+
 // ── decideListSpecsCache ─────────────────────────────────────────────────────
 
 test("no entry → fetch", () => {

@@ -850,7 +850,9 @@ async function readSpecsFromDb(workspaceId: string): Promise<SpecCard[]> {
   // un-overlaid (the canonical row already carries the truth for everything else).
   try {
     const { getSpecCardStates } = await import("@/lib/spec-card-state");
-    const states = await getSpecCardStates(workspaceId);
+    // db-roadmap-reads-skip-folded-specs — the overlay only ever keys off boardable (non-folded)
+    // card slugs, so the folded card rows were pure wire cost. Read in-flight only.
+    const states = await getSpecCardStates(workspaceId, { excludeFolded: true });
     for (let i = 0; i < cards.length; i++) cards[i] = overlayCardFlags(cards[i], states[cards[i].slug]);
   } catch {
     /* best-effort overlay — the DB row is authoritative for everything else. */
@@ -1610,7 +1612,8 @@ async function loadWorkspaceMapsMemoized(workspaceId: string): Promise<Workspace
   let cardStates: Record<string, import("@/lib/spec-card-state").SpecCardState> = {};
   try {
     const { getSpecCardStates } = await import("@/lib/spec-card-state");
-    cardStates = await getSpecCardStates(workspaceId);
+    // db-roadmap-reads-skip-folded-specs — this map only serves boardable specs, so skip folded rows.
+    cardStates = await getSpecCardStates(workspaceId, { excludeFolded: true });
   } catch {
     /* best-effort — the canonical row is still correct without the overlay. */
   }
