@@ -60,6 +60,7 @@ import {
   isForeignSupabasePostgresMissingReturnsRefundOnColumnAdhocNoise,
   isForeignSupabasePostgresMissingTicketsMergedIntoTicketIdColumnAdhocNoise,
   isForeignSupabasePostgresMissingTicketsAssigneeTypeColumnAdhocNoise,
+  isForeignSupabasePostgresMissingJourneyStepEventsJourneySessionIdColumnAdhocNoise,
   isForeignSupabasePostgresMissingFraudCasesUpdatedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingAgentActionRequestsUpdatedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingFraudCasesCustomerIdColumnAdhocNoise,
@@ -3042,6 +3043,14 @@ const LOG_QUERIES: LogQuery[] = [
       // non-SELECT write still surfaces / pages on first sighting (Control Tower signature
       // `supabase-logs:4c8819ba3f4b0f49`).
       if (isForeignSupabasePostgresMissingTicketsAssigneeTypeColumnAdhocNoise(message, query)) return null;
+      // Same foreign direct-REST shape on a different table: a stale/foreign client reading
+      // `journey_step_events.journey_session_id` — our `journey_step_events` table's real column
+      // is `session_id` and no ShopCX code path names `journey_session_id`. Narrowly gated to the
+      // exact column-missing message AND a SELECT-on-journey_step_events shape (bare OR PostgREST
+      // CTE wrapper) — a column-missing on a live `journey_step_events` column, the same column
+      // name on another table, or a non-SELECT write still surfaces / pages on first sighting
+      // (Control Tower signature `supabase-logs:06892720c9da67d6`).
+      if (isForeignSupabasePostgresMissingJourneyStepEventsJourneySessionIdColumnAdhocNoise(message, query)) return null;
       // Same foreign direct-REST shape on a different table: a stale/foreign client reading
       // `specs.spec_slug` (the real column is the bare `slug`). Narrowly gated to the exact
       // column-missing message AND a SELECT-on-specs shape (bare OR PostgREST CTE wrapper)
