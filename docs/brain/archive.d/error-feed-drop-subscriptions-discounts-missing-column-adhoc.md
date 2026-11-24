@@ -1,0 +1,1 @@
+- **Drop foreign ad-hoc `column subscriptions.discounts does not exist` reads from the Control Tower error feed** · verified 2026-11-24 · → [[../libraries/error-feed]]
