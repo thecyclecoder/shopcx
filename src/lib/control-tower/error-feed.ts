@@ -6567,6 +6567,60 @@ export function isForeignSupabasePostgresMissingSubscriptionsSourceColumnAdhocNo
 }
 
 /**
+ * Foreign-app noise — Postgres reporting `column subscriptions.billing_provider does not exist`
+ * for an ad hoc SELECT lookup / PostgREST direct-REST call against `public.subscriptions`. Our
+ * `subscriptions` table has NEVER carried a `billing_provider` column — it exists nowhere in our
+ * schema or git history ([[../tables/subscriptions]]); which billing engine owns a subscription
+ * is tracked by `billing_source` + `is_internal`, never a scalar `billing_provider`. A bare
+ * `billing_provider` column only exists in third-party subscription-app schemas. The message
+ * surfaces on Supabase's `postgres_logs` feed only when an external / stale / manual client (a
+ * foreign app assuming a generic `billing_provider` shape, a deprecated integration, a stale SQL
+ * Editor session) issues a `select=...billing_provider...` against `/rest/v1/subscriptions` — or
+ * the PostgREST `WITH pgrst_source AS ( SELECT ... FROM "public"."subscriptions" ... )` CTE
+ * wrapper the same client emits. There is no lever from ShopCX to make that query resolve —
+ * paging Platform on it (Control Tower signature `supabase-logs:af1c5a78103832f6`) is repair work
+ * for a query we do not own.
+ *
+ * Sibling of `isForeignSupabasePostgresMissingSubscriptionsBillingEngineColumnAdhocNoise` — same
+ * narrow-gating shape (exact `column <table>.<name> does not exist` message + SELECT-lookup shape
+ * that covers BOTH the bare SELECT and the PostgREST CTE wrapper), scoped to the
+ * `subscriptions.billing_provider` direct-REST shape.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the `message` once trimmed equals `column subscriptions.billing_provider does not exist`
+ *      (or the `public.` qualified variant, with any leading `ERROR: ` prefix stripped), AND
+ *   2. the `parsed.query` attribute is a SELECT-lookup on `public.subscriptions` — either the
+ *      bare `select ... from (public.)?subscriptions` shape (any WHERE/LIMIT/ORDER BY tail is
+ *      fine), or PostgREST's `WITH pgrst_source AS ( SELECT ... FROM "public"."subscriptions"
+ *      ... )` direct-REST wrapper (double-quoted identifiers).
+ *
+ * Narrowly gated so a column-missing error for ANY OTHER column on `subscriptions` (a real schema
+ * regression like `subscriptions.items`), for `billing_provider` on ANY OTHER table, or a
+ * non-SELECT statement against the table (INSERT / UPDATE / DELETE / DDL) still pages — the CTE
+ * branch requires the wrapped op to be a SELECT. Empty / nullish message OR query returns `false`.
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]]: returning null drops
+ * the row (no error_event, no loop_alert, no signature). A capture-time drop, not a transient flag.
+ */
+export function isForeignSupabasePostgresMissingSubscriptionsBillingProviderColumnAdhocNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column subscriptions.billing_provider does not exist" ||
+    stripped === "column public.subscriptions.billing_provider does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  const bareSelect = /^select\b[\s\S]*\bfrom\s+(?:public\.)?subscriptions\b/.test(q);
+  const pgrstCte =
+    /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"?(?:public"?\.)?"?subscriptions\b/.test(q);
+  return bareSelect || pgrstCte;
+}
+
+/**
  * Foreign-app noise — Postgres reporting a missing column for an ad hoc SELECT lookup of
  * `customers.address`. Our `customers` table has NO bare `address` column — the live
  * address-related columns are `default_address` (JSONB) and `addresses` (JSONB array);
