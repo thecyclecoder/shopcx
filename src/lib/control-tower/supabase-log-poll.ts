@@ -165,6 +165,7 @@ import {
   isForeignSupabasePostgresSubscriptionsPausedUntilLookupNoise,
   isForeignSupabasePostgresSubscriptionsEngineLookupNoise,
   isForeignSupabasePostgresSubscriptionsItemsContainmentInvalidJsonAdhocNoise,
+  isForeignSupabasePostgresOrdersLineItemsContainmentInvalidJsonAdhocNoise,
   isForeignSupabasePostgresUuidLikeOnSubscriptionsIdAdhocNoise,
   isForeignSupabasePostgresUuidLikeOnMigrationAuditsIdAdhocNoise,
   isForeignSupabasePostgresMissingColumnOnMigrationAuditsShopifyContractIdAdhocNoise,
@@ -1736,6 +1737,20 @@ const LOG_QUERIES: LogQuery[] = [
       // error on any other table, or a non-SELECT PostgREST wrapper (INSERT /
       // UPDATE) still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresSubscriptionsItemsContainmentInvalidJsonAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: the `orders.line_items` twin of the guard above —
+      // a PostgREST direct-REST read against `/rest/v1/orders?line_items=cs.<value>` where an
+      // external client passed a non-JSON value to the `line_items=cs.<value>` containment
+      // filter, producing Postgres `invalid input syntax for type json` under the PostgREST
+      // `WITH pgrst_source AS ( SELECT ... FROM "public"."orders" ... WHERE ... "line_items"
+      // @> ... )` CTE wrapper. No ShopCX code path builds an `orders.line_items @>` containment
+      // filter, so there is nothing to repair in product code — paging Platform on it (Control
+      // Tower signature `supabase-logs:dbe2c7bfb3216740`) is repair work for a query we don't
+      // own. Narrowly gated to require BOTH the exact invalid-JSON message AND the PostgREST
+      // SELECT-CTE wrapper on `public.orders` carrying both `"line_items"` and the `@>`
+      // containment token — a different operator on line_items (?, ?|, ->, ->>, =, text LIKE),
+      // the same operator against a different column on `orders`, a bad-JSON error on any other
+      // table, or a non-SELECT PostgREST wrapper (INSERT / UPDATE) still surfaces / pages.
+      if (isForeignSupabasePostgresOrdersLineItemsContainmentInvalidJsonAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: a Supabase Studio / direct-REST quick-filter that
       // LIKEs the uuid `subscriptions.id` column, which Postgres rejects with `operator does
       // not exist: uuid ~~ unknown`. No ShopCX code path issues a uuid LIKE (a predeploy guard

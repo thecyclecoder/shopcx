@@ -325,6 +325,7 @@
     "test:gated-migration-approval": "tsx --test src/lib/control-tower/gated-migration-approval.test.ts",
     "test:error-feed": "tsx --test src/lib/control-tower/error-feed.test.ts",
     "test:error-feed-playbooks-steps-noise": "tsx --test src/lib/control-tower/error-feed.playbooks-steps-noise.test.ts",
+    "test:error-feed-orders-line-items-containment-noise": "tsx --test src/lib/control-tower/error-feed.orders-line-items-containment-noise.test.ts",
     "test:error-feed-spec-phase-checks-noise": "tsx --test src/lib/control-tower/error-feed.spec-phase-checks-noise.test.ts",
     "test:error-feed-specs-overall-status-noise": "tsx --test src/lib/control-tower/error-feed.specs-overall-status-noise.test.ts",
     "test:error-feed-specs-goal-slug-noise": "tsx --test src/lib/control-tower/error-feed.specs-goal-slug-noise.test.ts",
