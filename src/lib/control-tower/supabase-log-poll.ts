@@ -166,6 +166,7 @@ import {
   isForeignSupabasePostgresUuidLikeOnTicketsIdAdhocNoise,
   isForeignSupabasePostgresUuidLikeOnReturnsIdAdhocNoise,
   isForeignSupabasePostgresUuidIlikeOnTicketsIdAdhocNoise,
+  isForeignSupabasePostgresUuidIlikeOnDirectorActivityWorkspaceIdAdhocNoise,
   isForeignSupabasePostgresInvalidUuidSyntaxOnTicketsIdAdhocNoise,
   isForeignSupabasePostgresInvalidUuidSyntaxOnReturnsIdAdhocNoise,
   isForeignSupabasePostgresInvalidUuidSyntaxOnOrdersWorkspaceIdAdhocNoise,
@@ -1748,6 +1749,12 @@ const LOG_QUERIES: LogQuery[] = [
       // predeploy guard forbids LIKE/ILIKE on uuid columns), so the ERROR is repair work for a query
       // we don't own. Control Tower signature `supabase-logs:655d56e7e5279554`.
       if (isForeignSupabasePostgresUuidIlikeOnTicketsIdAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: the `director_activity.workspace_id` sibling of the same
+      // uuid-ILIKE Studio / direct-REST quick-filter, rejected by Postgres with the identical
+      // `operator does not exist: uuid ~~* unknown`. No ShopCX code path ILIKEs the uuid
+      // `director_activity.workspace_id` column, so the ERROR is repair work for a query we don't
+      // own. The last unfiltered member of Control Tower signature `supabase-logs:655d56e7e5279554`.
+      if (isForeignSupabasePostgresUuidIlikeOnDirectorActivityWorkspaceIdAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: the equality twin of the tickets.id probe — a
       // malformed-uuid `tickets.id = $1` read rejected by Postgres with `invalid input syntax for
       // type uuid`. A hand-typed/truncated uuid pasted into a Studio quick-filter / direct-REST
