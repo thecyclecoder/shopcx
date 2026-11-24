@@ -80,7 +80,7 @@ import {
   type RegressionInstructions,
 } from "@/lib/regression-agent";
 import { getHumanTestQueue } from "@/lib/spec-test-runs";
-import { markSpecCardForReview, type SpecCardFlags } from "@/lib/spec-card-state";
+import { markSpecCardForReview, getSpecCardStates, type SpecCardFlags } from "@/lib/spec-card-state";
 import { authorSpecRowStructured, buildStructuredSpecInputFromMarkdown } from "@/lib/author-spec";
 import {
   driftSuspectPhases,
@@ -1487,14 +1487,15 @@ async function findEscortCandidates(admin: Admin, workspaceId: string, scope: { 
   const out: EscortCandidate[] = [];
   const seen = new Set<string>();
 
-  // Source 1+2 — the live mirror.
-  const { data: states } = await admin
-    .from("spec_card_state")
-    .select("spec_slug, status, flags")
-    .eq("workspace_id", workspaceId)
-    .in("status", ["in_progress", "planned"])
-    .limit(2000);
-  for (const row of (states ?? []) as { spec_slug: string; status: SpecStatus; flags: SpecCardFlags | null }[]) {
+  // Source 1+2 — the live mirror. db-roadmap-reads-skip-folded-specs: read in-flight only via the
+  // spec-card-state SDK (`excludeFolded`) instead of a raw workspace scan — a folded spec's frozen
+  // card row (status in_progress/planned at fold time) was fetched here and then discarded by the
+  // `isInScope` belt below, pure egress. The active card set is bounded, so the in-memory status
+  // filter is cheap and the folded rows never cross the wire.
+  const states = Object.values(await getSpecCardStates(workspaceId, { excludeFolded: true }))
+    .filter((r) => r.status === "in_progress" || r.status === "planned")
+    .map((r) => ({ spec_slug: r.spec_slug, status: r.status as SpecStatus, flags: r.flags }));
+  for (const row of states as { spec_slug: string; status: SpecStatus; flags: SpecCardFlags | null }[]) {
     const card = scope.specBySlug.get(row.spec_slug);
     if (!scope.isInScope(card)) continue;
     const critical = !!row.flags?.critical;
