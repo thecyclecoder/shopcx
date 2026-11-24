@@ -285,12 +285,20 @@ export async function readFailedBuildStalls(
 
 /**
  * Returns the set of spec slugs in `workspace_id` whose LATEST build FAILED and whose failure is
- * currently OWNED by a human via a loop-guard escalation (init + goal-escort) — so Mario must not
- * re-diagnose it. After a build fails the resubmit cap with nothing in-flight, the loop guard POSTs
- * an escalation to the CEO and records a `director_activity` row (action_kind='escalated'): the
- * platform INIT lane uses metadata.escalation_kind='init_loop_guard', while a GOAL-ESCORTED spec uses
- * metadata.escalation_kind='loop_guard' (dedupe_key 'loopguard:<slug>'). Both mean the human now owns
- * the spec, so both are recognized here.
+ * currently OWNED by a human via a CEO escalation (loop-guard init + goal-escort, plus the init
+ * lane's ambiguity holds) — so Mario must not re-diagnose it. After a build fails the resubmit cap
+ * with nothing in-flight, the loop guard POSTs an escalation to the CEO and records a
+ * `director_activity` row (action_kind='escalated'). FOUR escalation kinds are recognized here, all
+ * meaning the human (CEO) now owns the spec until the card closes:
+ *   - 'init_loop_guard' — the platform INIT lane's loop guard (dedupe_key 'initguard:<slug>').
+ *   - 'loop_guard'      — a GOAL-ESCORTED spec's loop guard (dedupe_key 'loopguard:<slug>').
+ *   - 'init_unsure'     — the init lane held an ambiguous/out-of-scope/new-goal spec for a CEO call
+ *                         ('Initiation needs a call … Holding off — your call', dedupe_key
+ *                         'init-unsure:<slug>', scripts/builder-worker.ts).
+ *   - 'init_dismiss_rework' — the init lane's dismiss-rework sibling ('needs your decision', same
+ *                         'init-unsure:<slug>' dedupe_key).
+ * A spec parked on ANY of these four is human-owned exactly like an init loop-guard one, so all four
+ * are recognized here.
  *
  * A slug is OWNED when its latest loop-guard escalation (either kind) is NEWER than its latest build
  * failure (the escalation covers THIS failure) AND is NOT yet superseded (no later `escorted_init`/
@@ -355,10 +363,15 @@ export async function readInitLoopGuardOwnedSlugs(
     .select("spec_slug, created_at")
     .eq("workspace_id", workspace_id)
     .eq("action_kind", "escalated")
-    // Cover BOTH the init-escort loop guard ('init_loop_guard') AND the goal-escort loop guard
-    // ('loop_guard', dedupe_key 'loopguard:<slug>') — a goal-escorted spec parked on a build
-    // loop-guard escalation is human-owned exactly like an init one, so Mario must stop re-firing.
-    .in("metadata->>escalation_kind", ["init_loop_guard", "loop_guard"])
+    // Cover ALL FOUR human-owned CEO-escalation kinds: the init-escort loop guard
+    // ('init_loop_guard') AND the goal-escort loop guard ('loop_guard', dedupe_key
+    // 'loopguard:<slug>') AND the platform init lane's ambiguity holds — 'init_unsure'
+    // ('Initiation needs a call … Holding off — your call') and its sibling
+    // 'init_dismiss_rework' ('needs your decision'), both dedupe_key 'init-unsure:<slug>'
+    // (scripts/builder-worker.ts). A spec parked on ANY of these is human-owned (the CEO owns
+    // the spec until the card closes) exactly like an init loop-guard one, so Mario must stop
+    // re-firing until a later escorted_init/escorted_goal/build_done un-owns it.
+    .in("metadata->>escalation_kind", ["init_loop_guard", "loop_guard", "init_unsure", "init_dismiss_rework"])
     .in("spec_slug", slugs)
     .gte("created_at", sinceIso)
     .order("created_at", { ascending: false })
