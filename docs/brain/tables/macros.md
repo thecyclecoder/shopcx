@@ -66,7 +66,7 @@ const { count } = await admin.from("macros")
 
 ## Gotchas
 
-- Embeddings (1536) for similarity search.
+- Embeddings (1536) for similarity search. **Write `body_text` through [[../libraries/support-content]]** (`updateMacroBody`), which recomputes `embedding` from `name. body_text`. New raw writes fail `check:support-content-sdk-compliance`.
 - AI-suggestion counters: `ai_suggest_count`, `ai_accept_count`, `ai_reject_count`, `ai_edit_count` — drive acceptance-rate badges in settings.
 
 ---
