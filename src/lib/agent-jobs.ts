@@ -838,12 +838,50 @@ export function deriveSelfVerifySignature(error: string | null | undefined): str
   return tail ? tail.slice(0, 500) : null;
 }
 
+// ─── mario-fix-tsc-oom-and-circuit-breaker-gap Phase 2 ──────────────────────────────────────────────
+// deriveSelfVerifySignature returns null for a 'tsc failed …' error, so the breaker below bailed at its
+// null-signature guard and NEVER counted a DETERMINISTIC tsc-after-repair failure — enqueueBuildIfDue
+// then re-queued the identical failing build every tick with no park (ai-shopping-agent-mcp, build
+// 2026-11-23T22:56:58, looped on a tsc-OOM false-fail). The runner writes a FIXED `error` string for
+// each tsc gate point ("tsc failed", "tsc failed after a predeploy-guard repair pass", "tsc failed after
+// pre-commit self-verify repair") — the variable compiler output goes to `log_tail`, never `error` — so
+// the error itself is a stable identifier. Give tsc failures their OWN `tsc-fail:`-namespaced signature.
+
 /**
- * Pure decision: given the most-recent build jobs (ordered created_at DESC), is the self-verify circuit
- * open? The circuit opens only when the TOP `threshold` consecutive rows are all `status='failed'` AND
- * share the SAME self-verify signature. The streak breaks on the first row that is not failed, has no
- * self-verify signature, or carries a DIFFERING signature — so a success, a different failure mode, or an
- * edited spec (new failing checks ⇒ new signature) resets the counter and lets the spec build again.
+ * Derive a STABLE `tsc-fail:`-namespaced signature for a build that failed its `npx tsc --noEmit` gate,
+ * or null when the error is not a tsc failure. The namespace prefix keeps this DISTINCT from the plain
+ * self-verify-unresolved tail (which can never begin with "tsc-fail:"), so a tsc fail and a
+ * self-verify-unresolved fail never count toward the same streak. Two identical tsc errors share a
+ * signature; two different tsc gate points (bare "tsc failed" vs "tsc failed after …") do NOT — a
+ * conservative choice that never merges distinct failure modes into one breaker-open streak.
+ */
+export function deriveTscFailSignature(error: string | null | undefined): string | null {
+  if (!error) return null;
+  const trimmed = error.trim();
+  if (!/^tsc failed( after .*)?/i.test(trimmed)) return null;
+  const tail = trimmed.replace(/\s+/g, " ").toLowerCase().slice(0, 500);
+  return `tsc-fail:${tail}`;
+}
+
+/**
+ * Resolve the circuit signature for a build failure across BOTH namespaces: a pre-commit self-verify
+ * unresolved failure (plain normalized failing-check tail) OR a deterministic tsc gate failure
+ * (`tsc-fail:`-prefixed). Returns null for anything else (a success, an insert error, …). The two
+ * namespaces are disjoint by construction, so a run that ALTERNATES between a tsc fail and a self-verify
+ * fail resets the streak rather than falsely accumulating toward a breaker-open.
+ */
+export function deriveCircuitSignature(error: string | null | undefined): string | null {
+  return deriveSelfVerifySignature(error) ?? deriveTscFailSignature(error);
+}
+
+/**
+ * Pure decision: given the most-recent build jobs (ordered created_at DESC), is the build circuit open?
+ * The circuit opens only when the TOP `threshold` consecutive rows are all `status='failed'` AND share
+ * the SAME circuit signature — either a self-verify-unresolved signature OR a `tsc-fail:` signature (the
+ * two namespaces are distinct, so a tsc fail and a self-verify fail do NOT count toward the same streak).
+ * The streak breaks on the first row that is not failed, has no signature, or carries a DIFFERING
+ * signature — so a success, a different failure mode, or an edited spec (new failing checks ⇒ new
+ * signature) resets the counter and lets the spec build again.
  */
 export function selfVerifyCircuitDecision(
   recentBuilds: Array<{ status: string | null; error: string | null }>,
@@ -852,12 +890,12 @@ export function selfVerifyCircuitDecision(
   const threshold = opts?.threshold ?? SELF_VERIFY_CIRCUIT_N;
   const top = recentBuilds[0];
   if (!top || top.status !== "failed") return { open: false, signature: null, count: 0 };
-  const signature = deriveSelfVerifySignature(top.error);
+  const signature = deriveCircuitSignature(top.error);
   if (!signature) return { open: false, signature: null, count: 0 };
   let count = 0;
   for (const b of recentBuilds) {
     if (b.status !== "failed") break;
-    if (deriveSelfVerifySignature(b.error) !== signature) break;
+    if (deriveCircuitSignature(b.error) !== signature) break;
     count++;
   }
   return { open: count >= threshold, signature, count };
