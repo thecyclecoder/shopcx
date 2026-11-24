@@ -1705,6 +1705,15 @@ export interface AssertionInputs {
    * escalated_at and created_at (build-control-tower-escalation-idle-floor-wait-by-ticket-created-at).
    */
   oldestEscalatedCreatedAt: string | null;
+  /**
+   * The same oldest waiting ticket's updated_at — when it last changed state (e.g. merged, or
+   * re-routed founder→routine). The escalation-idle tile only reds once the triage-escalations
+   * cron has actually TICKED since this timestamp: a ticket whose escalated_at/created_at both
+   * pre-date when it actually joined the routine queue (its updated_at) must not be flagged
+   * before the hourly cron has had a run to enqueue it
+   * (control-tower-escalation-idle-require-cron-tick-since-ticket Phase 1).
+   */
+  oldestEscalatedUpdatedAt: string | null;
   /** most-recent triage-escalations agent_jobs.created_at (any status), or null. */
   latestTriageJobAt: string | null;
   /**
@@ -1926,6 +1935,21 @@ export function evalOutputAssertion(
       // re-escalates a ticket in the same instant its review is recorded
       // (control-tower-escalation-idle-mirror-cron-dedup Phase 1).
       if (inputs.oldestEscalatedHandled) return null;
+      // Require a cron tick SINCE the ticket last changed state before reding. A merged ticket, or
+      // one re-routed founder→routine, carries escalated_at/created_at that both pre-date when it
+      // actually joined the routine queue (its updated_at). If the hourly triage-escalations cron
+      // hasn't run since that state change, the next tick would enqueue June's review on schedule —
+      // reding now is a false positive. Stay green when the cron has never beat (ran_at null) OR the
+      // ticket's updated_at post-dates the latest beat (no tick since it joined the queue). We only
+      // red once the cron has demonstrably skipped the eligible ticket across a real hourly tick
+      // (control-tower-escalation-idle-require-cron-tick-since-ticket Phase 1).
+      if (
+        latest?.ran_at == null ||
+        (inputs.oldestEscalatedUpdatedAt != null &&
+          new Date(inputs.oldestEscalatedUpdatedAt).getTime() > new Date(latest.ran_at).getTime())
+      ) {
+        return null;
+      }
       const n = inputs.escalatedWaiting;
       return {
         statusText: `idle while ${n} ticket${n === 1 ? "" : "s"} wait${n === 1 ? "s" : ""} (oldest ${elapsed(waitStartIso)})`,
@@ -2591,7 +2615,7 @@ async function fetchAssertionInputs(admin: Admin): Promise<AssertionInputs> {
     // been waiting, and which ticket to probe for a covering review / parked job below.
     admin
       .from("tickets")
-      .select("id, escalated_at, created_at")
+      .select("id, escalated_at, created_at, updated_at")
       .not("escalated_at", "is", null)
       .is("escalated_to", null)
       .not("status", "in", '("archived","closed")')
@@ -2660,7 +2684,7 @@ async function fetchAssertionInputs(admin: Admin): Promise<AssertionInputs> {
   // ticket id). The parked set extends the cron's inflight set with `needs_attention` so a review
   // sitting in the CEO inbox awaiting a human isn't mistaken for un-picked-up work
   // (control-tower-escalation-idle-mirror-cron-dedup Phase 1).
-  const oldestEscalatedRow = oldestEscalated.data as { id: string; escalated_at: string; created_at: string } | null;
+  const oldestEscalatedRow = oldestEscalated.data as { id: string; escalated_at: string; created_at: string; updated_at: string } | null;
   let oldestEscalatedHandled = false;
   if (oldestEscalatedRow?.id && oldestEscalatedRow.escalated_at) {
     const [coveringReview, parkedJob] = await Promise.all([
@@ -2692,6 +2716,7 @@ async function fetchAssertionInputs(admin: Admin): Promise<AssertionInputs> {
     escalatedWaiting: escalated.count ?? 0,
     oldestEscalatedAt: oldestEscalatedRow?.escalated_at ?? null,
     oldestEscalatedCreatedAt: oldestEscalatedRow?.created_at ?? null,
+    oldestEscalatedUpdatedAt: oldestEscalatedRow?.updated_at ?? null,
     latestTriageJobAt: (triageJob.data as { created_at: string } | null)?.created_at ?? null,
     oldestEscalatedHandled,
     latestSpecTestJobAt: (specTestJob.data as { created_at: string } | null)?.created_at ?? null,
