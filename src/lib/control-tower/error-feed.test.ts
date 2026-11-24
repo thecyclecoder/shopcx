@@ -149,6 +149,7 @@ import {
   isExpectedSubscriptionCycleChargesCycleUniqViolation,
   isForeignSupabasePostgresMissingControlTowerEventsLookupNoise,
   isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise,
+  isForeignSupabasePostgresMissingSubscriptionsDiscountsColumnAdhocNoise,
   isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise,
   isForeignSupabasePostgresMissingWorkerHeartbeatsCreatedAtAdhocNoise,
   isForeignSupabasePostgresMissingTicketDirectionsCreatedAtAdhocNoise,
@@ -32335,6 +32336,119 @@ test("isForeignSupabaseRealtimeMessagesPartitionNoise KEEPS our own partition er
   assert.equal(
     isForeignSupabaseRealtimeMessagesPartitionNoise(
       'no partition of relation "messages" found for row',
+      "",
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingSubscriptionsDiscountsColumnAdhocNoise ──
+// Control Tower signature `supabase-logs:59b5f514dc2af1d9`: a foreign/stale direct-REST or
+// Supabase Studio read of `subscriptions.discounts`, a column the table never owned.
+
+test("isForeignSupabasePostgresMissingSubscriptionsDiscountsColumnAdhocNoise drops the CTE-wrapper and bare SELECT shapes", () => {
+  // PostgREST CTE wrapper form (direct-REST `subscriptions?select=...discounts...`).
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsDiscountsColumnAdhocNoise(
+      "column subscriptions.discounts does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."subscriptions"."id", "public"."subscriptions"."discounts" FROM "public"."subscriptions" LIMIT $1 OFFSET $2 )',
+    ),
+    true,
+  );
+  // The `public.`-qualified message variant is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsDiscountsColumnAdhocNoise(
+      "column public.subscriptions.discounts does not exist",
+      'with pgrst_source as ( select "public"."subscriptions"."discounts" from "public"."subscriptions" limit 1 )',
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsDiscountsColumnAdhocNoise(
+      "ERROR: column subscriptions.discounts does not exist",
+      'WITH pgrst_source AS ( SELECT "discounts" FROM "public"."subscriptions" )',
+    ),
+    true,
+  );
+  // The bare SELECT form also drops — same foreign surface, different client / shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsDiscountsColumnAdhocNoise(
+      "column subscriptions.discounts does not exist",
+      "select * from public.subscriptions where discounts is not null",
+    ),
+    true,
+  );
+  // The unqualified-FROM (no `public.`) variant is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsDiscountsColumnAdhocNoise(
+      "column subscriptions.discounts does not exist",
+      "select id, discounts from subscriptions limit 10",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSubscriptionsDiscountsColumnAdhocNoise KEEPS the same message when FROM is a different table", () => {
+  // The pin names `subscriptions` only — a `discounts` column-missing error against any
+  // other relation is a real bug / regression and must keep paging.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsDiscountsColumnAdhocNoise(
+      "column subscriptions.discounts does not exist",
+      "select id, discounts from public.orders limit 10",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSubscriptionsDiscountsColumnAdhocNoise KEEPS a different missing column on subscriptions", () => {
+  // The pin covers `discounts` only — a different missing column on `subscriptions` (a real
+  // column rename / regression that broke a live query) still pages.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsDiscountsColumnAdhocNoise(
+      "column subscriptions.status does not exist",
+      "select id, status from public.subscriptions limit 10",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSubscriptionsDiscountsColumnAdhocNoise KEEPS a non-SELECT statement", () => {
+  // The pin is the SELECT-lookup shape — an INSERT / UPDATE / DELETE naming a bogus column
+  // is a real code-write bug and stays captured / pages.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsDiscountsColumnAdhocNoise(
+      "column subscriptions.discounts does not exist",
+      "insert into public.subscriptions (id, discounts) values ($1, $2)",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsDiscountsColumnAdhocNoise(
+      "column subscriptions.discounts does not exist",
+      "update public.subscriptions set discounts = $1 where id = $2",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsDiscountsColumnAdhocNoise(
+      "column subscriptions.discounts does not exist",
+      "delete from public.subscriptions where discounts is null",
+    ),
+    false,
+  );
+  // The PostgREST CTE wrapper around a write is likewise a real code-write and still pages.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsDiscountsColumnAdhocNoise(
+      "column subscriptions.discounts does not exist",
+      'WITH pgrst_source AS ( INSERT INTO "public"."subscriptions"("id","discounts") VALUES ($1,$2) RETURNING * )',
+    ),
+    false,
+  );
+  // Empty query — cannot confirm the SELECT-lookup shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsDiscountsColumnAdhocNoise(
+      "column subscriptions.discounts does not exist",
       "",
     ),
     false,

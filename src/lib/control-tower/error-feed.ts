@@ -1214,6 +1214,73 @@ export function isForeignSupabasePostgresMissingProductsTemplateSuffixLookupNois
 }
 
 /**
+ * Foreign-app noise — Postgres reporting a missing `subscriptions.discounts` column for an
+ * ad hoc / stale direct-REST or Supabase Studio Table-Editor SELECT on a table ShopCX does
+ * not read that way. `public.subscriptions` has never owned a `discounts` column — discount
+ * state lives on the coupon-mapping / `coupons` side, not a column on the subscription row —
+ * so there is no lever from ShopCX to make that query resolve. A stale external/REST client
+ * SELECTs `discounts` from `public.subscriptions`, Supabase's `postgres_logs` feed captures
+ * the resulting undefined_column ERROR, and log-poll would mint a Control Tower incident for
+ * a query no code owns ([[../specs/error-feed-drop-subscriptions-discounts-missing-column-adhoc]],
+ * Control Tower signature `supabase-logs:59b5f514dc2af1d9`). The direct twin of
+ * `isForeignSupabasePostgresMissingProductsTemplateSuffixLookupNoise` /
+ * `isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise` above — same narrow
+ * two-marker gating shape (exact `column <table>.<name> does not exist` message + a
+ * SELECT-lookup shape covering BOTH the bare SELECT and the PostgREST CTE wrapper).
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical column-missing shape for THIS column — trimmed
+ *      equal to `column subscriptions.discounts does not exist` (or the `public.`-qualified
+ *      `column public.subscriptions.discounts does not exist` form PostgREST's CTE wrapper
+ *      emits, with any leading `ERROR: ` prefix stripped), AND
+ *   2. the `parsed.query` attribute is a SELECT-lookup on `public.subscriptions` — either
+ *      (a) the bare `select ... from (public.)?subscriptions` shape, OR (b) the
+ *      PostgREST-generated `WITH pgrst_source AS ( SELECT ... FROM "public"."subscriptions"
+ *      ... )` CTE wrapper form with double-quoted identifiers.
+ *
+ * Intentionally narrow — any genuine schema regression still pages:
+ *   - a DIFFERENT missing column on `subscriptions` (e.g. a real column rename that broke a
+ *     live query) still pages — the pin covers `discounts` only,
+ *   - the same `discounts` message on a DIFFERENT relation still pages — the pin names
+ *     `subscriptions` only,
+ *   - the same message attached to a DIFFERENT statement shape (INSERT / UPDATE / DELETE /
+ *     DDL, a JOIN across other tables) still pages — the pin is the SELECT-lookup shape; the
+ *     CTE branch likewise requires the wrapped op to be a SELECT,
+ *   - empty / nullish message OR query returns `false` — we need both markers.
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not record`,
+ * so returning null here fully suppresses the row (no error_event, no loop_alert, no
+ * signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresMissingSubscriptionsDiscountsColumnAdhocNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  if (
+    stripped !== "column subscriptions.discounts does not exist" &&
+    stripped !== "column public.subscriptions.discounts does not exist"
+  ) {
+    return false;
+  }
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  // Bare SELECT-lookup on `subscriptions` — any trailing WHERE/LIMIT/ORDER BY is fine; the
+  // pin is the SELECT-FROM shape only, so a non-SELECT / different-FROM statement (real
+  // code-bug shape) stays captured and pages.
+  if (/^select\b[\s\S]*\bfrom\s+(?:public\.)?subscriptions\b/.test(q)) return true;
+  // PostgREST direct-REST wraps the same lookup as `WITH pgrst_source AS ( SELECT ... FROM
+  // "public"."subscriptions" ... )` with double-quoted identifiers. Same foreign-owned read,
+  // different rendering — the plain SELECT regex above misses it because the statement starts
+  // with `with` and the FROM clause carries the quoted `"public"."subscriptions"` shape.
+  // Guarded so the CTE branch requires the wrapped op to be a SELECT.
+  return /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"public"\."subscriptions"/.test(q);
+}
+
+/**
  * Foreign-app noise — Postgres reporting a missing COLUMN on `public.loop_alerts` for an
  * ad hoc / stale direct-REST SELECT. The `loop_alerts` monitoring table has never owned
  * `closed_at`, `error_signature`, or `loop_key` — its lifecycle is tracked via `status` +

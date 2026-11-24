@@ -40,6 +40,7 @@ import {
   isForeignSupabasePostgresMissingControlTowerEventsLookupNoise,
   isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise,
   isForeignSupabasePostgresMissingProductsTemplateSuffixLookupNoise,
+  isForeignSupabasePostgresMissingSubscriptionsDiscountsColumnAdhocNoise,
   isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise,
   isForeignSupabasePostgresMissingPlaybooksStepsDirectRestColumnNoise,
   isForeignSupabasePostgresMissingSpecPhaseChecksDirectRestColumnNoise,
@@ -3038,6 +3039,18 @@ const LOG_QUERIES: LogQuery[] = [
       // — a different column, a non-SELECT, or a JOIN path still surfaces / pages on first
       // sighting.
       if (isForeignSupabasePostgresMissingSpecsSpecSlugColumnAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: a foreign/stale direct-REST client or Supabase
+      // Studio Table-Editor click SELECTs a `discounts` column from `subscriptions` that the
+      // table never owned (discount state lives on the coupon-mapping / `coupons` side, not a
+      // column on the subscription row), and no ShopCX code path reads it. The resulting
+      // undefined_column ERROR is repair work for a query we don't own
+      // ([[../specs/error-feed-drop-subscriptions-discounts-missing-column-adhoc]], Control
+      // Tower signature `supabase-logs:59b5f514dc2af1d9`). Narrowly gated to require BOTH the
+      // exact `column subscriptions.discounts does not exist` message AND the SELECT-lookup
+      // shape on `subscriptions` (bare or PostgREST CTE wrapper) — a different missing column
+      // on the table, a different table, or the same message via a non-SELECT statement still
+      // pages.
+      if (isForeignSupabasePostgresMissingSubscriptionsDiscountsColumnAdhocNoise(message, query)) return null;
       // Drop expected-by-design noise at capture: Postgres reporting the 23505
       // unique-violation raised by our own `dashboard_notifications_dedupe_key_open_uniq`
       // partial index on an INSERT INTO `public.dashboard_notifications`. That index
