@@ -2,7 +2,7 @@
 
 Product reviews with AI summaries. Storefront PDPs, ad-tool proof anchors, product intelligence, cancel-journey social proof, review cards, storefront email.
 
-⚠️ **No longer synced — and nothing collects reviews today.** The Klaviyo sync upsert was the ONLY INSERT into this table anywhere in the codebase, and Klaviyo is retired ([[../integrations/klaviyo]]). The newest row is **2026-07-01**. The table itself is permanent and heavily read; it is the *write* side that needs the in-house reviews program.
+**Collected in-house.** All reviews live here (~10.8k rows as of 2026-11-23). The Klaviyo sync was the original source (retired; newest Klaviyo row 2026-07-01). New reviews arrive daily through the in-house review journey: [[../inngest/post-order-review-ask-detector-cron]] → [[../inngest/post-order-review-ask-send]] → [[review_requests]] → `src/lib/review-journey-core.ts` inserts the row. ⚠️ Journey-collected rows have `published_at = NULL` — order/filter recent reviews on `created_at`, not `published_at`. "Best reviews" selection (PDP, product intelligence, cancel journey): `status IN ('published','featured')` + `rating >= 4`, `featured` first (`getReviewsForProducts` in `src/lib/klaviyo.ts`, `getProductIntelligence`).
 
 **Primary key:** `id`
 
