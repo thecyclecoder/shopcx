@@ -1,0 +1,1 @@
+- **Guard crisis_events lookup against undefined crisisId in journey-complete confirmation email** · verified 2026-11-24 · → [[../tables/crisis_events]]
