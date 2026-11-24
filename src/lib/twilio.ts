@@ -41,6 +41,15 @@ export async function sendSMS(
     messagingServiceSid?: string | null;
   },
 ): Promise<{ success: boolean; messageSid?: string; error?: string; errorCode?: number }> {
+  // A scheduled send (SendAt) is only honoured by Twilio when the message goes
+  // through a Messaging Service — a bare From number either fails or sends
+  // immediately, which for the pre-renewal reminder's 13:00 UTC run lands at
+  // 7-8 AM local. Refuse the scheduled send outright rather than fall back to an
+  // immediate one. Applies to EVERY caller (CEO 9 AM-local legal rule).
+  if (options?.sendAt && !options?.messagingServiceSid) {
+    return { success: false, error: "scheduled_send_requires_messaging_service" };
+  }
+
   const accountSid = process.env.TWILIO_ACCOUNT_SID;
   const authToken = process.env.TWILIO_AUTH_TOKEN;
 

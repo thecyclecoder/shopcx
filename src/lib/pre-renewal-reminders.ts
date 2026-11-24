@@ -469,10 +469,13 @@ export async function runPreRenewalRemindersForWorkspace(
   const groups = await scanEligibleReminders(workspaceId, now, admin);
   if (groups.length === 0) return out;
 
-  // Workspace send context (name/color for the email, phone for SMS).
+  // Workspace send context (name/color for the email, phone + marketing Messaging
+  // Service for SMS). The scheduled reminder text MUST go through the marketing
+  // Messaging Service so Twilio holds it until the local send window — the same
+  // column marketing-text.ts reads (src/lib/inngest/marketing-text.ts ~line 457).
   const { data: ws } = await admin
     .from("workspaces")
-    .select("name, help_primary_color, twilio_phone_number")
+    .select("name, help_primary_color, twilio_phone_number, twilio_marketing_messaging_service_sid")
     .eq("id", workspaceId)
     .maybeSingle();
 
@@ -540,7 +543,12 @@ async function sendTreatmentReminder(
   workspaceId: string,
   ledgerId: string,
   group: ReminderGroup,
-  ws: { name?: string | null; help_primary_color?: string | null; twilio_phone_number?: string | null } | null,
+  ws: {
+    name?: string | null;
+    help_primary_color?: string | null;
+    twilio_phone_number?: string | null;
+    twilio_marketing_messaging_service_sid?: string | null;
+  } | null,
   now: Date,
   admin: Admin,
   out: { emailsSent: number; smsSent: number; smsSuppressed: number },
@@ -671,6 +679,7 @@ async function sendTreatmentReminder(
     token,
     firstPreview,
     now,
+    ws?.twilio_marketing_messaging_service_sid ?? null,
   );
   Object.assign(update, smsResult.update);
   if (smsResult.sent) {
@@ -837,8 +846,19 @@ async function maybeSendConsentedSms(
   token: string | null,
   preview: ReminderChargePreview | undefined,
   now: Date,
+  messagingServiceSid: string | null,
 ): Promise<{ sent: boolean; suppressed: boolean; update: Record<string, unknown> }> {
   const update: Record<string, unknown> = {};
+
+  // A scheduled reminder text can ONLY be held to the local send window when it goes
+  // through the workspace's marketing Messaging Service — sendSMS refuses a SendAt
+  // without one. If the workspace has no Messaging Service configured, send no text
+  // (email still goes) and record the suppression so it's visible on the ledger.
+  if (!messagingServiceSid) {
+    update.sms_status = "suppressed_no_messaging_service";
+    update.sms_suppression_reason = "workspace has no marketing Messaging Service — scheduled text cannot be held to the send window";
+    return { sent: false, suppressed: true, update };
+  }
 
   // Never text a suppressed or non-consented customer (TCPA). The pure gate records
   // the specific suppression reason (STOP vs non-consent) for the M3 guardrail.
@@ -877,8 +897,13 @@ async function maybeSendConsentedSms(
   const body = buildReminderSmsBody(preview, journeyUrl);
 
   try {
-    // verdict.allowed guarantees a consented customer with a phone; we ALWAYS pass SendAt.
-    const res = await sendSMS(workspaceId, customer!.phone!, body, { sendAt: plan.sendAt });
+    // verdict.allowed guarantees a consented customer with a phone; we ALWAYS pass SendAt,
+    // and ALWAYS the marketing Messaging Service (non-null here — the guard above returned
+    // already if it was missing) so Twilio holds the text until plan.sendAt.
+    const res = await sendSMS(workspaceId, customer!.phone!, body, {
+      sendAt: plan.sendAt,
+      messagingServiceSid,
+    });
     if (res.success) {
       update.sms_status = "scheduled";
       update.sms_scheduled_send_at = plan.sendAt.toISOString();
