@@ -32,10 +32,11 @@ import { decideOutreachRoute } from "@/lib/outreach-route";
 import { getSupportMode, shouldRunCpgSteps } from "@/lib/support-mode";
 import { markFirstTouch, shouldDispatchSolFirstTouch } from "@/lib/first-touch";
 import { launchJourneyForTicket, nudgeJourney } from "@/lib/journey-delivery";
-import { matchPlaybook, matchPlaybookScored, loadDeferThreshold, applyDeferThreshold, startPlaybook, executePlaybookStep, type PlaybookExecResult } from "@/lib/playbook-executor";
+import { matchPlaybook, matchPlaybookScored, loadDeferThreshold, applyDeferThreshold, startPlaybook, executePlaybookStep, deliverRoutedPlaybookFirstReply, type PlaybookExecResult } from "@/lib/playbook-executor";
 import {
   detectPlaybookSuperseder,
   playbookSupersedeReasonPhrase,
+  csDirectorNoteSupersedesPlaybook,
   CS_DIRECTOR_VERDICT_NOTE_PREFIX,
 } from "@/lib/playbook-supersede-guard";
 import {
@@ -1533,8 +1534,20 @@ Respond with EXACTLY one word: "account" or "general" or "outreach".`,
     // instead of Sol's first touch.
     if ((!isNew || inheritedActivePlaybook) && runCpg) {
       const pbActive = await step.run("check-playbook", async () => {
-        const { data: t } = await admin.from("tickets").select("active_playbook_id").eq("id", tid).single();
+        const { data: t } = await admin.from("tickets").select("active_playbook_id, playbook_context").eq("id", tid).single();
         if (!t?.active_playbook_id) return null;
+
+        // Phase 3 (playbook-takeover-replies-and-clears-escalation) — only a CS-Director verdict
+        // written AFTER the CURRENT playbook started supersedes it. startPlaybook stamps
+        // playbook_context.playbook_started_at, and merge inheritance carries playbook_context
+        // forward. On Juliana's merge (22be5796) the handler inherited her playbook and then saw
+        // the OLD '[CS Director review]' note that arrived through the merged-in history — pre-
+        // dating the playbook start — and wrongly cleared it, restarting from the top. Gating the
+        // director-note read on playbook_started_at makes an inherited playbook + an older merged
+        // verdict a non-supersede; a FRESH June verdict (after the start) still supersedes.
+        const pbContext = (t.playbook_context ?? {}) as Record<string, unknown>;
+        const playbookStartedAt =
+          typeof pbContext.playbook_started_at === "string" ? pbContext.playbook_started_at : null;
 
         // A resolution supersedes the playbook: the playbook was the pre-escalation
         // lane, so once the ticket has moved on it must not resume the stale lane on
@@ -1566,18 +1579,27 @@ Respond with EXACTLY one word: "account" or "general" or "outreach".`,
             .eq("visibility", "external")
             .eq("author_type", "agent")
             .limit(1),
+          // Newest '[CS Director review]' note (created_at desc). csDirectorNoteSupersedesPlaybook
+          // then decides whether it counts — only a note AFTER playbook_started_at is the current
+          // lane; an older note that arrived via a merge does not supersede (Phase 3).
           admin.from("ticket_messages")
-            .select("id")
+            .select("created_at")
             .eq("ticket_id", tid)
             .eq("direction", "outbound")
             .eq("visibility", "internal")
             .eq("author_type", "system")
             .ilike("body", `${CS_DIRECTOR_VERDICT_NOTE_PREFIX}%`)
+            .order("created_at", { ascending: false })
             .limit(1),
         ]);
+        const newestDirectorNoteAt =
+          (directorNotes?.[0]?.created_at as string | undefined) ?? null;
         const supersedeReason = detectPlaybookSuperseder({
           hasExternalAgentReply: (agentMsgs?.length ?? 0) > 0,
-          hasCsDirectorResolutionNote: (directorNotes?.length ?? 0) > 0,
+          hasCsDirectorResolutionNote: csDirectorNoteSupersedesPlaybook(
+            newestDirectorNoteAt,
+            playbookStartedAt,
+          ),
         });
         if (supersedeReason) {
           // agent_intervened only flips true on a human-agent supersede (the historical
@@ -2444,14 +2466,18 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: ws
           const hNames = await handlerNames(admin, wsId, st.hasCust, st.ch);
           const intent = await classifyIntent(msg, custCtx, hist, hNames);
           const { routeIntentToPlaybook } = await import("@/lib/playbook-executor");
-          const r = await routeIntentToPlaybook(admin, wsId, tid, intent.intent);
+          // Pass the inbound customer message + personality so the playbook's FIRST step
+          // (step 0) composes a real reply, and keep the step result so we can deliver it
+          // below — the router used to discard executePlaybookStep's result, so the
+          // customer got nothing and the ticket stalled at step 1 (Juliana / Doreen).
+          const r = await routeIntentToPlaybook(admin, wsId, tid, intent.intent, msg, pers);
           if (r.routed) {
             await sysNote(
               admin,
               tid,
               `[System] Intent→playbook router: classified intent="${intent.intent}" matched Refund-tier playbook "${r.playbook_name}" (${r.playbook_id.slice(0, 8)}). Starting playbook deterministically — the Refund playbook's tier ladder owns refund-intent messages (not a bare cancel journey).`,
             );
-            return { routed: true as const };
+            return { routed: true as const, result: r.result };
           }
           return { routed: false as const };
         } catch {
@@ -2459,6 +2485,31 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: ws
         }
       });
       if (playbookRouted.routed) {
+        // Deliver the playbook's first reply THIS turn and auto-advance through any
+        // response-less steps, using the same send path (sendWithDelay) + sysNote the main
+        // playbook branch uses. Without this the router started the playbook but shipped no
+        // reply, so the ticket sat at step 1 in the CEO queue.
+        await step.run("intent-playbook-deliver", async () => {
+          const delivery = await deliverRoutedPlaybookFirstReply({
+            first: playbookRouted.result,
+            sendReply: (body) => sendWithDelay(admin, wsId, tid, st.ch, body, cfg.sandbox),
+            postSysNote: async (m) => {
+              await sysNote(admin, tid, m);
+            },
+            execNextStep: () => executePlaybookStep(wsId, tid, msg, pers),
+            beforeStep: async () => !(await newerActivity(admin, tid, t0)),
+          });
+          // A playbook that fully resolves on this turn clears its active-playbook pointer so
+          // a completed playbook isn't left marked active; otherwise just honor auto-resolve.
+          if (delivery.finalAction === "complete") {
+            await admin
+              .from("tickets")
+              .update({ active_playbook_id: null, playbook_step: 0, playbook_exceptions_used: 0 })
+              .eq("id", tid);
+          }
+          await setStatus(admin, tid, cfg.auto_resolve);
+          return delivery;
+        });
         return { status: "intent_playbook_routed" };
       }
 

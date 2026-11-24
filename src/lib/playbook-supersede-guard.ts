@@ -49,6 +49,33 @@ export function detectPlaybookSuperseder(
 }
 
 /**
+ * Phase 3 of playbook-takeover-replies-and-clears-escalation — does a CS-Director verdict note
+ * actually supersede the CURRENT playbook? Only when it was written AFTER the playbook started.
+ *
+ * `newestDirectorNoteAt` is the `created_at` of the MOST RECENT `[CS Director review]` note on the
+ * ticket (null when there is none); `playbookStartedAt` is `playbook_context.playbook_started_at`
+ * stamped by `startPlaybook`. A note strictly newer than the start is June's CURRENT verdict and
+ * supersedes; a note that arrived through a MERGE and pre-dates the start does NOT (that was the
+ * Juliana 22be5796 bug — the inherited playbook got cleared by an older merged verdict and
+ * restarted from the top). When `playbookStartedAt` is null (legacy playbooks started before this
+ * shipped) ANY director note counts, preserving the prior belt-and-suspenders behavior.
+ *
+ * Comparing the NEWEST note's timestamp is equivalent to "does any note after the start exist?":
+ * if the newest is after the start a qualifying note exists; if the newest is before it, none do.
+ */
+export function csDirectorNoteSupersedesPlaybook(
+  newestDirectorNoteAt: string | null | undefined,
+  playbookStartedAt: string | null | undefined,
+): boolean {
+  if (!newestDirectorNoteAt) return false; // no director note at all → nothing to supersede
+  if (!playbookStartedAt) return true; // legacy row with no start stamp → any note counts
+  const noteMs = Date.parse(newestDirectorNoteAt);
+  const startMs = Date.parse(playbookStartedAt);
+  if (!Number.isFinite(noteMs) || !Number.isFinite(startMs)) return true; // unparseable → fail-safe to prior behavior
+  return noteMs > startMs;
+}
+
+/**
  * Reason phrase that renders inside the `[System] Active playbook cleared — <phrase>, so the
  * playbook is no longer authoritative. Routing to Sol/Sonnet.` internal note. Kept beside the
  * predicate so a test can pin the sysNote wording per reason.
