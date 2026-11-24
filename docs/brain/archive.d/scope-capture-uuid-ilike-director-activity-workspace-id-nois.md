@@ -1,0 +1,1 @@
+- **Drop uuid-ILIKE-on-director_activity.workspace_id ad-hoc noise at capture** · verified 2026-11-24 · → [[../libraries/error-feed]]
