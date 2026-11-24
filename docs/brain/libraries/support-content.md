@@ -25,6 +25,7 @@ It polices writes only, not reads. The 17 files that already wrote these tables 
 ## Backfills that use it
 
 - `scripts/_backfill-tabs-caffeine-support-content.ts` (2026-11-24): corrects Tabs caffeine to 100mg in the article "What is the difference between the Superfood Tab flavors?" and in 7 macros (Tabs: flavors / All Ages / Caffeine?; both "Do you offer tea?"; Coffee & Tabs?; Coffee Too Much Caffeine). It also removes non-compliant copy in those rows: "detox tablets", the turmeric "most effective supplement … boosts weight loss" line, "beneficial at any age", "perfect for everyone", and the immune/gut claims. Anchored find→replace on text and HTML: drifted rows are skipped and reported, and re-runs are no-ops.
+- `scripts/_backfill-tabs-dosing-support-content.ts` (2026-11-24): aligns Tabs dosing with the CEO ruling (one tab in 16–20 oz of water, up to 3 a day) in the main "Superfood Tabs" article, "When should I take my Superfood Tabs?", the active "Superfood Tabs - How to Use" macro, and 7 inactive dosing drafts. It also replaces "a low dose of green-tea caffeine" with 100mg in the main article. Reuses `applyPairs` from the caffeine backfill, and NULL HTML stays NULL.
 
 ## Related
 
