@@ -12,6 +12,18 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Build-lane tsc runs with default heap (OOMs) and the self-verify circuit breaker is blind to tsc failures (re-queues forever)** · verified 2026-11-24 · → [[libraries/agent-jobs]]
+- **Mario's failed-build owned-slug filter must treat init_unsure (CEO greenlight hold) as human-owned, like init_loop_guard** · verified 2026-11-24 · → [[../lifecycles/mario-pipeline-plumbing]]
+- **Scheduled texts must go through the marketing Messaging Service, never a bare From number** · verified 2026-11-24 · → [[../lifecycles/pre-renewal-reminder-journey]]
+- **Drop uuid-ILIKE-on-director_activity.workspace_id ad-hoc noise at capture** · verified 2026-11-24 · → [[../libraries/error-feed]]
+- **Drop the unqualified `column "contract_id" does not exist` form of the foreign appstle_contract_snapshots ad-hoc read** · verified 2026-11-23 · → [[../libraries/error-feed]]
+- **Scope out foreign PostgREST noise: column product_variants.barcode does not exist** · verified 2026-11-23 · → [[../libraries/error-feed]]
+- **Drop foreign ad-hoc `replacements.shopify_order_name` column-missing noise at capture** · verified 2026-11-23 · → [[../libraries/error-feed]]
+- **Scope out foreign-app noise: returns.refund_amount_cents column-missing REST reads** · verified 2026-11-23 · → [[../libraries/error-feed]]
+- **Drop Supabase Studio jsonb-ILIKE noise on subscriptions.applied_discounts from the error feed** · verified 2026-11-23 · → [[../libraries/error-feed]]
+- **Renewal reminder amount: one money resolver for every engine, comped subs say free** · verified 2026-11-23 · → [[../libraries/pre-renewal-reminders]]
+- **Renewal reminder follow-ups: amount includes tax + shipping, significant verdict, holdout-relative pause floors** · verified 2026-11-23 · → [[../lifecycles/pre-renewal-reminder-journey]]
+- **Renewal reminder SMS: hard 9 AM-8 PM local send window, no guessed timezones, house SMS format** · verified 2026-11-23 · → [[../lifecycles/pre-renewal-reminder-journey]]
 - **Scope out foreign agent_jobs.completed_at table-browse noise from the Control Tower feed** · verified 2026-11-22 · → [[../libraries/error-feed]]
 - **Scope out foreign `products.template_suffix` column-missing noise from the Supabase-logs feed** · verified 2026-11-22 · → [[../libraries/error-feed]]
 - **Filter Supabase Realtime 'no partition of messages' authorize errors out of the postgres error feed** · verified 2026-11-22 · → [[../libraries/error-feed]]
