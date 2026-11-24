@@ -6,7 +6,7 @@
 
 Mutate the `tickets` row itself. Used by deterministic flows (outreach auto-close, sol-closes-on-resolving-reply) and hand-fixes.
 
-`closeTicket` · `reopenTicket` · `setTicketStatus` · `escalateTicket` · `assignTicket` · `addTag` / `removeTag` · `armPlaybook` / `advancePlaybookStep` / `clearPlaybook` · `setDoNotReply` · `recordFounderRuling`. `TicketStatus = 'open'|'pending'|'closed'|'archived'`.
+`closeTicket` · `reopenTicket` · `setTicketStatus` · `escalateTicket` · `deescalateTicket` · `assignTicket` · `addTag` / `removeTag` · `armPlaybook` / `advancePlaybookStep` / `clearPlaybook` · `setDoNotReply` · `recordFounderRuling`. `TicketStatus = 'open'|'pending'|'closed'|'archived'`.
 
 ### `recordFounderRuling(admin, {workspaceId, ticketId, ruling})` — the founder-ruling note
 
@@ -21,6 +21,14 @@ Opt-ins:
 - `{ reason }` — explicitly overwrites `escalation_reason` (rare — only when the close records a different resolution summary than the original).
 
 **Why (Denise Richling, ticket 6b0cd91c, 2026-08-28):** the old `closeTicket` blanket-nulled the triple, so a founder escalation that got auto-closed on a positive customer reply became indistinguishable from a never-escalated ticket. Nine such cases accumulated silently in 21 days; hers had a confirmed system-side $102.33 duplicate charge unrefunded. See [[../specs/closing-a-ticket-must-not-destroy-an-active-escalation]] Phase 1. The paired guard sits at [[../inngest/unified-ticket-handler]] `setStatus` — a compare-and-set `.is("escalated_to", null)` on the auto-close write, so a positive-reply auto-close cannot fire on an actively-escalated ticket.
+
+### `deescalateTicket` — clears escalation when playbook takes over
+
+```ts
+async function deescalateTicket(admin: Admin, ticketId: string): Promise<void>
+```
+
+Clears `escalated_to` by setting it to null, while **preserving** `escalated_at` and `escalation_reason` as audit history. Called by [[../libraries/playbook-executor]] `startPlaybook` ([[../specs/playbook-takeover-replies-and-clears-escalation]] Phase 2) when a playbook takes ownership of a ticket — an escalation from an earlier turn is superseded by the playbook's authority, so the ticket is no longer active-escalated. Ground truth: Doreen Johnson (b5aaff03) sat escalated to the CEO from 02:38 while her 11:09 reply started the Refund playbook; the escalation must clear when the playbook owns the response.
 
 ## (B) Commerce / journeys / workflows — the ONE executor front door
 
