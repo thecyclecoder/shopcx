@@ -1,0 +1,1 @@
+- **Fix ambiguous next_billing_date in list_subscriptions RPC ORDER BY** · verified 2026-11-24 · → [[../libraries/list-subscriptions-rpc]]

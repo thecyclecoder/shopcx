@@ -13,7 +13,7 @@ brain_refs:
 
 # `public.list_subscriptions`
 
-Server-side subscription-list RPC that backs the `/dashboard/subscriptions` list view (Phase 2 of the 1000-row truncation fix). Migration: [`20261005140000_list_subscriptions_rpc.sql`](../../../supabase/migrations/20261005140000_list_subscriptions_rpc.sql). Sole caller: [`src/app/api/workspaces/[id]/subscriptions/route.ts`](../../../src/app/api/workspaces/[id]/subscriptions/route.ts).
+Server-side subscription-list RPC that backs the `/dashboard/subscriptions` list view (Phase 2 of the 1000-row truncation fix). Migration: [`20261005140000_list_subscriptions_rpc.sql`](../../../supabase/migrations/20261005140000_list_subscriptions_rpc.sql). **Ambiguity fix:** Migration [`20261124120000_list_subscriptions_order_by_ambiguity_fix.sql`](../../../supabase/migrations/20261124120000_list_subscriptions_order_by_ambiguity_fix.sql) qualified ORDER BY columns against the `recovery_filtered` alias to resolve Postgres ambiguity errors. Sole caller: [`src/app/api/workspaces/[id]/subscriptions/route.ts`](../../../src/app/api/workspaces/[id]/subscriptions/route.ts).
 
 ## Why
 
@@ -100,6 +100,7 @@ list_subscriptions(
 
 ## Gotchas
 
+- **Column ambiguity in ORDER BY (fixed 2026-11-24):** The paged CTE's ORDER BY originally referenced bare `next_billing_date`, `created_at`, and `status`, which collided with the same-named RETURNS TABLE OUT parameters in the plpgsql function signature. This caused Postgres to raise `'column reference is ambiguous'` for every sort path, breaking the subscriptions list for any workspace that accessed it. The fix (migration `20261124120000_list_subscriptions_order_by_ambiguity_fix.sql`) qualified each ORDER BY branch against the `recovery_filtered` alias (e.g. `rf.next_billing_date`) so references bind unambiguously to the CTE column, not the OUT parameter. The fix is behavior-preserving and invisible to callers.
 - The RPC does not require an authenticated principal — the route enforces auth at the app layer and calls the RPC through the admin (service_role) client. Downstream authenticated callers of this RPC would be gated only by workspace membership at the app layer.
 - Empty result set returns zero rows → the caller MUST treat missing `rows[0]` as `total=0`, not crash.
 - `p_product_ids` accepts `null` or `text[]` — both are treated as "no product filter". Filter out empty strings on the caller side so the containment shape can't degenerate to `{"product_id": ""}`.
