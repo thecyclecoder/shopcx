@@ -228,4 +228,4 @@ See [[../lifecycles/ai-multi-turn]] crisis rules.
 
 ## Related
 
-[[ticket-lifecycle]] · [[cancel-flow]] · [[ai-multi-turn]] · [[../integrations/appstle]] · [[../integrations/resend]] · [[../tables/crisis_events]] · [[../tables/crisis_customer_actions]] · [[../tables/subscriptions]] · [[../inngest/crisis-campaign]] · [[../inngest/portal-auto-resume]] · [[../journeys]]
+[[ticket-lifecycle]] · [[cancel-flow]] · [[ai-multi-turn]] · [[../integrations/appstle]] · [[../integrations/resend]] · [[../tables/crisis_events]] · [[../tables/crisis_customer_actions]] · [[../tables/subscriptions]] · [[../inngest/crisis-campaign]] · [[../inngest/portal-auto-resume]] · [[../journeys]] · [[../libraries/crisis-substitution]]

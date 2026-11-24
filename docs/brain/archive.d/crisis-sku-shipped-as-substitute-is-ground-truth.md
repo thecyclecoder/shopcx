@@ -1,0 +1,1 @@
+- **June and Sol know a crisis SKU shipped from Amplifier was likely sent as another flavor** · verified 2026-11-24 · → [[../lifecycles/crisis-campaign]]
