@@ -197,6 +197,7 @@ import {
   isForeignSupabasePostgresMissingSpecsGoalSlugAdhocNoise,
   isForeignSupabasePostgresMissingSpecsMergeShaDirectRestLookupNoise,
   isForeignSupabasePostgresMissingSpecsReviewStatusAdhocNoise,
+  isForeignSupabasePostgresMissingSpecsSpecReviewStatusAdhocNoise,
   isForeignSupabasePostgresMissingSpecsFlagsAdhocNoise,
   isForeignSupabasePostgresMissingSpecsOwnerFunctionAdhocNoise,
   isForeignSupabasePostgresMissingSpecsTargetAdhocNoise,
@@ -2096,6 +2097,13 @@ const LOG_QUERIES: LogQuery[] = [
       // `specs`, a JOIN through `spec_phases`, or on `specs` via a non-SELECT
       // statement (real code-bug shape) still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingSpecsReviewStatusAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
+      // against `public.specs.spec_review_status` — a distinct phantom column from the
+      // shorter `review_status` above (the literal-pinned sibling filters don't cover
+      // it). Same gate: exact column-missing message AND a SELECT-on-specs shape (bare
+      // OR PostgREST CTE wrapper); any other table/column or a non-SELECT statement
+      // still surfaces / pages on first sighting.
+      if (isForeignSupabasePostgresMissingSpecsSpecReviewStatusAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
       // against `public.specs.flags`. The `specs` table exists but has NEVER had a
       // `flags` jsonb / scalar column — the live signals a spec carries (needs_human,
