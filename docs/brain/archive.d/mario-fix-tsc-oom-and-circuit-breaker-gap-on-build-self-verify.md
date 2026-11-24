@@ -1,0 +1,1 @@
+- **Build-lane tsc runs with default heap (OOMs) and the self-verify circuit breaker is blind to tsc failures (re-queues forever)** · verified 2026-11-24 · → [[libraries/agent-jobs]]
