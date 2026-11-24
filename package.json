@@ -65,6 +65,7 @@
     "test:subscriber-experiments": "tsx --test src/lib/subscriber-experiments.test.ts",
     "test:subscriber-experiment-guardrails": "tsx --test src/lib/subscriber-experiment-guardrails.test.ts",
     "test:pre-renewal-reminders": "tsx --test src/lib/pre-renewal-reminders.test.ts",
+    "test:twilio-scheduled-send-guard": "tsx --test src/lib/twilio.scheduled-send-guard.test.ts",
     "test:reminder-results-sdk": "tsx --test src/lib/retention/reminder-results-sdk.test.ts",
     "test:workspace-features": "tsx --test src/lib/workspace-features.test.ts",
     "test:widget-identity": "tsx --test src/lib/widget-identity.test.ts",
