@@ -87,6 +87,7 @@ The rewrite is **idempotent** — a rule already using the supported field is re
 - [[improve-tools]] — Sol's `get_policies` research tool (single by slug OR full list, both halves surfaced so Sol can see drift between what we publish and what we obey).
 - [[selective-clarify]] — reads the `irreversible_actions` policy's `rules[]` to override the default irreversible action set.
 - [[cs-director-digest-reply]] — `insertDraftPolicy` seeds a `policies` draft from a CS digest storyline.
+- Storefront `/policies/{slug}` page (`src/app/(storefront)/policies/[slug]/page.tsx`) — `getPolicyCustomerFacing` (migrated off raw access 2026-11-24). Renders through `policies/_lib/markdown.ts` (bare HTML, H2 ids for the "On this page" list; a leading `# Title` is dropped because the hero shows it; the shallowest heading level is treated as the section level so ###-only legal text still gets a contents list) and styled by `policies/_lib/legal.css` — the shared legal-page design also used by the Shopify theme's `/policies/*` pages (theme repo `assets/legal-pages.css`). The public page shows the standard policy only, never exceptions the team can grant.
 
 ## Gotchas
 

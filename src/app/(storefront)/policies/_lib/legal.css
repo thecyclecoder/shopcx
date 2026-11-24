@@ -1,0 +1,74 @@
+/*
+ * Storefront legal/policy pages — /policies/{slug}.
+ * Same look as the Shopify theme's policy pages (theme repo
+ * assets/legal-pages.css) so a customer sees one design everywhere.
+ * Everything is scoped under .lp so nothing leaks into PDPs.
+ */
+.lp {
+  --lp-maroon: #3a1e25;
+  --lp-peach: #fdf1e8;
+  --lp-green: #006540;
+  --lp-green-soft: #e6f2ec;
+  --lp-coral: #ef8a6b;
+  --lp-ink: #1f1a1b;
+  --lp-text: #3a3335;
+  --lp-muted: #6b6264;
+  --lp-line: #ece4df;
+  --lp-bg: #fffaf6;
+  background: var(--lp-bg);
+  color: var(--lp-ink);
+  min-height: 100vh;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+.lp a { color: inherit; }
+.lp-brand { background: var(--lp-peach); border-bottom: 1px solid var(--lp-line); text-align: center; padding: 22px 16px; }
+.lp-brand a { color: var(--lp-maroon); text-decoration: none; font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase; font-size: 15px; }
+.lp-hero { background: linear-gradient(180deg, var(--lp-peach) 0%, var(--lp-bg) 100%); padding: 56px 20px 40px; text-align: center; }
+.lp-eyebrow { display: inline-block; font-size: 12px; font-weight: 600; letter-spacing: 0.12em; text-transform: uppercase; color: var(--lp-green); background: var(--lp-green-soft); border-radius: 999px; padding: 6px 12px; }
+.lp-hero h1 { font-size: 44px; line-height: 1.1; margin: 16px 0 10px; letter-spacing: -0.02em; color: var(--lp-maroon); font-weight: 700; }
+.lp-meta { color: var(--lp-muted); font-size: 15px; }
+.lp-meta a { color: var(--lp-green); font-weight: 600; text-decoration: none; }
+.lp-meta a:hover { text-decoration: underline; }
+.lp-wrap { max-width: 1120px; margin: 0 auto; padding: 8px 24px 72px; display: grid; grid-template-columns: 260px minmax(0, 1fr); gap: 40px; align-items: start; }
+.lp-side { position: sticky; top: 24px; max-height: calc(100vh - 48px); overflow-y: auto; padding-bottom: 8px; }
+.lp-side h4 { font-size: 12px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--lp-muted); margin: 0 0 10px; font-weight: 600; }
+.lp-nav { list-style: none; margin: 0 0 28px; padding: 0; }
+.lp-nav a { display: block; padding: 9px 12px; border-radius: 10px; color: var(--lp-ink); text-decoration: none; font-size: 15px; line-height: 1.35; }
+.lp-nav a:hover { background: var(--lp-peach); }
+.lp-nav a[aria-current="page"] { background: var(--lp-maroon); color: #fff; font-weight: 600; }
+.lp-toc { list-style: none; margin: 0; padding: 0 0 0 12px; border-left: 2px solid var(--lp-line); }
+.lp-toc a { display: block; padding: 5px 0; color: var(--lp-muted); text-decoration: none; font-size: 14px; line-height: 1.4; }
+.lp-toc a:hover { color: var(--lp-green); }
+.lp-card { background: #fff; border: 1px solid var(--lp-line); border-radius: 20px; padding: 48px 56px; box-shadow: 0 1px 2px rgba(58, 30, 37, 0.04), 0 8px 30px rgba(58, 30, 37, 0.05); }
+.lp-body { font-size: 17px; line-height: 1.75; color: var(--lp-text); max-width: 68ch; overflow-wrap: anywhere; }
+.lp-body h2 { font-size: 24px; line-height: 1.3; color: var(--lp-maroon); margin: 44px 0 12px; padding-top: 28px; border-top: 1px solid var(--lp-line); letter-spacing: -0.01em; font-weight: 700; scroll-margin-top: 24px; }
+.lp-body h2:first-child { margin-top: 0; padding-top: 0; border-top: 0; }
+.lp-body h3 { font-size: 18px; line-height: 1.4; color: var(--lp-ink); margin: 28px 0 8px; font-weight: 700; }
+.lp-body p { margin: 0 0 16px; }
+.lp-body strong { color: var(--lp-ink); }
+.lp-body h2 strong, .lp-body h3 strong { color: inherit; }
+.lp-body a { color: var(--lp-green); text-decoration: underline; text-underline-offset: 2px; }
+.lp-body ul { padding: 0; margin: 0 0 18px; list-style: none; }
+.lp-body li { position: relative; padding-left: 28px; margin: 8px 0; }
+.lp-body li::before { content: ""; position: absolute; left: 4px; top: 0.72em; width: 8px; height: 8px; border-radius: 50%; background: var(--lp-coral); }
+.lp-help { margin-top: 28px; display: flex; align-items: center; justify-content: space-between; gap: 20px; background: var(--lp-peach); border-radius: 20px; padding: 26px 32px; }
+.lp-help b { display: block; font-size: 18px; color: var(--lp-maroon); }
+.lp-help span { color: var(--lp-muted); font-size: 15px; }
+.lp-btn { background: var(--lp-green); color: #fff !important; text-decoration: none; font-weight: 600; padding: 13px 22px; border-radius: 999px; white-space: nowrap; }
+.lp-btn:hover { filter: brightness(1.08); }
+.lp-pills { display: none; }
+.lp-foot { text-align: center; color: var(--lp-muted); font-size: 13px; padding: 0 16px 40px; }
+@media (max-width: 860px) {
+  .lp-hero { padding: 36px 16px 20px; }
+  .lp-hero h1 { font-size: 32px; }
+  .lp-wrap { grid-template-columns: minmax(0, 1fr); padding: 0 16px 48px; gap: 16px; }
+  .lp-side { display: none; }
+  .lp-pills { display: flex; gap: 8px; overflow-x: auto; padding: 4px 16px 12px; scrollbar-width: none; }
+  .lp-pills::-webkit-scrollbar { display: none; }
+  .lp-pills a { flex: none; padding: 8px 14px; border-radius: 999px; border: 1px solid var(--lp-line); background: #fff; color: var(--lp-ink); text-decoration: none; font-size: 14px; }
+  .lp-pills a[aria-current="page"] { background: var(--lp-maroon); color: #fff; border-color: var(--lp-maroon); }
+  .lp-card { padding: 26px 20px; border-radius: 16px; }
+  .lp-body { font-size: 16px; line-height: 1.7; }
+  .lp-body h2 { font-size: 20px; margin-top: 32px; padding-top: 22px; }
+  .lp-help { flex-direction: column; align-items: flex-start; padding: 22px; }
+}
