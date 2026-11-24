@@ -1,0 +1,1 @@
+- **Renewal reminder SMS: hard 9 AM-8 PM local send window, no guessed timezones, house SMS format** · verified 2026-11-23 · → [[../lifecycles/pre-renewal-reminder-journey]]
