@@ -1,0 +1,1 @@
+- **Mario's failed-build owned-slug filter must treat init_unsure (CEO greenlight hold) as human-owned, like init_loop_guard** · verified 2026-11-24 · → [[../lifecycles/mario-pipeline-plumbing]]
