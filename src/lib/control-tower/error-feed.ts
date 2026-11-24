@@ -9193,6 +9193,66 @@ export function isForeignSupabasePostgresSubscriptionsItemsContainmentInvalidJso
 }
 
 /**
+ * Foreign-app noise — the `orders.line_items` twin of
+ * `isForeignSupabasePostgresSubscriptionsItemsContainmentInvalidJsonAdhocNoise`
+ * above. An external PostgREST client reads `/rest/v1/orders?line_items=cs.<value>`
+ * and passes a non-JSON value to the `line_items=cs.<value>` containment filter,
+ * producing Postgres `invalid input syntax for type json` under the PostgREST
+ * `WITH pgrst_source AS ( SELECT ... FROM "public"."orders" ... WHERE ...
+ * "line_items" @> ... )` CTE wrapper.
+ *
+ * No ShopCX code path builds an `orders.line_items @>` containment filter, so there
+ * is nothing to repair in product code — paging Platform on it (Control Tower
+ * signature `supabase-logs:dbe2c7bfb3216740`) is repair work for a query we don't own.
+ *
+ * Returns `true` only when BOTH markers hold:
+ *   1. the message is Postgres's canonical bad-JSON shape — trimmed equal to
+ *      `invalid input syntax for type json` (with any leading `ERROR: ` prefix
+ *      stripped), AND
+ *   2. the `parsed.query` is PostgREST's `WITH pgrst_source AS ( SELECT ... FROM
+ *      "public"."orders" ... )` CTE wrapper referencing both the double-quoted
+ *      `"line_items"` identifier and the `@>` containment token.
+ *
+ * Narrowly gated so:
+ *   - a bad-JSON error on any OTHER table / any OTHER column still pages,
+ *   - the same message against `orders` without the `line_items`+`@>` pair (a
+ *     different column, a different JSONB operator like `?` / `?|` / `->` / `->>`,
+ *     or a plain `=` / `LIKE`) still pages,
+ *   - a non-SELECT PostgREST wrapper on `orders` (INSERT / UPDATE) still pages,
+ *   - empty / nullish message OR query returns `false` — we need both markers.
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — returning null fully suppresses the row (no
+ * error_event, no loop_alert, no signature). A capture-time drop, not a transient flag.
+ */
+export function isForeignSupabasePostgresOrdersLineItemsContainmentInvalidJsonAdhocNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  // Strip an optional leading Postgres `ERROR: ` / `ERROR:  ` prefix — Supabase's logs
+  // surface sometimes carries it, sometimes doesn't. The invalid-JSON message itself
+  // has a stable shape: `invalid input syntax for type json`.
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  if (stripped !== "invalid input syntax for type json") return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  // PostgREST direct-REST wraps every read as `WITH pgrst_source AS ( SELECT ... FROM
+  // "public"."orders" ... )` (double-quoted identifiers). A non-SELECT wrapped op
+  // (INSERT / UPDATE / DELETE / DDL on `orders`) stays captured — a real code bug
+  // writing a line_items @> filter is a bug we DO want to page on, not the ad hoc
+  // direct-REST read this drop targets.
+  if (!/^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"public"\."orders"/.test(q)) return false;
+  // Both the double-quoted `"line_items"` identifier AND the `@>` containment token
+  // must appear — a different operator on line_items (?, ?|, ->, ->>, =, text LIKE) or
+  // the same operator against a different column on `orders` stays captured.
+  if (!q.includes('"line_items"')) return false;
+  if (!q.includes("@>")) return false;
+  return true;
+}
+
+/**
  * Foreign-app noise - Postgres reporting `syntax error at end of input` for a stale /
  * hand-typed ad hoc approval-decisions lookup that references the non-existent
  * `agent_jobs.branch_name` column. `approval_decisions` and `agent_jobs` are real
