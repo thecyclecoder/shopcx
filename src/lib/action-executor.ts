@@ -119,7 +119,7 @@ export interface ActionParams {
   return_id?: string;
   // add_one_time_gift — a one-time item on the sub's NEXT renewal that drops
   // off after it ships (never recurs). `free` defaults true (a $0 gift); set
-  // false + base_price_cents for a paid one-time add-on (internal only).
+  // false + base_price_cents for a paid one-time add-on (internal and ShopCX-billed subs).
   free?: boolean;
   pause_days?: number | string; // model/journey configs may send "60" as a string — coerce with Number() before use
   // Shipping address — used by update_shipping_address (and as an
@@ -2160,7 +2160,7 @@ export const directActionHandlers: Record<
    * add_one_time_gift — add a ONE-TIME item to the sub's NEXT renewal that
    * rides one order then drops off (does NOT recur). `free` defaults true (a
    * $0 goodwill gift, e.g. "add a frother as a gift with my next order"); set
-   * false + base_price_cents for a paid one-time add-on (internal subs).
+   * false + base_price_cents for a paid one-time add-on (internal and ShopCX-billed subs; it is charged with that renewal).
    *
    * Internal-aware via subAddOneTimeGift. On an Appstle sub a FREE gift that
    * can't be confirmed as $0 is rolled back and returns success:false — a gift
