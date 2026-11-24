@@ -1,0 +1,1 @@
+- **Scope out foreign-app noise: journey_sessions.updated_at missing-column SELECTs** · verified 2026-11-24 · → [[../libraries/error-feed]]
