@@ -119,6 +119,7 @@ import {
   isForeignSupabasePostgresMissingSubscriptionsFreeShippingColumnAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsEngineColumnAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsBillingEngineColumnAdhocNoise,
+  isForeignSupabasePostgresMissingSubscriptionsBillingProviderColumnAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsSourceColumnAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsDiscountCodeColumnAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsCancellationReasonColumnAdhocNoise,
@@ -1249,6 +1250,12 @@ const LOG_QUERIES: LogQuery[] = [
       // subscriptions column (e.g. `items`) or a non-SELECT shape still pages (signature
       // supabase-logs:e17a9b5e9ac40aaf).
       if (isForeignSupabasePostgresMissingSubscriptionsBillingEngineColumnAdhocNoise(message, query)) return null;
+      // Same narrow gate for the foreign `subscriptions.billing_provider` lookup — which billing
+      // engine owns a subscription is tracked via billing_source + is_internal, there is no
+      // `billing_provider` column (it only exists in third-party subscription-app schemas), and no
+      // ShopCX code path selects it; a real regression on any other subscriptions column (e.g.
+      // `items`) or a non-SELECT shape still pages (signature supabase-logs:af1c5a78103832f6).
+      if (isForeignSupabasePostgresMissingSubscriptionsBillingProviderColumnAdhocNoise(message, query)) return null;
       // Same narrow gate for the foreign `subscriptions.source` lookup — where a
       // subscription originated is tracked via is_internal + billing_source, there is no
       // `source` column (it only exists in third-party subscription-app schemas), and no
