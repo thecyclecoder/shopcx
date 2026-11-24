@@ -230,10 +230,10 @@ export async function GET(
   // We aggregate over storefront_sessions whose last_seen_at falls in
   // the window. Acceptable approximation; perfectly accurate
   // attribution would require per-event joins which we can add later.
-  const sessionRows = await fetchAllRows<{ id: string; device_type: string | null; ip_country: string | null; utm_source: string | null }>(() =>
+  const sessionRows = await fetchAllRows<{ id: string; device_type: string | null; ip_country: string | null; utm_source: string | null; utm_medium: string | null }>(() =>
     admin
       .from("storefront_sessions")
-      .select("id, device_type, ip_country, utm_source")
+      .select("id, device_type, ip_country, utm_source, utm_medium")
       .eq("workspace_id", workspaceId)
       .gte("last_seen_at", startIso)
       .lte("last_seen_at", endIso)
@@ -242,11 +242,15 @@ export async function GET(
 
   const visibleSessions = (sessionRows || []).filter(
     (s) => !internalSessions.has((s as { id: string }).id),
-  ) as { id: string; device_type: string | null; ip_country: string | null; utm_source: string | null }[];
+  ) as { id: string; device_type: string | null; ip_country: string | null; utm_source: string | null; utm_medium: string | null }[];
 
   const deviceCounts = new Map<string, number>();
   const countryCounts = new Map<string, number>();
   const sourceCounts = new Map<string, number>();
+  // AI-channel attribution (ai-shopping-agent Phase 3): sessions that arrived via an AI shopping
+  // agent carry utm_medium=ai_agent; break them out as their own channel by AI app (utm_source).
+  const AI_AGENT_MEDIUM = "ai_agent";
+  const aiChannelCounts = new Map<string, number>();
   for (const s of visibleSessions) {
     const d = s.device_type || "unknown";
     deviceCounts.set(d, (deviceCounts.get(d) || 0) + 1);
@@ -254,6 +258,10 @@ export async function GET(
     countryCounts.set(c, (countryCounts.get(c) || 0) + 1);
     const u = s.utm_source || "(direct)";
     sourceCounts.set(u, (sourceCounts.get(u) || 0) + 1);
+    if ((s.utm_medium || "").toLowerCase() === AI_AGENT_MEDIUM) {
+      const app = s.utm_source || "other";
+      aiChannelCounts.set(app, (aiChannelCounts.get(app) || 0) + 1);
+    }
   }
 
   const deviceBreakdown = [...deviceCounts.entries()]
@@ -265,6 +273,10 @@ export async function GET(
   const sourceBreakdown = [...sourceCounts.entries()]
     .map(([utm_source, count]) => ({ utm_source, sessions: count }))
     .sort((a, b) => b.sessions - a.sessions).slice(0, 10);
+  // AI shopping-agent sessions, split by AI app (chatgpt/claude/grok) — their own funnel channel.
+  const aiChannelBreakdown = [...aiChannelCounts.entries()]
+    .map(([ai_app, count]) => ({ ai_app, sessions: count }))
+    .sort((a, b) => b.sessions - a.sessions);
 
   // ── Chapter performance (Phase 2 instrumentation) ───────────────
   // Per chapter: reach (distinct sessions that genuinely viewed it),
@@ -548,6 +560,7 @@ export async function GET(
     deviceBreakdown,
     countryBreakdown,
     sourceBreakdown,
+    aiChannelBreakdown,
     chapterPerformance,
     abandonedCarts,
     recentEvents: (recent || []).map(e => ({
