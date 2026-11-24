@@ -49,6 +49,7 @@ Articles published in the dashboard automatically become available to the AI on 
 - **Article view tracking** — increments `view_count` on `GET /help/{article}`.
 - **Helpful vote** — thumbs up/down at the bottom of every article → increments tally + writes to per-customer vote log (de-duped by IP for anon, customer_id for logged-in).
 - **Public ticket creation form** — at the bottom of every article + on a dedicated `/help/contact` page. Channel `help_center` on the resulting ticket. Goes through the unified ticket handler same as inbound email.
+- **Our policies** — the home page shows an "Our policies" pill row, and every help-center footer lists the same links, pointing at `https://{workspaces.storefront_domain}/policies/{slug}` (returns, refunds, subscriptions, exchanges, order-cancellation, privacy, terms). Those pages render the `policies` table's published half, the same rules the support AI follows, so the help center never keeps its own drifting copy of a policy. Hidden when `storefront_domain` is null.
 - **SEO** — JSON-LD structured data per article; sitemap.xml auto-generated; OG image per workspace.
 
 ## Branding

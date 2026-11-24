@@ -37,7 +37,7 @@ const POLICY_LINKS = [
 type PolicySlug = typeof POLICY_LINKS[number]["slug"];
 const VALID_SLUGS: readonly string[] = POLICY_LINKS.map((l) => l.slug);
 
-const SUPPORT_EMAIL = "support@superfoodscompany.com";
+const SUPPORT_EMAIL = "hello@superfoodscompany.com";
 
 interface PageProps {
   params: Promise<{ slug: string }>;

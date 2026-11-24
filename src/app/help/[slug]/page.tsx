@@ -28,7 +28,7 @@ export default async function HelpCenterPage({ params, searchParams }: { params:
 
   const { data: workspace } = await admin
     .from("workspaces")
-    .select("id, name, help_slug, help_logo_url, help_primary_color")
+    .select("id, name, help_slug, help_logo_url, help_primary_color, storefront_domain")
     .eq("help_slug", slug)
     .single();
 
@@ -75,6 +75,20 @@ export default async function HelpCenterPage({ params, searchParams }: { params:
   }
 
   const productNames = [...new Set((articles || []).filter(a => a.product_name).map(a => a.product_name!))];
+
+  // Store policies live on the brand storefront (/policies/{slug}, rendered from the
+  // `policies` table — the same text the support AI follows). Linked here so the help
+  // center never carries its own, drifting copy of a policy.
+  const policyBase = workspace.storefront_domain ? `https://${workspace.storefront_domain}/policies` : null;
+  const POLICY_LINKS = [
+    { slug: "returns", label: "Returns & Money-Back Guarantee" },
+    { slug: "refunds", label: "Refunds" },
+    { slug: "subscriptions", label: "Subscriptions" },
+    { slug: "exchanges", label: "Exchanges & Replacements" },
+    { slug: "order-cancellation", label: "Order Cancellation" },
+    { slug: "privacy", label: "Privacy Policy" },
+    { slug: "terms", label: "Terms & Conditions" },
+  ];
 
   const CATEGORY_LABELS: Record<string, string> = {
     product: "Products",
@@ -283,6 +297,24 @@ export default async function HelpCenterPage({ params, searchParams }: { params:
         </>
         )}
 
+        {/* Store policies — link out to the storefront's canonical policy pages */}
+        {policyBase && !searchResults && !categoryFilter && !productFilter && (
+          <div className="mt-12">
+            <h2 className="text-lg font-semibold text-zinc-900">Our policies</h2>
+            <div className="mt-4 flex flex-wrap gap-2">
+              {POLICY_LINKS.map(l => (
+                <a
+                  key={l.slug}
+                  href={`${policyBase}/${l.slug}`}
+                  className="rounded-full border border-zinc-200 bg-white px-4 py-2 text-sm text-zinc-700 transition-colors hover:border-zinc-300 hover:text-zinc-900"
+                >
+                  {l.label}
+                </a>
+              ))}
+            </div>
+          </div>
+        )}
+
         {/* Contact / Ticket form */}
         <div id="contact" className="mt-12">
           <h2 className="text-lg font-semibold text-zinc-900">Can&apos;t find what you&apos;re looking for?</h2>
@@ -295,6 +327,13 @@ export default async function HelpCenterPage({ params, searchParams }: { params:
 
       {/* Footer */}
       <footer className="border-t border-zinc-200 bg-white px-6 py-4 text-center text-xs text-zinc-400">
+        {policyBase && (
+          <nav className="mb-2 flex flex-wrap justify-center gap-x-4 gap-y-1">
+            {POLICY_LINKS.map(l => (
+              <a key={l.slug} href={`${policyBase}/${l.slug}`} className="text-zinc-500 hover:text-zinc-800">{l.label}</a>
+            ))}
+          </nav>
+        )}
         Powered by <a href="https://shopcx.ai" className="text-indigo-500 hover:underline">ShopCX.ai</a>
       </footer>
 
