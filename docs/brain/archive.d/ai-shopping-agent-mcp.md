@@ -1,0 +1,1 @@
+- **Superfoods AI shopping agent for ChatGPT, Claude and Grok (one ShopCX MCP server)** · verified 2026-11-24 · → [[lifecycles/ai-shopping-agent]]
