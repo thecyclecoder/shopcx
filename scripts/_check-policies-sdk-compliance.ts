@@ -64,13 +64,6 @@ interface SanctionedEntry {
 
 const SANCTIONED_RAW_ACCESS: SanctionedEntry[] = [
   {
-    file: "src/app/(storefront)/policies/[slug]/page.tsx",
-    reason:
-      "Storefront customer-facing policy page — reads `customer_summary` for public rendering. " +
-      "The SDK exposes `getPolicyCustomerFacing` for exactly this shape; migrating is a mechanical " +
-      "swap for a follow-up (the Phase 1 spec explicitly scopes to the five agent-facing callers).",
-  },
-  {
     file: "src/app/api/workspaces/[id]/policies/route.ts",
     reason:
       "Admin CRUD lane — lists every active policy for the workspace admin UI. `listActivePolicies` " +
