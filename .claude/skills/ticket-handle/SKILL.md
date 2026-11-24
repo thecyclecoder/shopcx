@@ -264,6 +264,22 @@ The `portal.error` context for an `ordernow` ticket carries an `orderNow` block 
 - **Never promise a future renewal ("will keep coming automatically", "renews on <date>") unless the subscription's next date is BILLABLE** (`orderNow.subscription.nextDateBillable === true`). A cancelled sub, a sub with no `next_billing_date`, or one in failed-payment dunning will NOT renew — say so honestly and offer the real next step (fix the card, re-activate, or escalate).
 - **Treat `already_billed` + an unbillable next date (`nextDateBillable === false`) as a STUCK subscription** — one that charged but can never renew on its own. Do NOT reassure and close. Fix it (enqueue the account change that un-strands it) or escalate to June. Closing a stuck sub with a false "all set" is the exact Ashley failure that turned one ticket into two.
 
+## Crisis substitution — believe a wrong-flavor report on a `likely_substituted` line
+
+While a crisis is active, Amplifier ships the affected (out-of-stock) SKU as an **alternative
+flavor** (the crisis's default swap), but the order row in `get_customer_account` still shows the
+**ordered** variant. So the order line saying "Cocoa" is NOT what the warehouse actually put in the
+box. Order context now flags such a line `[LIKELY SHIPPED AS <flavor> — crisis substitution …]` via
+`likely_substituted` (see [[../../../src/lib/crisis-substitution.ts]]).
+
+**When a customer reports receiving a different flavor on a `likely_substituted` line, their report
+is TRUE — it is OUR fault (the crisis substitution), never a false claim.** Do NOT read the order
+row back to them as ground truth or imply they are mistaken. Handle it as our error: apologize and
+give the fix they want — a replacement of the correct flavor, a refund, or a swap — on the crisis
+white-glove path. Ground truth: Yukiko Ban (tickets e159a032 / 3488aabf) — June ruled her
+Hazelnut-for-Cocoa report false three times because the order row said Cocoa; the row was the
+ordered flavor, not the Hazelnut Amplifier actually shipped.
+
 ## Address the customer's NEWEST ask — never the tone label alone
 
 Phase 1 of [[../../../docs/brain/specs/inflection-resession-must-act-on-newest-ask.md]] pins the invariant: a re-session is a BOUNCE, not a reset. When the inflection detector flags frustration/drift and re-runs you, your prompt now carries a **NEWEST CUSTOMER ASK** block with the exact triggering `ticket_messages` row (prefers `body_clean`). You MUST address THAT message — the inflection `kind` is tone context, not a license to re-answer an older question. Ticket dc31bf31 is the scar: a 14:14 "Can we move order to Oct 30th as I ordered enough Aug n Sept???????" fired the frustration path with `cues=['repeated_punct']`, Sol re-answered the Sep 2 ship date, and the customer was billed four weeks early ($237.16 refund + cancelled subscriber).
