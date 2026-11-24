@@ -140,6 +140,22 @@ export async function POST(
     return NextResponse.json({ success: false, validationError: guardFailure.code, message: guardFailure.message });
   }
 
+  // Removing the only item would empty the subscription. That is a cancel, not an edit: the executor
+  // refuses it, so tell the customer up front instead of raising a "could not be applied" alert for a
+  // change nobody should apply (2026-11-24: a customer tapped Remove on their only item and the team got
+  // a high-severity "apply manually" card).
+  if (action === "remove") {
+    const { data: row } = await admin.from("subscriptions").select("items").eq("id", sub.id).maybeSingle();
+    const lines = Array.isArray(row?.items) ? (row!.items as unknown[]).length : null;
+    if (lines !== null && lines <= 1) {
+      return NextResponse.json({
+        success: false,
+        validationError: "last_item",
+        message: "This is the only item on your subscription, so it can't be removed. You can swap it for something else, skip your next order, or cancel instead.",
+      });
+    }
+  }
+
   // ── Dispatch through the shared executors ──
   let result: { success: boolean; error?: string; validationError?: string; savedAction?: string };
   try {

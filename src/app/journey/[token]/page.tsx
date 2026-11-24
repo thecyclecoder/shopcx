@@ -1309,13 +1309,15 @@ function NextOrderJourney({
                 {item.variant_title && <p className="text-xs text-zinc-500">{item.variant_title}</p>}
                 {item.price && <p className="text-xs text-zinc-400">{item.price}</p>}
               </div>
-              <button
-                onClick={() => runEdit({ action: "remove", subscription_id: selectedSub.id, variant_id: item.variant_id! })}
-                disabled={busy}
-                className="shrink-0 text-xs font-medium text-red-500 hover:text-red-600 disabled:opacity-50"
-              >
-                Remove
-              </button>
+              {editableItems.length > 1 && (
+                <button
+                  onClick={() => runEdit({ action: "remove", subscription_id: selectedSub.id, variant_id: item.variant_id! })}
+                  disabled={busy}
+                  className="shrink-0 text-xs font-medium text-red-500 hover:text-red-600 disabled:opacity-50"
+                >
+                  Remove
+                </button>
+              )}
             </div>
             <div className="mt-2 flex items-center gap-2">
               <span className="text-xs text-zinc-500">Qty</span>

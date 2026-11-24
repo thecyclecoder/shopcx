@@ -1,0 +1,10 @@
+import { setSpecStatus } from "../src/lib/specs-table";
+import { createAdminClient } from "../src/lib/supabase/admin";
+const ws="fdc11e10-b89f-4989-8b73-ed6526c4d906";
+await setSpecStatus(ws,"scope-foreign-subscriptions-billing-provider-column-noise","folded","claude:duplicate-of-error-feed-drop-subscriptions-billing-provider-adhoc-noise");
+const db=createAdminClient();
+const r=await db.from("agent_jobs").update({status:"dismissed",log_tail:"dismissed: PR closed as superseded (code already on main)"}).in("id",["bda6e1e2-19ca-4094-8968-7318e713bf41"]).select("id");
+console.log(r.error?.message??r.data);
+const r2=await db.from("agent_jobs").update({status:"dismissed",log_tail:"dismissed: PR #3793 closed as duplicate of #3792 (identical classifier on main)"}).eq("kind","pr-resolve").eq("spec_slug","pr-3793").eq("status","needs_attention").select("id");
+console.log(r2.error?.message??r2.data);
+const s=await db.from("specs").select("slug,status,deferred").eq("slug","scope-foreign-subscriptions-billing-provider-column-noise"); console.log(s.data);
