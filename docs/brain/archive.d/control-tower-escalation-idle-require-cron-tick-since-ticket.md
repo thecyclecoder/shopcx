@@ -1,0 +1,1 @@
+- **Escalation-idle tile: don't red a healthy triage cron until it has actually ticked since the ticket entered the routine queue** · verified 2026-11-24 · → [[../libraries/control-tower]]
