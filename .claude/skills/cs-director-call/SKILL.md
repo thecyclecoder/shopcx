@@ -107,6 +107,20 @@ customer message ships only after ALL actions verify — so a link that would fa
 
 ## How you decide (three verdicts)
 
+**⭐ Crisis substitution — a `likely_substituted` line's order row is NOT what shipped.** While a
+crisis is active, Amplifier ships the affected (out-of-stock) SKU as an **alternative flavor** (the
+crisis's default swap), but `orders.line_items` still records the **ordered** variant. So the order
+row showing "Cocoa shipped" is NOT ground truth for what the warehouse put in the box. The order
+context (`get_customer_account` / the orders brief) now flags such a line
+`[LIKELY SHIPPED AS <flavor> — crisis substitution …]` via `likely_substituted` (see
+[`src/lib/crisis-substitution.ts`](../../../src/lib/crisis-substitution.ts)). **When a customer
+reports receiving a different flavor on a `likely_substituted` line, their report is TRUE — it is
+OUR fault (the crisis substitution), never a false claim.** Handle it as our error on the crisis
+white-glove path (apology + the fix the customer wants: replacement of the correct flavor, refund,
+or swap), and do NOT cite the order row to deny it. Ground truth: Yukiko Ban (tickets
+e159a032 / 3488aabf) — June ruled her Hazelnut-for-Cocoa report false three times because the order
+row said Cocoa; the row was the ordered flavor, not the Hazelnut Amplifier actually shipped.
+
 ### 1. `approve_remedy` — the right customer-facing fix is CLEAR + IN LEASH
 
 Return this when:
