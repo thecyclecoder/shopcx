@@ -1,0 +1,1 @@
+- **Scope out the foreign tickets.assignee_type column-missing PostgREST noise at capture** · verified 2026-11-24 · → [[../libraries/error-feed]]
