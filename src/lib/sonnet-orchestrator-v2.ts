@@ -1264,7 +1264,7 @@ async function getCustomerAccount(admin: Admin, wsId: string, custId: string): P
     // as a first order. Always surfacing the last ≥3 restores the
     // renewal-vs-first-order signal without unbounding old accounts.
     admin.from("orders")
-      .select("order_number, total_cents, line_items, discount_codes, payment_details, created_at, financial_status, shopify_order_id, fulfillments, source_name, subscription_id")
+      .select("order_number, total_cents, line_items, discount_codes, payment_details, created_at, financial_status, shopify_order_id, fulfillments, source_name, subscription_id, amplifier_shipped_at")
       .eq("workspace_id", wsId).in("customer_id", allCustIds)
       .order("created_at", { ascending: false }).limit(25),
     // Loyalty — route through the [[../../docs/brain/libraries/loyalty]]
@@ -1428,6 +1428,13 @@ async function getCustomerAccount(admin: Admin, wsId: string, custId: string): P
       subLabel[s.id] = `${s.shopify_contract_id || s.id.slice(0, 8)} (${s.status})`;
     }
 
+    // Crisis-substitution ground truth: while a crisis is active Amplifier ships the affected SKU
+    // as an alternative flavor, but our order rows still record the ORDERED variant. Flag those
+    // lines so Sol doesn't read "Cocoa shipped" as ground truth and call a wrong-flavor report
+    // false (Yukiko Ban, tickets e159a032 / 3488aabf). Read crises through the SDK accessor.
+    const { annotateCrisisSubstitution, getSubstitutionCrises } = await import("@/lib/crisis-substitution");
+    const substitutionCrises = await getSubstitutionCrises(admin, wsId);
+
     parts.push(
       showingOlderThan180
         ? "\nRECENT ORDERS (last 180 days had fewer than 3 — showing the 3 most recent; some are older than 180 days):"
@@ -1443,6 +1450,11 @@ async function getCustomerAccount(admin: Admin, wsId: string, custId: string): P
       // order surfaced as $22.46/unit (Shopify originalUnitPriceSet, pre-
       // discount) instead of the actual $22.37/unit.
       const charged = computeChargedLineTotals(o as { total_cents?: number | null; payment_details?: { subtotal_cents?: number | null } | null }, lineItems);
+      const subAnnotations = annotateCrisisSubstitution(
+        lineItems,
+        { amplifier_shipped_at: (o as { amplifier_shipped_at?: string | null }).amplifier_shipped_at ?? null },
+        substitutionCrises,
+      );
       const itemStr = lineItems.map((i, idx) => {
         const qty = i.quantity || 1;
         const perUnitCents = charged[idx].perUnitCents;
@@ -1451,7 +1463,13 @@ async function getCustomerAccount(admin: Admin, wsId: string, custId: string): P
         // it) then fall back to the resolved products.variants[].title
         // for Shopify-synced lines whose row only carries variant_id.
         const resolvedVariantTitle = resolveLineVariantTitle(i, variantTitleMap);
-        const titleFull = `${i.title || "?"}${resolvedVariantTitle ? ` (variant: ${resolvedVariantTitle})` : ""}`;
+        // Crisis substitution: the row shows the ORDERED flavor, but Amplifier likely shipped the
+        // crisis swap instead. Surface it so a wrong-flavor report is believed, not denied.
+        const sub = subAnnotations[idx];
+        const subFlag = sub?.likely_substituted
+          ? ` [LIKELY SHIPPED AS ${sub.likely_shipped_flavor || "another flavor"} — crisis substitution; Amplifier ships the out-of-stock flavor as an alternative, so a customer's wrong-flavor report on this line is TRUE, not false. This row shows the ordered flavor, NOT what shipped.]`
+          : "";
+        const titleFull = `${i.title || "?"}${resolvedVariantTitle ? ` (variant: ${resolvedVariantTitle})` : ""}${subFlag}`;
         const msrp = i.variant_id ? msrpMap.get(String(i.variant_id)) : undefined;
         if (msrp) {
           const standardCents = Math.round(msrp * 0.75);

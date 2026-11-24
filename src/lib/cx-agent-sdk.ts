@@ -68,6 +68,11 @@ export interface CxOrderLine {
   /** The line total the customer was charged. */
   line_total_cents: number;
   sku: string | null;
+  /** True when a crisis likely made Amplifier ship this ordered flavor as a different one.
+   *  The row records the ORDERED variant, not what the warehouse shipped during a crisis. */
+  likely_substituted?: boolean;
+  /** The flavor Amplifier most likely shipped instead (the crisis default swap). */
+  likely_shipped_flavor?: string | null;
 }
 
 export interface CxOrder {
@@ -694,7 +699,7 @@ export async function getCxOrders(
   const { data: rawOrders } = await admin
     .from("orders")
     .select(
-      "order_number, shopify_order_id, total_cents, line_items, payment_details, financial_status, source_name, subscription_id, created_at",
+      "order_number, shopify_order_id, total_cents, line_items, payment_details, financial_status, source_name, subscription_id, created_at, amplifier_shipped_at",
     )
     .eq("workspace_id", workspaceId)
     .in("customer_id", linked)
@@ -724,6 +729,13 @@ export async function getCxOrders(
     }
   }
 
+  // Crisis-substitution ground truth: while a crisis is active Amplifier ships the affected SKU as
+  // an alternative flavor, but order rows still record the ORDERED variant — so June read "Cocoa
+  // shipped" as ground truth and ruled Yukiko Ban's wrong-flavor report false (tickets e159a032 /
+  // 3488aabf). Read crises through the SDK accessor and flag the likely-substituted lines.
+  const { annotateCrisisSubstitution, getSubstitutionCrises } = await import("@/lib/crisis-substitution");
+  const substitutionCrises = await getSubstitutionCrises(admin, workspaceId);
+
   return orders.map((o) => {
     const rawLines = (o.line_items as Array<{
       title?: string;
@@ -735,6 +747,11 @@ export async function getCxOrders(
       variant_id?: string | null;
       variant_title?: string | null;
     }> | null) ?? [];
+    const subAnnotations = annotateCrisisSubstitution(
+      rawLines.map((l) => ({ variant_id: l.variant_id ?? null, sku: l.sku ?? null })),
+      { amplifier_shipped_at: (o.amplifier_shipped_at as string | null) ?? null },
+      substitutionCrises,
+    );
     const payment = (o.payment_details as { subtotal_cents?: number | null } | null) ?? null;
     const orderTotal = (o.total_cents as number | null) ?? 0;
     const subtotal = payment?.subtotal_cents ?? orderTotal;
@@ -750,7 +767,7 @@ export async function getCxOrders(
       created_at: o.created_at as string,
       source_name: (o.source_name as string | null) ?? null,
       subscription_id: (o.subscription_id as string | null) ?? null,
-      line_items: rawLines.map((l) => {
+      line_items: rawLines.map((l, idx) => {
         const qty = l.quantity ?? 1;
         // Prefer an explicit line total when present (internal/amplifier orders
         // stamp it); otherwise scale the raw line to its share of the order
@@ -758,6 +775,7 @@ export async function getCxOrders(
         const lineTotal = l.line_total_cents ?? l.total_cents ?? Math.round((l.price_cents ?? 0) * qty * scale);
         const perUnit = qty > 0 ? Math.round(lineTotal / qty) : 0;
         const resolvedTitle = l.variant_title ?? (l.variant_id ? variantTitleMap.get(String(l.variant_id)) ?? null : null);
+        const sub = subAnnotations[idx];
         return {
           title: l.title ?? "",
           variant_id: (l.variant_id as string | null) ?? null,
@@ -766,6 +784,8 @@ export async function getCxOrders(
           per_unit_cents: perUnit,
           line_total_cents: lineTotal,
           sku: (l.sku as string | null) ?? null,
+          likely_substituted: sub?.likely_substituted ?? false,
+          likely_shipped_flavor: sub?.likely_shipped_flavor ?? null,
         };
       }),
     };
@@ -1211,7 +1231,13 @@ export function formatCxOrders(orders: CxOrder[]): string {
     const items = o.line_items
       .map((i) => {
         const variant = i.variant_title ? ` (${i.variant_title})` : "";
-        return `${i.title}${variant} x${i.quantity} @ ${DOLLARS(i.per_unit_cents)}/unit (line ${DOLLARS(i.line_total_cents)})`;
+        // Crisis substitution: the row shows the ORDERED flavor, but Amplifier likely shipped the
+        // crisis swap instead — so a wrong-flavor report on this line is our fault (TRUE), not a
+        // false claim. Do NOT read this row as ground truth for what shipped.
+        const subFlag = i.likely_substituted
+          ? ` [LIKELY SHIPPED AS ${i.likely_shipped_flavor || "another flavor"} — crisis substitution; a wrong-flavor report here is TRUE, not false. Row shows ordered flavor, not what shipped.]`
+          : "";
+        return `${i.title}${variant} x${i.quantity} @ ${DOLLARS(i.per_unit_cents)}/unit (line ${DOLLARS(i.line_total_cents)})${subFlag}`;
       })
       .join(", ");
     const sub = o.subscription_id ? ` · sub ${o.subscription_id}` : " · one-time";
