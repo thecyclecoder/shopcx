@@ -1,0 +1,1 @@
+- **Drop foreign adhoc orders.line_items containment invalid-JSON noise from the error feed** · verified 2026-11-24 · → [[libraries/error-feed]]
