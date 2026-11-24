@@ -5683,6 +5683,72 @@ export function isForeignSupabasePostgresMissingOrdersTrackingNumberAdhocNoise(
 
 /**
  * Foreign-app noise — Postgres reporting a missing column for an ad hoc SELECT lookup of
+ * `orders.amplifier_imported_at`. Our `orders` table has NEVER carried an
+ * `amplifier_imported_at` column — no ShopCX code path (src/, scripts/,
+ * shopify-extension/, supabase/migrations/, docs/brain/) issues a SELECT that names
+ * `orders.amplifier_imported_at`. The message appears on Supabase's `postgres_logs` feed
+ * only when an external / manual tool (a foreign client expecting an "Amplifier"
+ * import-timestamp column, Supabase Studio's Table Editor / API Docs, a foreign SQL
+ * client, a stale exploratory query) does a raw
+ * `select ... amplifier_imported_at ... from public.orders` lookup — or the PostgREST
+ * `WITH pgrst_source AS ( SELECT ... FROM "public"."orders" ... )` CTE wrapper the same
+ * client emits over the REST endpoint. There is no lever from ShopCX to make that query
+ * resolve — paging Platform on it
+ * ([[../specs/error-feed-drop-orders-amplifier-imported-at-adhoc-lookup-noise]], Control
+ * Tower signature `supabase-logs:df60f308ce65d765`) is repair work for a query we don't
+ * own.
+ *
+ * Sibling of `isForeignSupabasePostgresMissingOrdersTrackingNumberAdhocNoise` /
+ * `isForeignSupabasePostgresMissingOrdersEasypostTrackerAdhocNoise` — same narrow-gating
+ * shape on the same `public.orders` table, scoped to the `amplifier_imported_at`
+ * import-timestamp confusion instead of the shipment-tracking / EasyPost columns.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical column-missing shape for THIS column —
+ *      trimmed equal to one of
+ *         `column orders.amplifier_imported_at does not exist`
+ *         `column public.orders.amplifier_imported_at does not exist`
+ *      (with or without the `public.` qualifier and any leading `ERROR: ` prefix
+ *      Postgres includes on the logs surface), AND
+ *   2. the `parsed.query` attribute is a SELECT-lookup on `public.orders` — either
+ *      (a) the bare `select ... from public.orders` shape, OR (b) the PostgREST-
+ *      generated `WITH pgrst_source AS ( SELECT ... FROM "public"."orders" ... )`
+ *      CTE wrapper form with double-quoted identifiers.
+ *
+ * Narrowly gated so:
+ *   - a column-missing error for ANY OTHER column on `orders` (a real product-schema
+ *     regression on a live column like `order_number` / `total_cents`) still pages,
+ *   - a column-missing error for `amplifier_imported_at` on ANY OTHER table still pages,
+ *   - the same message attached to a DIFFERENT statement shape (INSERT / UPDATE / DELETE
+ *     / DDL on `orders`) still pages — the pin is the SELECT-lookup shape,
+ *   - a FATAL / PANIC / constraint violation is untouched (different message).
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not record`,
+ * so returning null here fully suppresses the row (no error_event, no loop_alert, no
+ * signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresMissingOrdersAmplifierImportedAtAdhocNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column orders.amplifier_imported_at does not exist" ||
+    stripped === "column public.orders.amplifier_imported_at does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  const bareSelect = /^select\b[\s\S]*\bfrom\s+(?:public\.)?orders\b/.test(q);
+  const pgrstCte =
+    /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"?(?:public"?\.)?"?orders\b/.test(q);
+  return bareSelect || pgrstCte;
+}
+
+/**
+ * Foreign-app noise — Postgres reporting a missing column for an ad hoc SELECT lookup of
  * `orders.total_price` or its `orders.subtotal_price` twin. Our `orders` table does NOT
  * carry Shopify's REST-shape `total_price` / `subtotal_price` top-level columns — the
  * money breakdown lives in `orders.total_cents` (every in-tree reader on `orders` pulls

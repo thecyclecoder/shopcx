@@ -113,6 +113,7 @@ import {
   isForeignSupabasePostgresMissingOrdersAvalaraDocCodeColumnAdhocNoise,
   isForeignSupabasePostgresMissingOrdersEasypostTrackerAdhocNoise,
   isForeignSupabasePostgresMissingOrdersTrackingNumberAdhocNoise,
+  isForeignSupabasePostgresMissingOrdersAmplifierImportedAtAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsPausedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsTaxExemptColumnAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsDeliveryAddressColumnAdhocNoise,
@@ -1147,6 +1148,20 @@ const LOG_QUERIES: LogQuery[] = [
       // above; ripgrep's (ERE) pre-commit lane treats them as a capture group, so the SAME
       // pin instead matches the paren-less adjacency on this line:
       // isForeignSupabasePostgresMissingOrdersTrackingNumberAdhocNoisemessage, query
+      // Drop foreign-app noise at capture: an ad hoc `select ... amplifier_imported_at ...
+      // from public.orders` lookup by an external tool / stale exploratory query — or the
+      // PostgREST `WITH pgrst_source AS ( SELECT ... FROM "public"."orders" ... )` CTE
+      // wrapper the same client emits over the REST endpoint. Our `orders` table has NEVER
+      // carried an `amplifier_imported_at` column, so the resulting column-missing ERROR is
+      // repair work for a query we don't own
+      // ([[../specs/error-feed-drop-orders-amplifier-imported-at-adhoc-lookup-noise]],
+      // Control Tower signature `supabase-logs:df60f308ce65d765`). Narrowly gated to require
+      // BOTH the exact column-missing message AND the SELECT-lookup shape — a column-missing
+      // error on any other column of `orders` (including the live `order_number` /
+      // `total_cents`), or on `amplifier_imported_at` from any other table, or on `orders`
+      // via a non-SELECT statement (real code-bug shape), still surfaces / pages on first
+      // sighting.
+      if (isForeignSupabasePostgresMissingOrdersAmplifierImportedAtAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc `select ... paused_at ... from
       // public.subscriptions` lookup by an external tool / stale exploratory query — or
       // the PostgREST `WITH pgrst_source AS ( SELECT ... FROM "public"."subscriptions"
