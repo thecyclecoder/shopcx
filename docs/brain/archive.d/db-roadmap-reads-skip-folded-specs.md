@@ -1,0 +1,1 @@
+- **Pipeline roadmap reads stop shipping every folded spec on each pass** · verified 2026-11-24 · → [[../libraries/pg-pool]], [[../libraries/spec-card-state]]

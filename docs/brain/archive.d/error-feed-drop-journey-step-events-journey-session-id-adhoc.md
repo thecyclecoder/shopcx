@@ -1,0 +1,1 @@
+- **Drop foreign direct-REST 'column journey_step_events.journey_session_id does not exist' noise at capture** · verified 2026-11-24 · → [[../libraries/error-feed]]
