@@ -31,7 +31,7 @@ The refund **mirror table** — one row per authoritative refund fired against a
 
 ## Gotchas / Known issues
 
-- **Foreign-noise drops on phantom columns.** Stale direct-REST clients or external integrations sometimes probe for non-existent columns on order_refunds: `customer_id`, `order_number`, `reason`. The error feed classifier [[../libraries/error-feed]] `isForeignSupabasePostgresMissingOrderRefundsCustomerIdAdhocNoise` drops all three at capture (they're the same foreign SELECT query, just with different column-order variants), preventing each variant from opening a fresh Control Tower signature. Pages on a *real* missing column (e.g., `amount_cents` or `vendor_refund_id` on a live code path) are preserved. Signatures: `supabase-logs:d919f14fa13296c8` (customer_id) and `supabase-logs:5695252ec06074f3` (order_number).
+- **Foreign-noise drops on phantom columns.** Stale direct-REST clients or external integrations sometimes probe for non-existent columns on order_refunds: `customer_id`, `order_number`, `reason`, `shopify_order_id`. The error feed classifier [[../libraries/error-feed]] `isForeignSupabasePostgresMissingOrderRefundsCustomerIdAdhocNoise` drops all four at capture (they're the same foreign SELECT query, just with different column-order variants), preventing each variant from opening a fresh Control Tower signature. Pages on a *real* missing column (e.g., `amount_cents` or `vendor_refund_id` on a live code path) are preserved. Signatures: `supabase-logs:d919f14fa13296c8` (customer_id), `supabase-logs:5695252ec06074f3` (order_number), and `supabase-logs:7370f2d3941a3138` (shopify_order_id).
 
 ## Invariants
 
