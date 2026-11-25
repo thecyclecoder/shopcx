@@ -358,6 +358,7 @@
     "test:error-feed-journey-sessions-updated-at-noise": "tsx --test src/lib/control-tower/error-feed.journey-sessions-updated-at-noise.test.ts",
     "test:error-feed-journey-step-events-journey-session-id-noise": "tsx --test src/lib/control-tower/error-feed.journey-step-events-journey-session-id-noise.test.ts",
     "test:error-feed-subscriptions-tax-exempt-noise": "tsx --test src/lib/control-tower/error-feed.subscriptions-tax-exempt-noise.test.ts",
+    "test:error-feed-subscriptions-last-charged-at-noise": "tsx --test src/lib/control-tower/error-feed.subscriptions-last-charged-at-noise.test.ts",
     "test:error-feed-product-variants-barcode-noise": "tsx --test src/lib/control-tower/error-feed.product-variants-barcode-noise.test.ts",
     "test:portal-remediation": "tsx --test src/lib/portal/remediation.test.ts",
     "test:experiment-delivery-audit": "tsx --test src/lib/storefront/experiment-delivery-audit.test.ts",
