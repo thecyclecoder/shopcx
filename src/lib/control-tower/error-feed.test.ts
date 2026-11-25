@@ -7590,6 +7590,48 @@ test("isForeignSupabasePostgresMissingOrderRefundsCustomerIdAdhocNoise drops the
   );
 });
 
+test("isForeignSupabasePostgresMissingOrderRefundsCustomerIdAdhocNoise drops the shopify_order_id column-missing variant of the SAME foreign order_refunds read (signature supabase-logs:7370f2d3941a3138)", () => {
+  // PostgREST direct-REST CTE form from the Control Tower signature sample.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrderRefundsCustomerIdAdhocNoise(
+      "column order_refunds.shopify_order_id does not exist",
+      'with pgrst_source as (select "order_refunds".* from "public"."order_refunds" where "order_refunds"."shopify_order_id" = $1) select * from pgrst_source',
+    ),
+    true,
+  );
+  // Bare-SELECT form — unqualified and public.-qualified message variants.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrderRefundsCustomerIdAdhocNoise(
+      "column order_refunds.shopify_order_id does not exist",
+      "select id, shopify_order_id from public.order_refunds where id = '00000000-0000-0000-0000-000000000000'",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingOrderRefundsCustomerIdAdhocNoise(
+      "column public.order_refunds.shopify_order_id does not exist",
+      "select shopify_order_id from order_refunds limit 1",
+    ),
+    true,
+  );
+  // A LEGITIMATE order_refunds column (real schema regression) is NOT in the drop set.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrderRefundsCustomerIdAdhocNoise(
+      "column order_refunds.amount_cents does not exist",
+      "select id, amount_cents from public.order_refunds",
+    ),
+    false,
+  );
+  // A non-SELECT write naming shopify_order_id is a real code-bug and still pages.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrderRefundsCustomerIdAdhocNoise(
+      "column order_refunds.shopify_order_id does not exist",
+      "insert into public.order_refunds (shopify_order_id) values ($1)",
+    ),
+    false,
+  );
+});
+
 test("isForeignSupabasePostgresMissingOrderRefundsCustomerIdAdhocNoise KEEPS other tables, other columns, and non-SELECT statements (real regressions still page)", () => {
   // Different table.
   assert.equal(
