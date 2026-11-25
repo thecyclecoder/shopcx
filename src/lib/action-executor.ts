@@ -1202,6 +1202,67 @@ export async function replaySuccessorApply(
 }
 
 /**
+ * Regen-successor lineage lookup (spec:
+ * apply-loyalty-coupon-self-heal-retry-recognizes-regenerated-successor-code).
+ *
+ * The regen-ROTATION sibling of the same-code idempotency carve-out
+ * (apply-loyalty-coupon-same-code-reapply-is-idempotent-success-not-stacking).
+ * When the first apply of a stale / coupon_not_found code can't land it, the
+ * regen fallback flips the original redemption active→expired, mints a fresh
+ * successor of the SAME value, and applies IT. The self-heal verification then
+ * re-fires `apply_loyalty_coupon` with the ORIGINAL code — but the sub now
+ * carries the SUCCESSOR, a DIFFERENT LOYALTY-* code, so the stacking guard's
+ * different-code branch would false-fail with a no-stacking error BEFORE
+ * control ever reaches the `orig.status!=='active'` fast-bail that routes to
+ * `replaySuccessorApply` (ticket d00064a1).
+ *
+ * This resolves — for an incoming `code` whose own redemption is NON-active
+ * (an earlier regen already consumed it) — the active successor that regen
+ * minted for the SAME member+discount_value (the same lineage lookup
+ * `replaySuccessorApply` uses, narrowed to the value so a different-value
+ * coupon the member legitimately holds is never mistaken for this code's
+ * successor). Returns the successor's UPPERCASED `discount_code` so the guard
+ * can confirm the terminal state already holds (that successor is already on
+ * the sub) and return idempotent success. Returns null when the incoming code
+ * is still `active` (no regen ran — the normal apply/regen path owns it), its
+ * redemption / value is unresolvable, or no active successor of that value
+ * exists. Exported for unit tests.
+ */
+export async function regenSuccessorForInactiveLoyaltyCode(
+  admin: Admin,
+  workspaceId: string,
+  code: string,
+): Promise<string | null> {
+  const { data: orig } = await admin
+    .from("loyalty_redemptions")
+    .select("member_id, discount_value, status")
+    .eq("workspace_id", workspaceId)
+    .eq("discount_code", code)
+    .maybeSingle();
+  const origRow = orig as
+    | { member_id?: unknown; discount_value?: unknown; status?: unknown }
+    | null;
+  if (!origRow) return null;
+  // Still active ⇒ no regen has run; the normal apply/regen path owns it.
+  if (origRow.status === "active") return null;
+  if (typeof origRow.member_id !== "string") return null;
+  if (typeof origRow.discount_value !== "number") return null;
+  const { data: successor } = await admin
+    .from("loyalty_redemptions")
+    .select("discount_code")
+    .eq("workspace_id", workspaceId)
+    .eq("member_id", origRow.member_id)
+    .eq("discount_value", origRow.discount_value)
+    .eq("status", "active")
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  const successorCode = (successor as { discount_code?: unknown } | null)
+    ?.discount_code;
+  return typeof successorCode === "string" ? successorCode.toUpperCase() : null;
+}
+
+/**
  * Run a list of direct actions inline (used by handleJourney and
  * handlePlaybook when Sonnet wants to fire actions alongside a routing
  * decision — e.g. "create_return + launch cancel_subscription journey").
@@ -2569,6 +2630,34 @@ export const directActionHandlers: Record<
             success: true,
             summary: `Loyalty coupon ${code} already applied to ${p.contract_id} (idempotent no-op)`,
             couponCode: code,
+          };
+        }
+        // Regen-successor idempotency carve-out (spec:
+        // apply-loyalty-coupon-self-heal-retry-recognizes-regenerated-successor-code).
+        // The regen-ROTATION sibling of the same-code carve-out above. When the
+        // first run couldn't apply `code` (stale / coupon_not_found), it
+        // regenerated a fresh successor, flipped THIS code's redemption
+        // active→expired, minted+applied the successor, and succeeded. The
+        // self-heal verification now re-fires with the ORIGINAL `code`; the sub
+        // already carries the successor — a DIFFERENT LOYALTY-* code — so this
+        // different-code branch would refuse with a false no-stacking failure
+        // BEFORE control could reach the `orig.status!=='active'` fast-bail that
+        // routes to `replaySuccessorApply`, re-escalating a correctly-resolved
+        // ticket (d00064a1). Detect it here: the incoming code's redemption is
+        // non-active and its active same-value successor is the code already on
+        // the sub → the desired terminal state already holds → idempotent
+        // success. Owner-mismatch already refused above, so this success return
+        // cannot authorize a code belonging to a different contract owner.
+        const regenSuccessor = await regenSuccessorForInactiveLoyaltyCode(
+          ctx.admin,
+          ctx.workspaceId,
+          code,
+        );
+        if (regenSuccessor && different.includes(regenSuccessor)) {
+          return {
+            success: true,
+            summary: `Loyalty coupon ${code} already self-healed to successor ${regenSuccessor} on ${p.contract_id} (idempotent no-op)`,
+            couponCode: regenSuccessor,
           };
         }
         // Net-zero reissue carve-out (spec:
