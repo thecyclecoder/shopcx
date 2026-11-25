@@ -152,6 +152,24 @@ function pickHaikuFromDirection(signals: ModelSignals): ModelPick | null {
   };
 }
 
+/**
+ * A crisis enrollment counts toward the `hard:crisis-enrollment` signal only while its
+ * linked subscription is not cancelled. A null/absent subscription still counts (behavior
+ * unchanged); only a subscription whose status is explicitly `cancelled` drops the row.
+ * Duplicated (not imported) from playbook-executor's `hasActiveCrisisEnrollment` filter to
+ * avoid a module cycle — widen both together.
+ */
+function crisisEnrollmentSubscriptionNotCancelled(row: unknown): boolean {
+  const sub = (row as {
+    subscriptions?:
+      | { status?: string | null }
+      | Array<{ status?: string | null }>
+      | null;
+  } | null)?.subscriptions;
+  const status = Array.isArray(sub) ? sub[0]?.status : sub?.status;
+  return status !== "cancelled";
+}
+
 export async function pickOrchestratorModel(params: {
   workspaceId: string;
   ticketId: string;
@@ -188,9 +206,13 @@ export async function pickOrchestratorModel(params: {
   if (customerId) {
     const since24h = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
     const [crisis, links, subs, merges] = await Promise.all([
+      // Join to the enrollment's subscription so a crisis row pointing at a CANCELLED
+      // subscription no longer trips the hard:crisis-enrollment signal (Brooke Miedema:
+      // cancelled=false crisis row on a cancelled sub). Lockstep with
+      // playbook-executor's `hasActiveCrisisEnrollment` — widen both together.
       admin
         .from("crisis_customer_actions")
-        .select("id", { count: "exact", head: true })
+        .select("id, subscriptions(status)")
         .eq("workspace_id", workspaceId)
         .eq("customer_id", customerId)
         .is("tier3_response", null)
@@ -215,7 +237,9 @@ export async function pickOrchestratorModel(params: {
         .gte("updated_at", since24h),
     ]);
 
-    crisisCount = crisis.count || 0;
+    crisisCount = ((crisis.data ?? []) as unknown[]).filter((row) =>
+      crisisEnrollmentSubscriptionNotCancelled(row),
+    ).length;
     linksCount = links.count || 0;
     activeSubsCount = subs.count || 0;
     recentMergesCount = merges.count || 0;

@@ -290,6 +290,17 @@ is a goodwill call, not a system-error correction — frame it that way when you
 Same rule-that-carries-its-evidence pattern the [[../open-tickets/SKILL.md]] cases (Julianne,
 Loretta) use.
 
+**⭐ Cancel-after-renewal is NEVER `escalate_founder` (spec `cancel-after-renewal`).** A refund
+request on a renewal that CHARGED BEFORE the customer cancelled is a standard case — handled
+hundreds of times — and stays inside the Refund playbook: verdict = `approve_remedy` routing back
+into the ladder (`apply_policy` → `offer_exception`), never a founder page. A customer's MENTION of
+a bank dispute or chargeback does NOT make it a chargeback: it is a real dispute ONLY when
+`chargeback_events` has a row for the order (check `get_chargebacks`). And even then June routes it
+to the chargeback pipeline — NOT the founder. Ground truth: ticket b44584dc (Brooke Miedema)
+cancelled 2h20m after a renewal charged and asked for a refund citing a bank dispute; no
+`chargeback_events` row existed, yet the 'chargeback' was escalated to the founder. Dylan: this is
+never escalation-worthy.
+
 ### 2. `author_spec` — the ticket surfaces a REPEAT product / analyzer / rule GAP
 
 Return this when:
