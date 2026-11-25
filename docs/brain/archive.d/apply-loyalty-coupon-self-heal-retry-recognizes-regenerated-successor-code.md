@@ -1,0 +1,1 @@
+- **apply_loyalty_coupon self-heal retry recognizes regen-successor code** · verified 2026-11-25 · → [[../libraries/action-executor]]
