@@ -120,8 +120,33 @@ export const ticketCsatCron = inngest.createFunction(
         //      the ticket closed OR the ladder recorded an ask this
         //      customer submitted. We already know they're happy, and the
         //      CSAT would be the third thing asked of them in one week.
+        //   5. The ticket was NOT opened by the customer (first
+        //      customer-facing message is outbound) — outreach, not support.
         const tags = (t.tags as string[] | null) || [];
         let ineligible = t.do_not_reply === true || tags.some(tag => SKIP_TAGS.has(tag));
+
+        // 5. Not customer-initiated. CSAT is for genuine support
+        //    conversations the CUSTOMER opened. Tickets WE opened with an
+        //    outbound send (review requests, cancel win-backs, reactivate
+        //    journeys, crisis updates, dunning notices, delivery-audit
+        //    alerts, marketing replies) are campaigns/outreach, not support
+        //    — surveying them spams the customer (Dylan, 2026-11-25:
+        //    "Dylan, your free bag is still waiting" and "Still want your
+        //    Creatine Prime+ back" tickets both got CSATs). Origin signal:
+        //    the ticket's earliest customer-facing message must be an
+        //    inbound message from the customer. This holds even when the
+        //    customer later replies to the outreach, which is intended.
+        if (!ineligible) {
+          const { data: first } = await admin
+            .from("ticket_messages")
+            .select("direction, author_type")
+            .eq("ticket_id", t.id)
+            .neq("visibility", "internal")
+            .order("created_at", { ascending: true })
+            .limit(1)
+            .maybeSingle();
+          ineligible = !first || first.direction !== "inbound" || first.author_type !== "customer";
+        }
 
         if (!ineligible) {
           const { count } = await admin

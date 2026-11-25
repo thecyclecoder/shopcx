@@ -18,6 +18,8 @@ Two passes per tick:
      1. **No customer-facing outbound message** — `ticket_messages` has no row with `direction='outbound' AND visibility != 'internal'`. The principled signal: if we never sent the customer anything, there's nothing to rate. Catches OOF/auto-reply/"AI did nothing" tickets.
      2. `tickets.do_not_reply = true` — AI intentionally didn't reply (wrong company / spam).
      3. Tags overlap `SKIP_TAGS` (`outreach`, `cls:outreach`, `spam:bot`) — cheap pre-filter, shared with [[../libraries/ticket-analyzer]] via `src/lib/ticket-tags.ts`.
+     4. **Not customer-initiated** — the ticket's earliest `ticket_messages` row with `visibility != 'internal'` is not `direction='inbound' AND author_type='customer'`. Tickets we opened with an outbound send (review requests, cancel win-backs / reactivate journeys, crisis updates, dunning, delivery-audit notices) are outreach, not support, and never get a CSAT, even if the customer replies to them. Added 2026-11-25 after win-back ("your free bag is still waiting") and review-request tickets were being surveyed.
+     5. Review responder — the customer left a `product_reviews` row since close, or has a `review_requests` row with `outcome='submitted'`.
    - Otherwise: stamp `csat_sent_at` first (so a Resend hiccup doesn't re-fire next tick), then send the survey email via [[../integrations/resend]].
 
 **Returns:** `{ sent, skipped_too_old, skipped_no_reply, batch_size }` (no `batch_size` on the idle no-due path).
@@ -35,8 +37,9 @@ _None._
 ## Tables read (not written)
 
 - [[../tables/tickets]]
-- [[../tables/ticket_messages]] — eligibility check (customer-facing outbound exists?)
+- [[../tables/ticket_messages]] — eligibility checks (customer-initiated? customer-facing outbound exists?)
 - [[../tables/customers]]
+- [[../tables/product_reviews]], [[../tables/review_requests]] — review-responder suppression
 - [[../tables/workspaces]]
 
 ---
