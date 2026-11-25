@@ -1,0 +1,1 @@
+- **A cancel-after-renewal refund request runs the Refund playbook and never reaches the founder** · verified 2026-11-25 · → [[../playbooks/refund]], [[../libraries/playbook-executor]], [[../libraries/model-picker]]
