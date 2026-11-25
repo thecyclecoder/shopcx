@@ -415,6 +415,7 @@
     "test:commerce-order-create": "tsx --test src/lib/commerce/order.create.test.ts",
     "test:commerce-subscription-create": "tsx --test src/lib/commerce/subscription.create.test.ts",
     "test:commerce-drift-internal-exclusion": "tsx --test src/lib/commerce/shopcx-drift-reconciler.internal-exclusion.test.ts",
+    "test:commerce-drift-contract-agreement": "tsx --test src/lib/commerce/shopcx-drift-reconciler.contract-agreement.test.ts",
     "test:commerce-subscription-create-hydrate": "tsx --test src/lib/commerce/subscription.create-hydrate.test.ts",
     "test:commerce-subscription-update-shipping-address": "tsx --test src/lib/commerce/subscription.updateShippingAddress.test.ts",
     "test:commerce-shopcx-revive": "tsx --test src/lib/commerce/shopcx-revive.test.ts",
