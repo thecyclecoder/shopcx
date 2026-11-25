@@ -116,6 +116,7 @@ import {
   isForeignSupabasePostgresMissingOrdersAmplifierImportedAtAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsPausedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsTaxExemptColumnAdhocNoise,
+  isForeignSupabasePostgresMissingSubscriptionsLastChargedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsDeliveryAddressColumnAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsLineItemsColumnAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsRenewalSubtotalCentsColumnAdhocNoise,
@@ -1197,6 +1198,19 @@ const LOG_QUERIES: LogQuery[] = [
       // or on `tax_exempt` from any other table, or on `subscriptions` via a non-SELECT
       // statement (real code-bug shape), still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingSubscriptionsTaxExemptColumnAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc `select ... last_charged_at ...
+      // from public.subscriptions` lookup by an external tool, or the PostgREST
+      // `WITH pgrst_source AS ( SELECT ... FROM "public"."subscriptions" ... )` CTE wrapper
+      // over the REST endpoint, asking for a `last_charged_at` column `subscriptions` has
+      // never owned (per-cycle charge history lives in `subscription_cycle_charges`). No
+      // lever from ShopCX — repair for a query we don't own
+      // ([[../specs/error-feed-drop-subscriptions-last-charged-at-direct-rest-no]], Control
+      // Tower signature `supabase-logs:f77b78ec44817af3`). Narrowly gated to require BOTH
+      // the exact column-missing message AND the SELECT-lookup shape — a column-missing
+      // error on any other column of `subscriptions` (including the real `pause_resume_at`),
+      // or on `last_charged_at` from any other table, or on `subscriptions` via a non-SELECT
+      // statement (real code-bug shape), still surfaces / pages on first sighting.
+      if (isForeignSupabasePostgresMissingSubscriptionsLastChargedAtColumnAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc `select ... delivery_address ...
       // from public.subscriptions` lookup by an external tool (Supabase Studio Table
       // Editor / API Docs, foreign SQL client, stale exploratory session, third-party
