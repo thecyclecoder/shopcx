@@ -18,7 +18,7 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { closeTicket } from "./tickets-mutate";
+import { closeTicket, buildOutboundTicketRow } from "./tickets-mutate";
 
 function makeAdmin() {
   let captured: {
@@ -103,4 +103,23 @@ test("closeTicket update is scoped by ticket id", async () => {
   await closeTicket(admin, TID);
   const c = captured();
   assert.deepEqual(c!.filters, { id: TID });
+});
+
+test("buildOutboundTicketRow lands closed by default with closed_at, email channel, deduped tags", () => {
+  const row = buildOutboundTicketRow(
+    { workspaceId: "ws", customerId: "c1", subject: " Sleep Gummies update ", tags: ["a", "a", "b"] },
+    "2026-11-25T00:00:00.000Z",
+  );
+  assert.equal(row.subject, "Sleep Gummies update");
+  assert.equal(row.status, "closed");
+  assert.equal(row.closed_at, "2026-11-25T00:00:00.000Z");
+  assert.equal(row.channel, "email");
+  assert.deepEqual(row.tags, ["a", "b"]);
+});
+
+test("buildOutboundTicketRow keeps an open ticket unclosed and refuses missing fields", () => {
+  const row = buildOutboundTicketRow({ workspaceId: "ws", customerId: "c1", subject: "x", status: "open" }, "t");
+  assert.equal(row.closed_at, null);
+  assert.throws(() => buildOutboundTicketRow({ workspaceId: "ws", customerId: "", subject: "x" }, "t"), /customerId/);
+  assert.throws(() => buildOutboundTicketRow({ workspaceId: "ws", customerId: "c", subject: " " }, "t"), /subject/);
 });

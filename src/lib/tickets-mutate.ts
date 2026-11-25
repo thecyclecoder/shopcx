@@ -85,6 +85,64 @@ export async function closeTicket(
 }
 
 /**
+ * Open a ticket for a message WE start (outreach: a discontinued-product swap offer, a crisis note),
+ * so the outbound email threads and the customer's reply lands on a ticket with context. Before this
+ * there was no create path in this SDK, so agents and one-off scripts had to raw-insert `tickets`
+ * (CLAUDE.md: raw `.from(...)` with no SDK means STOP). Sleep Gummies discontinue, 2026-11-25.
+ *
+ * Lands `closed` by default, like review requests: a one-way ask should not sit in the CS queue, and
+ * the inbound path reopens it when the customer writes back. Pass `status: "open"` to keep it queued.
+ */
+export interface OpenOutboundTicketInput {
+  workspaceId: string;
+  customerId: string;
+  subject: string;
+  channel?: "email" | "sms";
+  tags?: string[];
+  status?: TicketStatus;
+}
+
+/** PURE: validate + build the `tickets` row openOutboundTicket inserts. */
+export function buildOutboundTicketRow(input: OpenOutboundTicketInput, ts: string): Record<string, unknown> {
+  if (!input.workspaceId) throw new Error("openOutboundTicket: workspaceId is required");
+  if (!input.customerId) throw new Error("openOutboundTicket: customerId is required");
+  const subject = (input.subject ?? "").trim();
+  if (!subject) throw new Error("openOutboundTicket: subject is required");
+  const status = input.status ?? "closed";
+  return {
+    workspace_id: input.workspaceId,
+    customer_id: input.customerId,
+    subject,
+    channel: input.channel ?? "email",
+    status,
+    closed_at: status === "closed" ? ts : null,
+    tags: Array.from(new Set(input.tags ?? [])),
+  };
+}
+
+export async function openOutboundTicket(admin: Admin, input: OpenOutboundTicketInput): Promise<string> {
+  const row = buildOutboundTicketRow(input, nowIso());
+  const { data, error } = await admin.from("tickets").insert(row).select("id").single();
+  if (error) throw new Error(`openOutboundTicket: ${error.message}`);
+  if (!data?.id) throw new Error("openOutboundTicket: insert returned no id");
+  return data.id as string;
+}
+
+/** Add an internal (agent-only) system note to a ticket. Never reaches the customer. */
+export async function addInternalNote(admin: Admin, ticketId: string, body: string): Promise<void> {
+  const text = (body ?? "").trim();
+  if (!ticketId || !text) throw new Error("addInternalNote: ticketId and body are required");
+  const { error } = await admin.from("ticket_messages").insert({
+    ticket_id: ticketId,
+    direction: "outbound",
+    visibility: "internal",
+    author_type: "system",
+    body: text,
+  });
+  if (error) throw new Error(`addInternalNote: ${error.message}`);
+}
+
+/**
  * Reopen a ticket (the next-inbound-reopens shape): status=open, clear closed_at, drop escalation +
  * assignment so it re-enters the normal handling flow.
  */
