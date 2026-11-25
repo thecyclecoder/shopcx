@@ -262,6 +262,8 @@ function makeOrderingChain(tables: OrderingTables, table: string) {
     eq: (col: string, val: unknown) => typeof chain;
     in: (col: string, vals: unknown[]) => typeof chain;
     is: (col: string, val: unknown) => typeof chain;
+    order: (...args: unknown[]) => typeof chain;
+    limit: (...args: unknown[]) => typeof chain;
     maybeSingle: () => Promise<{ data: OrderingRow | null; error: null }>;
     single: () => Promise<{ data: OrderingRow | null; error: null }>;
     then: <T>(onF?: (v: { data: OrderingRow[] | null; error: null }) => T) => Promise<T>;
@@ -270,6 +272,8 @@ function makeOrderingChain(tables: OrderingTables, table: string) {
     eq: (col, val) => { filters.push({ col, val, op: "eq" }); return chain },
     in: (col, vals) => { filters.push({ col, val: vals, op: "in" }); return chain },
     is: (col, val) => { filters.push({ col, val, op: "is" }); return chain },
+    order: () => chain,
+    limit: () => chain,
     maybeSingle: async () => {
       const rows = (tables[table] ?? []).filter((r) => orderingMatches(r, filters));
       return { data: rows[0] ?? null, error: null };
@@ -389,4 +393,123 @@ test("apply_loyalty_coupon: SAME-CODE re-apply on an OWNER-MATCH sub → idempot
   assert.equal(out.success, true, "owners match + same code already on sub → idempotent success (ticket be3d6ab7)");
   assert.match(out.summary ?? "", /already applied/i);
   assert.equal(out.couponCode, "LOYALTY-15-8M8HKP");
+});
+
+// ── Regen-ROTATION sibling (spec: apply-loyalty-coupon-self-heal-retry-
+// recognizes-regenerated-successor-code, ticket d00064a1). The first run
+// couldn't apply the ORIGINAL code, regenerated a successor, flipped the
+// original redemption active→expired, minted+applied the successor, and
+// succeeded. The self-heal verification re-fires with the ORIGINAL code; the
+// sub now carries the SUCCESSOR — a DIFFERENT LOYALTY-* code — so the
+// different-code branch would false-fail with a no-stacking error. The guard
+// must instead recognize the successor is already on the sub and return
+// idempotent success.
+test("apply_loyalty_coupon: self-heal retry with the ORIGINAL code after a code-rotating regen → idempotent success (successor already on sub)", async () => {
+  const tables: OrderingTables = {
+    subscriptions: [
+      {
+        workspace_id: "ws-1",
+        shopify_contract_id: "gid://shopify/SubscriptionContract/777",
+        customer_id: "uuid-cust-gmail",
+        // The successor minted by the completed regen is already on the sub.
+        applied_discounts: [{ title: "LOYALTY-15-SUCC" }],
+      },
+    ],
+    customers: [
+      { id: "uuid-cust-gmail", workspace_id: "ws-1", shopify_customer_id: "shopify-cust-GMAIL" },
+    ],
+    loyalty_members: [
+      { id: "mem-gmail", workspace_id: "ws-1", customer_id: "uuid-cust-gmail", shopify_customer_id: "shopify-cust-GMAIL" },
+    ],
+    loyalty_redemptions: [
+      // Original code — the regen already consumed it active→expired.
+      {
+        workspace_id: "ws-1",
+        member_id: "mem-gmail",
+        discount_code: "LOYALTY-15-ORIG",
+        discount_value: 15,
+        status: "expired",
+        used_at: null,
+        created_at: "2026-01-01T00:00:00Z",
+      },
+      // Active successor the regen minted (same member + value).
+      {
+        workspace_id: "ws-1",
+        member_id: "mem-gmail",
+        discount_code: "LOYALTY-15-SUCC",
+        discount_value: 15,
+        status: "active",
+        used_at: null,
+        created_at: "2026-01-02T00:00:00Z",
+      },
+    ],
+  };
+  const ctx = {
+    admin: makeOrderingAdmin(tables) as unknown as Parameters<typeof directActionHandlers.apply_loyalty_coupon>[0]["admin"],
+    workspaceId: "ws-1",
+    ticketId: "t-3",
+  } as Parameters<typeof directActionHandlers.apply_loyalty_coupon>[0];
+  const out = await directActionHandlers.apply_loyalty_coupon(ctx, {
+    type: "apply_loyalty_coupon",
+    code: "LOYALTY-15-ORIG",
+    contract_id: "gid://shopify/SubscriptionContract/777",
+  });
+  assert.equal(out.success, true, "regen successor already on sub → idempotent success, NOT a false no-stacking failure (ticket d00064a1)");
+  assert.match(out.summary ?? "", /self-healed to successor/i);
+  assert.equal(out.couponCode, "LOYALTY-15-SUCC");
+});
+
+// Guard against over-matching: a DIFFERENT-value loyalty coupon on the sub is
+// NOT this code's successor — the different-value apply must still refuse.
+test("apply_loyalty_coupon: inactive original but the only other code on the sub is a DIFFERENT value → still refuse (no successor match)", async () => {
+  const tables: OrderingTables = {
+    subscriptions: [
+      {
+        workspace_id: "ws-1",
+        shopify_contract_id: "gid://shopify/SubscriptionContract/776",
+        customer_id: "uuid-cust-gmail",
+        applied_discounts: [{ title: "LOYALTY-25-OTHER" }],
+      },
+    ],
+    customers: [
+      { id: "uuid-cust-gmail", workspace_id: "ws-1", shopify_customer_id: "shopify-cust-GMAIL" },
+    ],
+    loyalty_members: [
+      { id: "mem-gmail", workspace_id: "ws-1", customer_id: "uuid-cust-gmail", shopify_customer_id: "shopify-cust-GMAIL" },
+    ],
+    loyalty_redemptions: [
+      {
+        workspace_id: "ws-1",
+        member_id: "mem-gmail",
+        discount_code: "LOYALTY-15-ORIG",
+        discount_value: 15,
+        status: "expired",
+        used_at: null,
+        created_at: "2026-01-01T00:00:00Z",
+      },
+      // A $25 reward the member legitimately holds — different value, so it is
+      // NOT the $15 original's successor.
+      {
+        workspace_id: "ws-1",
+        member_id: "mem-gmail",
+        discount_code: "LOYALTY-25-OTHER",
+        discount_value: 25,
+        status: "active",
+        used_at: null,
+        created_at: "2026-01-02T00:00:00Z",
+      },
+    ],
+  };
+  const ctx = {
+    admin: makeOrderingAdmin(tables) as unknown as Parameters<typeof directActionHandlers.apply_loyalty_coupon>[0]["admin"],
+    workspaceId: "ws-1",
+    ticketId: "t-4",
+  } as Parameters<typeof directActionHandlers.apply_loyalty_coupon>[0];
+  const out = await directActionHandlers.apply_loyalty_coupon(ctx, {
+    type: "apply_loyalty_coupon",
+    code: "LOYALTY-15-ORIG",
+    contract_id: "gid://shopify/SubscriptionContract/776",
+  });
+  assert.equal(out.success, false, "different-value coupon is not the successor — the single-$ ceiling stacking refusal must still fire");
+  assert.match(out.error ?? "", /no stacking/i);
 });
