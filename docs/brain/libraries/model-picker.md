@@ -12,7 +12,7 @@ The "hard" signals below are still **computed and surfaced** in `reason` as `har
 
 - `ai_turn_count >= 1` — turn 1 didn't close the ticket
 - Complex tags: `crisis*`, `pb:*`, `j:cancel*`, `wb`, `dunning:active`, `fraud`
-- Active crisis enrollment for this customer
+- Active crisis enrollment for this customer — `crisis_customer_actions` (`tier3_response`/`paused_at`/`removed_item_at IS NULL`, `cancelled = false`) joined to the enrollment's subscription, dropping any row whose subscription status is `cancelled` (lockstep with playbook-executor's `hasActiveCrisisEnrollment`; [[../specs/cancel-after-renewal]] Phase 1 — Brooke Miedema's crisis row on a cancelled sub)
 - Linked accounts (`customer_links` row exists for this customer)
 - Customer has 2+ active subscriptions
 - Recently merged into this ticket (sibling row with `merged_into=tid` in last 24h)

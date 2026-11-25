@@ -2444,7 +2444,22 @@ async function handleApplyPolicy(
     };
   }
 
-  response += `\n\nLet me know if I can help with anything.`;
+  // When every identified order is an out-of-policy RECURRING RENEWAL, close with one
+  // plain sentence that the renewal isn't refundable so the customer isn't left to ask
+  // again (ticket b44584dc Brooke; Juliana asked three times). The timeline alone never
+  // said it outright. [[cancel-after-renewal]] Phase 3.
+  const allRecurringRenewals =
+    inPolicy.length === 0 &&
+    outOfPolicy.length > 0 &&
+    outOfPolicy.every((ordNum) =>
+      failureReasons.some((r) => r.startsWith(`${ordNum}:`) && r.includes("recurring")),
+    );
+  if (allRecurringRenewals) {
+    const refundsPolicyLink = policy.policy_url ? ` (${policy.policy_url})` : "";
+    response += `\n\nYour subscription renewal isn't eligible for a refund or return under our policy${refundsPolicyLink}.`;
+  } else {
+    response += `\n\nLet me know if I can help with anything.`;
+  }
 
   return {
     action: "advance", newStep: step.step_order + 1, response,
@@ -3529,16 +3544,48 @@ async function hasActiveCrisisEnrollment(
   workspaceId: string,
   customerId: string,
 ): Promise<boolean> {
-  const { count } = await admin
+  // Join to the enrollment's subscription and drop rows whose subscription is
+  // CANCELLED. Ground truth: Brooke Miedema's Strawberry Lemonade crisis row had
+  // cancelled=false but pointed at a cancelled subscription — counting it returned
+  // `crisis_customer_defers_to_orchestrator` and kept her cancel-after-renewal refund
+  // out of the Refund playbook. A crisis enrollment only counts while its subscription
+  // is still live. Lockstep with model-picker's `hard:crisis-enrollment` predicate —
+  // if one widens, widen both.
+  const { data } = await admin
     .from("crisis_customer_actions")
-    .select("id", { count: "exact", head: true })
+    .select("id, subscriptions(status)")
     .eq("workspace_id", workspaceId)
     .eq("customer_id", customerId)
     .is("tier3_response", null)
     .is("paused_at", null)
     .is("removed_item_at", null)
     .eq("cancelled", false);
-  return (count ?? 0) > 0;
+  // `crisis_customer_actions_active_sub`: crisis rows whose linked subscription is still
+  // live (not cancelled). An empty set means every crisis row sits on a cancelled sub, so
+  // the customer is NOT on the white-glove track and a cancel-after-renewal refund may
+  // enter the Refund playbook.
+  const crisis_customer_actions_active_sub = ((data ?? []) as unknown[]).filter((row) =>
+    crisisEnrollmentSubscriptionNotCancelled(row),
+  );
+  return crisis_customer_actions_active_sub.length > 0;
+}
+
+/**
+ * A crisis enrollment counts as active only while its linked subscription is not
+ * cancelled. A null/absent subscription still counts (behavior unchanged); only a
+ * subscription whose status is explicitly `cancelled` drops the row. Duplicated (not
+ * imported) by model-picker's identical filter to avoid a module cycle — widen both
+ * together.
+ */
+function crisisEnrollmentSubscriptionNotCancelled(row: unknown): boolean {
+  const sub = (row as {
+    subscriptions?:
+      | { status?: string | null }
+      | Array<{ status?: string | null }>
+      | null;
+  } | null)?.subscriptions;
+  const status = Array.isArray(sub) ? sub[0]?.status : sub?.status;
+  return status !== "cancelled";
 }
 
 export async function routeIntentToPlaybook(
