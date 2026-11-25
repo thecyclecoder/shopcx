@@ -8201,20 +8201,23 @@ export function isForeignSupabasePostgresMissingSpecPhasesWorkspaceSlugLookupNoi
  * Foreign-app noise — Postgres reporting `column order_refunds.<col> does not exist` for an
  * ad hoc SELECT lookup / PostgREST direct-REST call against `public.order_refunds`, where
  * `<col>` is any of the off-schema columns the same foreign caller names:
- * `{customer_id, order_number, reason}`. The `order_refunds` table exists as a product table
- * (per-refund rows — see [[../tables/order_refunds]]), but it has none of these columns:
- * every ShopCX refund lookup joins through `order_id` / `workspace_id`, never a direct
- * `customer_id` / `order_number` / `reason` on the refund row. Grep confirms no ShopCX caller
- * queries them; the error only reaches Supabase's `postgres_logs` feed when an external /
+ * `{customer_id, order_number, reason, shopify_order_id}`. The `order_refunds` table exists as
+ * a product table (per-refund rows — see [[../tables/order_refunds]]), but it has none of these
+ * columns: every ShopCX refund lookup joins through `order_id` / `workspace_id`, never a direct
+ * `customer_id` / `order_number` / `reason` / `shopify_order_id` on the refund row (Shopify is
+ * being sunset — internal joins key on UUIDs, never `shopify_*_id`). Grep confirms no ShopCX
+ * caller queries them; the error only reaches Supabase's `postgres_logs` feed when an external /
  * stale PostgREST client (a foreign app assuming a generic `.customer_id` column, a stale
  * SQL Editor query, a deprecated integration) issues a `select=... customer_id ... order_number ... reason ...`
  * against `/rest/v1/order_refunds`. Which column Postgres flags first is just whichever
  * appears first in the caller's off-schema `select=...` list, so each column opens a FRESH
  * Control Tower signature for ONE query we do not own — `supabase-logs:d919f14fa13296c8`
  * (customer_id) and `supabase-logs:5695252ec06074f3` (order_number) are the same foreign
- * read. There is no lever from ShopCX to make that query resolve — paging Platform on it is
- * repair work for a query we do not own, so the capture filter drops the whole off-schema
- * column set rather than accreting a per-column filter each time the parser names a new one.
+ * read, and `supabase-logs:7370f2d3941a3138` (shopify_order_id) is yet another rendering of
+ * the same foreign SELECT. There is no lever from ShopCX to make that query resolve — paging
+ * Platform on it is repair work for a query we do not own, so the capture filter drops the
+ * whole off-schema column set rather than accreting a per-column filter each time the parser
+ * names a new one.
  *
  * Sibling of `isForeignSupabasePostgresMissingSpecPhasesWorkspaceSlugLookupNoise` — the
  * same narrow-gating shape (exact `column <table>.<name> does not exist` + bare
@@ -8234,17 +8237,19 @@ export function isForeignSupabasePostgresMissingOrderRefundsCustomerIdAdhocNoise
   // names — the column Postgres flags first is whichever appears first in the caller's
   // `select=...` list, so customer_id / order_number / reason each open a fresh Control
   // Tower signature for one query we do not own. Accept the full off-schema column set
-  // ({customer_id, order_number, reason}) so the order_number variant
-  // (`supabase-logs:5695252ec06074f3`) and the reason variant drop at capture too. A
-  // legitimate order_refunds column (a real schema regression) is NOT in this set and
-  // still pages.
+  // ({customer_id, order_number, reason, shopify_order_id}) so the order_number variant
+  // (`supabase-logs:5695252ec06074f3`), the reason variant, and the shopify_order_id variant
+  // (`supabase-logs:7370f2d3941a3138`) drop at capture too. A legitimate order_refunds column
+  // (a real schema regression) is NOT in this set and still pages.
   const messageMatches =
     stripped === "column order_refunds.customer_id does not exist" ||
     stripped === "column public.order_refunds.customer_id does not exist" ||
     stripped === "column order_refunds.order_number does not exist" ||
     stripped === "column public.order_refunds.order_number does not exist" ||
     stripped === "column order_refunds.reason does not exist" ||
-    stripped === "column public.order_refunds.reason does not exist";
+    stripped === "column public.order_refunds.reason does not exist" ||
+    stripped === "column order_refunds.shopify_order_id does not exist" ||
+    stripped === "column public.order_refunds.shopify_order_id does not exist";
   if (!messageMatches) return false;
   const q = (query ?? "").trim().toLowerCase();
   if (!q) return false;
