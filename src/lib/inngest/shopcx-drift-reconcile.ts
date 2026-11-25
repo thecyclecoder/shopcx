@@ -65,10 +65,10 @@ export const shopcxDriftReconcileCron = inngest.createFunction(
 
     // ⭐ The cadence check — what drift structurally cannot see.
     const late = await step.run("find-late-subscriptions", async () => {
-      const all: { contractId: string; extraDays: number; inDunning: boolean; inherited: boolean; internal: boolean; customerScheduled: boolean; escalatable: boolean }[] = [];
+      const all: { contractId: string; extraDays: number; inDunning: boolean; inherited: boolean; internal: boolean; customerScheduled: boolean; contractAgrees: boolean; escalatable: boolean }[] = [];
       for (const workspaceId of workspaces) {
         for (const l of await findLateSubscriptions(workspaceId)) {
-          all.push({ contractId: l.contractId, extraDays: l.extraDays, inDunning: l.inDunning, inherited: l.inheritedFromAppstle, internal: l.internalAccount, customerScheduled: Boolean(l.customerScheduled), escalatable: isEscalatableLate(l) });
+          all.push({ contractId: l.contractId, extraDays: l.extraDays, inDunning: l.inDunning, inherited: l.inheritedFromAppstle, internal: l.internalAccount, customerScheduled: Boolean(l.customerScheduled), contractAgrees: Boolean(l.contractAgreesWithNextDate), escalatable: isEscalatableLate(l) });
         }
       }
       return all;
@@ -104,7 +104,7 @@ export const shopcxDriftReconcileCron = inngest.createFunction(
       });
     }
 
-    console.log(`[shopcx-drift] checked=${checked} repaired=${repaired} drift=${JSON.stringify(drift)} late=${lateUnexplained.length} (+${late.length - lateUnexplained.length} explained: dunning, inherited, internal or customer-scheduled)`);
+    console.log(`[shopcx-drift] checked=${checked} repaired=${repaired} drift=${JSON.stringify(drift)} late=${lateUnexplained.length} (+${late.length - lateUnexplained.length} explained: dunning, inherited, internal, customer-scheduled or contract-agrees)`);
 
     await step.run("beat", () =>
       emitCronHeartbeat(FN_ID, {
@@ -116,6 +116,7 @@ export const shopcxDriftReconcileCron = inngest.createFunction(
           lateInherited: late.filter((l) => l.inherited && !l.inDunning).length,
           lateInternal: late.filter((l) => l.internal).length,
           lateCustomerScheduled: late.filter((l) => l.customerScheduled).length,
+          lateContractAgrees: late.filter((l) => l.contractAgrees).length,
         },
       }),
     );
