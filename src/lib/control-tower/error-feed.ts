@@ -7221,14 +7221,25 @@ export function isForeignSupabasePostgresMissingJourneySessionsJourneyNameColumn
  * `journey_sessions.journey_name` / `trigger_intent` / `expires_at` ones.
  *
  * `true` ONLY when BOTH markers are present:
- *   1. the message is Postgres's canonical column-missing shape for THIS column —
- *      trimmed equal to `column journey_sessions.updated_at does not exist` (with or
- *      without the `public.` qualifier and any leading `ERROR: ` prefix Postgres includes
- *      on the logs surface), AND
- *   2. the `parsed.query` attribute is a SELECT-lookup on `public.journey_sessions` —
- *      either (a) the bare `select ... from public.journey_sessions` shape, OR (b) the
- *      PostgREST-generated `WITH pgrst_source AS ( SELECT ... FROM
- *      "public"."journey_sessions" ... )` CTE wrapper form with double-quoted identifiers.
+ *   1. the message is Postgres's canonical column-missing shape for THIS column — in one of
+ *      two forms:
+ *        (a) the FULL-TABLE form, trimmed equal to
+ *            `column journey_sessions.updated_at does not exist` (with or without the
+ *            `public.` qualifier and any leading `ERROR: ` prefix Postgres includes on the
+ *            logs surface), OR
+ *        (b) the ALIASED form `column <alias>.updated_at does not exist` — Postgres names
+ *            the TABLE ALIAS (not the full table) when the offending external query aliased
+ *            `journey_sessions` in its `FROM` clause (e.g. `... from journey_sessions js ...`
+ *            → `column js.updated_at does not exist`), AND
+ *   2. the `parsed.query` attribute ties the lookup to `public.journey_sessions`:
+ *        - for the FULL-TABLE message, either (a) the bare
+ *          `select ... from public.journey_sessions` shape, OR (b) the PostgREST-generated
+ *          `WITH pgrst_source AS ( SELECT ... FROM "public"."journey_sessions" ... )` CTE
+ *          wrapper form with double-quoted identifiers;
+ *        - for the ALIASED message, `aliasBoundToJourneySessions` — the lowercased query
+ *          both binds `<alias>` to `journey_sessions` (`from [public.]journey_sessions
+ *          [as] <alias>`) AND references `<alias>.updated_at`, so the aliased column-missing
+ *          error is provably the same foreign `journey_sessions.updated_at` read.
  *
  * Narrowly gated so:
  *   - a column-missing error for ANY OTHER column on `journey_sessions` (a real product-
@@ -7250,16 +7261,35 @@ export function isForeignSupabasePostgresMissingJourneySessionsUpdatedAtColumnAd
   const msg = (message ?? "").trim();
   if (!msg) return false;
   const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
-  const messageMatches =
-    stripped === "column journey_sessions.updated_at does not exist" ||
-    stripped === "column public.journey_sessions.updated_at does not exist";
-  if (!messageMatches) return false;
   const q = (query ?? "").trim().toLowerCase();
   if (!q) return false;
-  const bareSelect = /^select\b[\s\S]*\bfrom\s+(?:public\.)?journey_sessions\b/.test(q);
-  const pgrstCte =
-    /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"?(?:public"?\.)?"?journey_sessions\b/.test(q);
-  return bareSelect || pgrstCte;
+
+  // Form (a): Postgres names the FULL TABLE — the un-aliased foreign read.
+  const fullTableMessageMatches =
+    stripped === "column journey_sessions.updated_at does not exist" ||
+    stripped === "column public.journey_sessions.updated_at does not exist";
+  if (fullTableMessageMatches) {
+    const bareSelect = /^select\b[\s\S]*\bfrom\s+(?:public\.)?journey_sessions\b/.test(q);
+    const pgrstCte =
+      /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"?(?:public"?\.)?"?journey_sessions\b/.test(q);
+    return bareSelect || pgrstCte;
+  }
+
+  // Form (b): Postgres names a TABLE ALIAS — `column <alias>.updated_at does not exist` —
+  // because the offending external query aliased `journey_sessions` in its FROM clause.
+  const aliasMatch = stripped.match(/^column\s+([a-z_][a-z0-9_$]*)\.updated_at does not exist$/i);
+  if (aliasMatch) {
+    const alias = aliasMatch[1].toLowerCase();
+    // `journey_sessions` itself is the full-table form handled above — never an alias here.
+    if (alias === "journey_sessions") return false;
+    const aliasRe = alias.replace(/[$]/g, "\\$&");
+    const aliasBoundToJourneySessions =
+      new RegExp(`\\bfrom\\s+(?:public\\.)?journey_sessions\\s+(?:as\\s+)?${aliasRe}\\b`).test(q) &&
+      new RegExp(`\\b${aliasRe}\\.updated_at\\b`).test(q);
+    return aliasBoundToJourneySessions;
+  }
+
+  return false;
 }
 
 /**
