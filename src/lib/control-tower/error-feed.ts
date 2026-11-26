@@ -7264,6 +7264,66 @@ export function isForeignSupabasePostgresMissingJourneySessionsUpdatedAtColumnAd
 
 /**
  * Foreign-app noise — Postgres reporting a missing column for an ad hoc SELECT lookup of
+ * `journey_sessions.journey_definition_id`. Our `journey_sessions` table has never carried a
+ * `journey_definition_id` column — the real FK to the journey definition is `journey_id`. No
+ * ShopCX code path (src/, scripts/, shopify-extension/, supabase/migrations/, docs/brain/)
+ * issues a SELECT that names `journey_sessions.journey_definition_id`. The message appears on
+ * Supabase's `postgres_logs` feed only when an external / manual tool (a BI / ETL client, a
+ * foreign direct-REST reader guessing the column name, a stale exploratory query, a third-party
+ * integration) does a raw `select ... journey_definition_id ... from public.journey_sessions`
+ * lookup — or the PostgREST `WITH pgrst_source AS ( SELECT ... FROM "public"."journey_sessions"
+ * ... )` CTE wrapper the same client emits over the REST endpoint. There is no lever from ShopCX
+ * to make that query resolve — paging Platform on it (Control Tower signature
+ * `supabase-logs:41a56edd05f933c9`) is repair work for a query we don't own.
+ *
+ * Sibling of `isForeignSupabasePostgresMissingJourneySessionsUpdatedAtColumnAdhocNoise` — same
+ * narrow-gating shape, scoped to the `journey_sessions.journey_definition_id` lookup instead of
+ * the `journey_sessions.updated_at` / `trigger_intent` / `journey_name` ones.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical column-missing shape for THIS column —
+ *      trimmed equal to `column journey_sessions.journey_definition_id does not exist` (with or
+ *      without the `public.` qualifier and any leading `ERROR: ` prefix Postgres includes
+ *      on the logs surface), AND
+ *   2. the `parsed.query` attribute is a SELECT-lookup on `public.journey_sessions` —
+ *      either (a) the bare `select ... from public.journey_sessions` shape, OR (b) the
+ *      PostgREST-generated `WITH pgrst_source AS ( SELECT ... FROM
+ *      "public"."journey_sessions" ... )` CTE wrapper form with double-quoted identifiers.
+ *
+ * Narrowly gated so:
+ *   - a column-missing error for ANY OTHER column on `journey_sessions` (a real product-
+ *     schema regression on a live column) still pages,
+ *   - a column-missing error for `journey_definition_id` on ANY OTHER table still pages,
+ *   - the same message attached to a DIFFERENT statement shape (INSERT / UPDATE /
+ *     DELETE / DDL on `journey_sessions`) still pages — the pin is the SELECT-lookup shape,
+ *   - a FATAL / PANIC / constraint violation is untouched (different message).
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not
+ * record`, so returning null here fully suppresses the row (no error_event, no
+ * loop_alert, no signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresMissingJourneySessionsJourneyDefinitionIdColumnAdhocNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column journey_sessions.journey_definition_id does not exist" ||
+    stripped === "column public.journey_sessions.journey_definition_id does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  const bareSelect = /^select\b[\s\S]*\bfrom\s+(?:public\.)?journey_sessions\b/.test(q);
+  const pgrstCte =
+    /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"?(?:public"?\.)?"?journey_sessions\b/.test(q);
+  return bareSelect || pgrstCte;
+}
+
+/**
+ * Foreign-app noise — Postgres reporting a missing column for an ad hoc SELECT lookup of
  * `journey_definitions.intent` or `journey_definitions.steps`. Our `journey_definitions`
  * table has never carried an `intent` column nor a `steps` column — no ShopCX code path
  * (src/, scripts/, shopify-extension/, supabase/migrations/, docs/brain/) issues a SELECT
