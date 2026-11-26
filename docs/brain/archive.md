@@ -12,6 +12,8 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **apply_loyalty_coupon self-heal retry recognizes regen-successor code** · verified 2026-11-25 · → [[../libraries/action-executor]]
+- **A cancel-after-renewal refund request runs the Refund playbook and never reaches the founder** · verified 2026-11-25 · → [[../playbooks/refund]], [[../libraries/playbook-executor]], [[../libraries/model-picker]]
 - **Drop foreign direct-REST 'subscriptions.last_charged_at does not exist' noise at capture** · verified 2026-11-25 · → [[../libraries/error-feed]]
 - **Scope out foreign order_refunds.shopify_order_id phantom-column noise at capture** · verified 2026-11-25 · → [[../libraries/error-feed]] · [[../tables/order_refunds]]
 - **Subscription-health 'late' monitor: stop paging when the late next-charge date is the one Shopify's own contract holds** · verified 2026-11-25 · → [[../libraries/commerce__shopcx-drift-reconciler]]
