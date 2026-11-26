@@ -71,6 +71,7 @@ import {
   isForeignSupabasePostgresSubscriptionsLinkedCustomerIdEdgeListNoise,
   isForeignSupabasePostgresMissingLoyaltyRedemptionsLineageColumnNoise,
   isForeignSupabasePostgresMissingCustomerPaymentMethodsCardTypeColumnNoise,
+  isForeignSupabasePostgresMissingCustomerPaymentMethodsCardLast4ColumnNoise,
   isForeignSupabasePostgresMissingCustomerPaymentMethodsLinkGroupIdColumnNoise,
   isForeignSupabasePostgresMissingDashboardNotificationsDismissedAtColumnNoise,
   isForeignSupabasePostgresMissingAgentJobsFinishedAtColumnAdhocNoise,
@@ -676,6 +677,13 @@ const LOG_QUERIES: LogQuery[] = [
       // shape on `customer_payment_methods` (bare or PostgREST CTE wrapper) — a different missing
       // column, a non-SELECT write, or a FATAL still pages.
       if (isForeignSupabasePostgresMissingCustomerPaymentMethodsCardTypeColumnNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: a stale external/REST client SELECTs a `card_last4`
+      // display column from `customer_payment_methods` that the table never carried — no ShopCX
+      // code path reads it (our real column is `last4`). Gated to the exact
+      // `column customer_payment_methods.card_last4 does not exist` message AND the SELECT-lookup
+      // shape on `customer_payment_methods` (bare or PostgREST CTE wrapper) — a different missing
+      // column, a non-SELECT write, or a FATAL still pages.
+      if (isForeignSupabasePostgresMissingCustomerPaymentMethodsCardLast4ColumnNoise(message, query)) return null;
       // Drop foreign-app noise at capture: a stale external/REST client SELECTs a `link_group_id`
       // column from `customer_payment_methods` that the table never carried — no ShopCX code path
       // reads `customer_payment_methods.link_group_id`. The resulting undefined_column ERROR is
