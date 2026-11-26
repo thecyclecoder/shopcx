@@ -1,0 +1,1 @@
+- **Restart out-of-stock swap must respect customers who chose to wait for restock** · verified 2026-11-26 · → [[../lifecycles/crisis-campaign]]
