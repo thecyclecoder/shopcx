@@ -3,6 +3,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { inngest } from "@/lib/inngest/client";
 import { subscribeToEmailMarketing, subscribeToSmsMarketing } from "@/lib/shopify-marketing";
 import { dispatchInboundMessage } from "@/lib/inngest/dispatch-inbound-message";
+import { resolveCancelFlow } from "@/lib/journey-cancel-flow";
 
 // POST: Complete a journey session
 export async function POST(
@@ -53,8 +54,11 @@ export async function POST(
   // nextOrderJourney, not cancelJourney. The client flag is honored ONLY on a session the server
   // provisioned as a next-order journey: a token minted for any other journey (discount signup,
   // add payment method) must never reach the cancel / save-offer path by setting a body flag.
-  const nextOrderCancel = config.nextOrderJourney === true && cancel_flow === true;
-  const cancelFlow = config.cancelJourney === true || nextOrderCancel;
+  // resolveCancelFlow derives the cancel decision from journey TYPE as well as the flags,
+  // so a cancel_subscription session (whose config_snapshot lacks cancelJourney) still reaches
+  // the shared cancel handler. The client cancel_flow flag is honored only on a next-order
+  // session the server provisioned — see src/lib/journey-cancel-flow.ts.
+  const cancelFlow = resolveCancelFlow(config, cancel_flow);
 
   // ── Code-driven journey completion (step-builder based) ──
   if (config.codeDriven && journeyType) {
@@ -117,11 +121,8 @@ export async function POST(
       }
     }
 
-    if (journeyType === "cancel_subscription" || journeyType === "cancellation" || journeyType === "cancel") {
-      // Delegate to the cancelJourney handler below
-      // Set the flag so the handler picks it up after the code-driven block
-      config.cancelJourney = true;
-    }
+    // cancel_subscription / cancellation / cancel sessions are routed to the shared cancel
+    // handler by resolveCancelFlow (from journeyType), so no flag mutation is needed here.
 
     // ── Shipping Address Journey ──
     if (journeyType === "shipping_address" || journeyType === "address_change") {
@@ -892,6 +893,7 @@ export async function POST(
     // whether we send them to the portal item editor.
     let actionType = "unknown";
     let saveFailed = false;
+    let cancelFailed = false;
     let savedAction = "";
     let redirectUrl: string | null = null;
 
@@ -1046,6 +1048,7 @@ export async function POST(
         "Customer via cancel journey",
       );
 
+      cancelFailed = !result.success;
       if (result.success) {
         actionLog.push(`Cancelled subscription ${selectedSub.contractId} (${selectedSub.items.map(i => i.title).join(", ")})`);
       } else {
@@ -1078,22 +1081,45 @@ export async function POST(
 
       // Tag ticket
       if (session.ticket_id) {
-        const { addTicketTag } = await import("@/lib/ticket-tags");
-        await addTicketTag(session.ticket_id, "jo:negative");
+        if (cancelFailed) {
+          // Verify-before-report: the cancel did NOT land. Never close the ticket or tell the
+          // customer it worked — leave it OPEN for an agent and raise a high-severity alert so a
+          // human finishes the cancel. Mirrors the saveFailed path below.
+          await admin.from("tickets").update({
+            status: "open",
+            handled_by: null,
+            updated_at: new Date().toISOString(),
+          }).eq("id", session.ticket_id);
+          await admin.from("dashboard_notifications").insert({
+            workspace_id: wsId,
+            type: "system",
+            title: "Cancel journey: cancel failed to apply",
+            body: `Ticket ${session.ticket_id} — customer confirmed a cancel in the cancel journey but subscriptionAction failed. Finish cancelling manually.`,
+            metadata: {
+              severity: "high",
+              ticket_id: session.ticket_id,
+              journey_session_id: session.id,
+              contract_id: selectedSub.contractId,
+              error: result.error || null,
+            },
+          });
+        } else {
+          const { addTicketTag } = await import("@/lib/ticket-tags");
+          await addTicketTag(session.ticket_id, "jo:negative");
 
-        // Close contract: status=closed MUST carry closed_at (Cora's 30-min
-        // settle gate at src/lib/inngest/ticket-analysis-cron.ts selects on
-        // `closed_at IS NOT NULL`). Stamp resolved_at, closed_at, updated_at
-        // together so the analyzer can pick this ticket up after the settle.
-        const ts = new Date().toISOString();
-        await admin.from("tickets").update({
-          status: "closed",
-          resolved_at: ts,
-          closed_at: ts,
-          updated_at: ts,
-          journey_step: 99,
-        }).eq("id", session.ticket_id);
-
+          // Close contract: status=closed MUST carry closed_at (Cora's 30-min
+          // settle gate at src/lib/inngest/ticket-analysis-cron.ts selects on
+          // `closed_at IS NOT NULL`). Stamp resolved_at, closed_at, updated_at
+          // together so the analyzer can pick this ticket up after the settle.
+          const ts = new Date().toISOString();
+          await admin.from("tickets").update({
+            status: "closed",
+            resolved_at: ts,
+            closed_at: ts,
+            updated_at: ts,
+            journey_step: 99,
+          }).eq("id", session.ticket_id);
+        }
       }
     } else if (outcome?.startsWith("saved_")) {
       // Customer accepted a remedy — look up type from DB
@@ -1234,9 +1260,12 @@ export async function POST(
         }
       }
 
-      // Send customer-facing confirmation
+      // Send customer-facing confirmation. On a failed cancel, never send the
+      // "your subscription has been cancelled" message — send the honest apology instead.
       const confirmMsg = outcome === "cancelled"
-        ? `<p>Your subscription has been cancelled. You won't be charged again.${otherSubsNote}</p>`
+        ? (cancelFailed
+            ? `<p>We couldn't finish cancelling automatically. Our team has been notified and will confirm with you shortly.</p>`
+            : `<p>Your subscription has been cancelled. You won't be charged again.${otherSubsNote}</p>`)
         : `<p>${savedConfirmation(saveFailed, redirectUrl, savedAction)}</p>`;
 
       // Get ticket info for channel-aware delivery
@@ -1292,7 +1321,9 @@ export async function POST(
     // keyed by the journey_sessions row so M3/M4 can attribute the outcome to the arm. A save
     // that failed to apply is NOT reported as saved (verify-before-report).
     if (config.nextOrderJourney === true) {
-      const lifecycle = outcome === "cancelled" ? "cancelled" : (saveFailed ? "save_failed" : "saved");
+      const lifecycle = outcome === "cancelled"
+        ? (cancelFailed ? "cancel_failed" : "cancelled")
+        : (saveFailed ? "save_failed" : "saved");
       await admin.from("journey_step_events").insert({
         session_id: session.id,
         workspace_id: wsId,
@@ -1303,19 +1334,28 @@ export async function POST(
       });
     }
 
-    // Mark session completed
+    // Mark session completed. Verify-before-report: a failed cancel is stored as
+    // outcome='cancel_failed', and outcome_action_taken is true ONLY when the cancel (or save)
+    // actually applied.
+    const sessionOutcome = outcome === "cancelled" && cancelFailed ? "cancel_failed" : outcome;
+    const outcomeActionTaken =
+      (outcome === "cancelled" && !cancelFailed) ||
+      (!!outcome?.startsWith("saved_") && !saveFailed);
     await admin.from("journey_sessions").update({
       status: "completed",
-      outcome,
+      outcome: sessionOutcome,
+      outcome_action_taken: outcomeActionTaken,
       responses: responses || {},
       completed_at: new Date().toISOString(),
     }).eq("id", session.id);
 
     const message = outcome === "cancelled"
-      ? "Your subscription has been cancelled. You won't be charged again. You're always welcome back."
+      ? (cancelFailed
+          ? "We couldn't finish cancelling automatically. Our team has been notified and will confirm with you shortly."
+          : "Your subscription has been cancelled. You won't be charged again. You're always welcome back.")
       : savedConfirmation(saveFailed, redirectUrl, savedAction);
 
-    return NextResponse.json({ success: !saveFailed, message, ...(redirectUrl ? { redirect_url: redirectUrl } : {}) });
+    return NextResponse.json({ success: !saveFailed && !cancelFailed, message, ...(redirectUrl ? { redirect_url: redirectUrl } : {}) });
   }
 
   // Handle declined — use journey-delivery nudge system
