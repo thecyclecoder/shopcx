@@ -344,6 +344,7 @@
     "test:error-feed-subscriptions-billing-engine-noise": "tsx --test src/lib/control-tower/error-feed.subscriptions-billing-engine-noise.test.ts",
     "test:error-feed-subscriptions-billing-provider-noise": "tsx --test src/lib/control-tower/error-feed.subscriptions-billing-provider-noise.test.ts",
     "test:error-feed-subscriptions-source-noise": "tsx --test src/lib/control-tower/error-feed.subscriptions-source-noise.test.ts",
+    "test:error-feed-customer-payment-methods-card-last4-noise": "tsx --test src/lib/control-tower/error-feed.customer-payment-methods-card-last4-noise.test.ts",
     "test:error-feed-adhoc-sku-sales-round-type-noise": "tsx --test src/lib/control-tower/error-feed.adhoc-sku-sales-round-type-noise.test.ts",
     "test:error-feed-crisis-customer-actions-contract-id-noise": "tsx --test src/lib/control-tower/error-feed.crisis-customer-actions-contract-id-noise.test.ts",
     "test:error-feed-adhoc-monthly-revenue-snapshots-to-char-text-noise": "tsx --test src/lib/control-tower/error-feed.adhoc-monthly-revenue-snapshots-to-char-text-noise.test.ts",
