@@ -357,6 +357,7 @@
     "test:error-feed-agent-jobs-ticket-id-noise": "tsx --test src/lib/control-tower/error-feed.agent-jobs-ticket-id-noise.test.ts",
     "test:error-feed-tickets-assignee-type-noise": "tsx --test src/lib/control-tower/error-feed.tickets-assignee-type-noise.test.ts",
     "test:error-feed-journey-sessions-updated-at-noise": "tsx --test src/lib/control-tower/error-feed.journey-sessions-updated-at-noise.test.ts",
+    "test:error-feed-journey-sessions-journey-definition-id-noise": "tsx --test src/lib/control-tower/error-feed.journey-sessions-journey-definition-id-noise.test.ts",
     "test:error-feed-journey-step-events-journey-session-id-noise": "tsx --test src/lib/control-tower/error-feed.journey-step-events-journey-session-id-noise.test.ts",
     "test:error-feed-subscriptions-tax-exempt-noise": "tsx --test src/lib/control-tower/error-feed.subscriptions-tax-exempt-noise.test.ts",
     "test:error-feed-subscriptions-last-charged-at-noise": "tsx --test src/lib/control-tower/error-feed.subscriptions-last-charged-at-noise.test.ts",
