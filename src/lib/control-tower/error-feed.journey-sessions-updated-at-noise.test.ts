@@ -50,6 +50,37 @@ test("isForeignSupabasePostgresMissingJourneySessionsUpdatedAtColumnAdhocNoise d
   );
 });
 
+test("isForeignSupabasePostgresMissingJourneySessionsUpdatedAtColumnAdhocNoise drops the ALIASED foreign SELECT shape (the real incident) and keeps an alias bound to another table", () => {
+  // (a) The real incident shape: the external query aliased `journey_sessions` as `js`, so
+  // Postgres reported the missing column under the alias — `column js.updated_at does not exist`.
+  // `aliasBoundToJourneySessions` holds (the FROM binds `js` to `journey_sessions` and the query
+  // references `js.updated_at`), so this is the same foreign read and must drop.
+  assert.equal(
+    isForeignSupabasePostgresMissingJourneySessionsUpdatedAtColumnAdhocNoise(
+      "column js.updated_at does not exist",
+      "select js.id, js.customer_id, js.status, js.outcome, js.started_at, js.completed_at, js.updated_at from journey_sessions js where js.id = any($1::uuid[]) and js.status <> 'pending' and coalesce(js.started_at, js.updated_at) >= $2",
+    ),
+    true,
+  );
+  // The `as`-qualified + `public.`-qualified alias binding is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingJourneySessionsUpdatedAtColumnAdhocNoise(
+      "column js.updated_at does not exist",
+      "select js.id, js.updated_at from public.journey_sessions as js limit 10",
+    ),
+    true,
+  );
+  // (b) Negative: the `js` alias is bound to a DIFFERENT table — a real regression on that other
+  // relation, not our foreign `journey_sessions` read — so it must still page.
+  assert.equal(
+    isForeignSupabasePostgresMissingJourneySessionsUpdatedAtColumnAdhocNoise(
+      "column js.updated_at does not exist",
+      "select js.id, js.updated_at from job_schedules js where js.id = $1",
+    ),
+    false,
+  );
+});
+
 test("isForeignSupabasePostgresMissingJourneySessionsUpdatedAtColumnAdhocNoise KEEPS a different column, a non-SELECT write, another table, and empty markers (real regressions still page)", () => {
   // A DIFFERENT missing column on `journey_sessions` is a real schema regression and must still
   // page — the pin covers `updated_at` only.
