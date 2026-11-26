@@ -1,0 +1,1 @@
+- **Scope out foreign direct-REST noise: journey_sessions.journey_definition_id missing-column SELECT** · verified 2026-11-26 · → [[../libraries/error-feed]]
