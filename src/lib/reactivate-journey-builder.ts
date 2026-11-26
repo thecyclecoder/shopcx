@@ -173,7 +173,7 @@ export async function buildReactivateSteps(
   const gifts = await loadWinbackGifts(admin, workspaceId);
   // Out-of-stock flavors (active crisis) are swapped on restart; say so BEFORE they click.
   const { crisisSwapsForItems, crisisNotice } = await import("@/lib/crisis-restart-swap");
-  const notice = crisisNotice(await crisisSwapsForItems(admin, workspaceId, sub.items));
+  const notice = crisisNotice(await crisisSwapsForItems(admin, workspaceId, sub.items, sub.id));
   const options = gifts.length
     ? [
         ...gifts.map((g) => ({ value: giftOptionValue(g.variant_id), label: `Restart + free ${g.label}` })),

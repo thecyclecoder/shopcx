@@ -194,6 +194,14 @@ When a customer messages in independently — e.g. "is Mixed Berry back yet?" �
 
 See [[../lifecycles/ai-multi-turn]] crisis rules.
 
+## Waiting for restock (customer declined the substitute)
+
+A customer can refuse the substitute flavor and ask to wait for their original flavor to come back. The `crisis_enroll` direct action ([[../libraries/action-executor]]) accepts `hold_for_restock=true` for exactly this case — it records `tier1_response='rejected'` (NOT `'accepted_swap'`) and sets [[../tables/crisis_customer_actions]].`hold_for_restock=true`, keeping `auto_readd=true`. If the sub is already enrolled, the call updates `hold_for_restock=true` on the existing row instead of returning early (so a prior `accepted_swap` enrollment can be corrected once the customer speaks up). The orchestrator's `get_crisis_status` guidance tells Sonnet to use this path whenever the customer says they don't want the substitute and will wait.
+
+Why it matters: without this flag every later automation reads the customer as having accepted the swap. The restart swap ([[../libraries/crisis-restart-swap]]) is the concrete hazard — it would otherwise swap such a customer to the substitute and charge them on restart (ground truth: Kristina, sub 2241b7a5, Cocoa crisis 99a58332, who was swapped to Hazelnut and billed, then cancelled). Spec `crisis-restart-swap-respects-wait-for-restock`.
+
+On restart (portal or win-back journey), `crisisSwapsForItems` now takes the subscription id and reads that row: `customerIsWaitingForRestock(row)` (true for `hold_for_restock`, a `rejected` tier 1/2 response, or a tier 3 `accepted_pause`/`accepted_remove`) turns the line's plan into a **hold** instead of a swap. `applyCrisisSwapsAfterRestart` then pauses the whole sub (no auto-resume date) and stamps the existing row `paused_at`, `auto_resume=true`, so crisis Resolve resumes it with the original flavor — the customer is never charged for the substitute. A pre-existing row on a plain swap is only patched on `tier1_swapped_to`/`auto_swap_back`/`updated_at`, never wholesale-overwritten. The restart page (`crisisNotice`) and the internal note (`crisisSwapNote`) both render the hold copy.
+
 ## Files touched
 
 | File | Purpose |

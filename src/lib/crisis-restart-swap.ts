@@ -55,6 +55,12 @@ export type CrisisRow = {
 export type CrisisSwapPlan = {
   crisisId: string;
   item: CrisisLineItem;
+  /**
+   * `swap` → replace the out-of-stock line with the crisis default swap (the historic behavior).
+   * `hold` → the customer already told us they will NOT take the substitute and are waiting for
+   * their original flavor, so the restart holds (pauses) the sub instead of swapping + charging.
+   */
+  action: "swap" | "hold";
   /** What the customer had, e.g. "Superfood Tabs — Strawberry Lemonade". */
   fromLabel: string;
   /** Crisis default swap (Shopify variant id as stored on crisis_events). */
@@ -65,6 +71,28 @@ export type CrisisSwapPlan = {
 };
 
 export type CrisisSwapResult = CrisisSwapPlan & { ok: boolean; error?: string };
+
+/** The crisis_customer_actions fields that signal a customer is waiting for restock. */
+export type CrisisWaitRow = {
+  hold_for_restock?: boolean | null;
+  tier1_response?: string | null;
+  tier2_response?: string | null;
+  tier3_response?: string | null;
+};
+
+/**
+ * True when the customer declined the substitute and is waiting for their original flavor —
+ * an explicit `hold_for_restock` flag (Phase 1), a `rejected` tier 1/2 response, or a tier 3
+ * pause/remove. Such a customer must NOT be auto-swapped + charged on restart; the sub is held.
+ */
+export function customerIsWaitingForRestock(row: CrisisWaitRow | null | undefined): boolean {
+  if (!row) return false;
+  return row.hold_for_restock === true
+    || row.tier1_response === "rejected"
+    || row.tier2_response === "rejected"
+    || row.tier3_response === "accepted_pause"
+    || row.tier3_response === "accepted_remove";
+}
 
 /** Keys a crisis line can be matched by: the stored Shopify variant id, its UUID, and its SKU. */
 export type CrisisMatchKeys = { variantKeys: Set<string>; sku: string };
@@ -108,9 +136,14 @@ async function activeCrisesWithKeys(admin: Admin, workspaceId: string) {
   }));
 }
 
-/** Read-only: the swaps a restart of a sub with these items would make. */
+/**
+ * Read-only: the swaps a restart of a sub with these items would make.
+ * When `subscriptionId` is supplied, the existing crisis_customer_actions row for each
+ * (crisis, subscription) is consulted: a customer who chose to wait (customerIsWaitingForRestock)
+ * is given a `hold` plan instead of a `swap`, so the restart never charges them for the substitute.
+ */
 export async function crisisSwapsForItems(
-  admin: Admin, workspaceId: string, items: unknown,
+  admin: Admin, workspaceId: string, items: unknown, subscriptionId?: string | null,
 ): Promise<CrisisSwapPlan[]> {
   const list = ((items as CrisisLineItem[] | null) || []);
   if (!list.length) return [];
@@ -118,9 +151,17 @@ export async function crisisSwapsForItems(
   for (const { crisis, keys } of await activeCrisesWithKeys(admin, workspaceId)) {
     const item = findCrisisLine(list, keys);
     if (!item) continue;
+    let waiting = false;
+    if (subscriptionId) {
+      const { data: row } = await admin.from("crisis_customer_actions")
+        .select("hold_for_restock, tier1_response, tier2_response, tier3_response")
+        .eq("crisis_id", crisis.id).eq("subscription_id", subscriptionId).maybeSingle();
+      waiting = customerIsWaitingForRestock(row as CrisisWaitRow | null);
+    }
     plans.push({
       crisisId: crisis.id,
       item,
+      action: waiting ? "hold" : "swap",
       fromLabel: itemLabel(item, crisis),
       toVariantId: String(crisis.default_swap_variant_id),
       toLabel: crisis.default_swap_title || "a similar flavor",
@@ -135,8 +176,12 @@ export function crisisNotice(plans: CrisisSwapPlan[]): string | null {
   if (!plans.length) return null;
   const fmt = (d: string) => new Date(`${d}T12:00:00Z`).toLocaleDateString("en-US", { month: "long", day: "numeric", timeZone: "UTC" });
   return plans.map((p) =>
-    `Heads up: ${p.fromLabel} is out of stock right now, so we'll send ${p.toLabel} instead and switch you back as soon as it's restocked`
-    + (p.expectedRestock ? ` (expected ${fmt(p.expectedRestock)}).` : ".")).join(" ");
+    p.action === "hold"
+      ? `${p.fromLabel} is out of stock right now. As you asked, we'll hold your subscription and ship ${p.fromLabel} as soon as it's back`
+        + (p.expectedRestock ? ` (expected ${fmt(p.expectedRestock)}).` : ".")
+        + " You won't be charged until then."
+      : `Heads up: ${p.fromLabel} is out of stock right now, so we'll send ${p.toLabel} instead and switch you back as soon as it's restocked`
+        + (p.expectedRestock ? ` (expected ${fmt(p.expectedRestock)}).` : ".")).join(" ");
 }
 
 /**
@@ -153,13 +198,45 @@ export async function applyCrisisSwapsAfterRestart(
     .eq("workspace_id", workspaceId).eq("shopify_contract_id", contractId).maybeSingle();
   if (!sub) return [];
   const items = ((sub.items as CrisisLineItem[] | null) || []);
-  const plans = await crisisSwapsForItems(admin, workspaceId, items);
+  const plans = await crisisSwapsForItems(admin, workspaceId, items, sub.id);
   if (!plans.length) return [];
 
   const { subSwapVariant, subUpdateLineItemPrice } = await import("@/lib/subscription-items");
+  const { subscriptionAction } = await import("@/lib/commerce/subscription");
   const results: CrisisSwapResult[] = [];
+  let paused = false; // a single hold pauses the whole sub; don't re-pause for each held line
   for (const plan of plans) {
     try {
+      // ── Hold: the customer chose to wait. Never swap + charge; pause the sub and let the
+      // crisis Resolve rail (which resumes paused_at + auto_resume rows) bring it back with
+      // the original flavor. The existing row's tier responses / original_item / hold_for_restock
+      // are preserved — we only stamp the pause.
+      if (plan.action === "hold") {
+        const pauseRes = paused
+          ? { success: true as const }
+          : await subscriptionAction(workspaceId, contractId, "pause", "Crisis — customer chose to wait for restock");
+        if (!pauseRes.success) {
+          results.push({ ...plan, ok: false, error: pauseRes.error || "pause failed" });
+          continue;
+        }
+        paused = true;
+        const now = new Date().toISOString();
+        const { data: existing } = await admin.from("crisis_customer_actions")
+          .select("id").eq("crisis_id", plan.crisisId).eq("subscription_id", sub.id).maybeSingle();
+        if (existing) {
+          const { error } = await admin.from("crisis_customer_actions")
+            .update({ paused_at: now, auto_resume: true, updated_at: now })
+            .eq("id", existing.id);
+          results.push(error
+            ? { ...plan, ok: true, error: `held, but crisis row not updated: ${error.message}` }
+            : { ...plan, ok: true });
+        } else {
+          // Defensive: a hold plan is derived from an existing row, so this is unexpected.
+          results.push({ ...plan, ok: true, error: "held, but no crisis row found to stamp paused_at/auto_resume" });
+        }
+        continue;
+      }
+
       const qty = Math.max(1, Number(plan.item.quantity ?? 1));
       const swap = await subSwapVariant(workspaceId, contractId, String(plan.item.variant_id), plan.toVariantId, qty);
       if (!swap.success) {
@@ -174,36 +251,45 @@ export async function applyCrisisSwapsAfterRestart(
       const others = items.filter((i) => i !== plan.item
         && !/shipping protection|insure/i.test(`${i.title ?? ""} ${i.sku ?? ""}`));
       const now = new Date().toISOString();
-      const row = {
+      // A prior crisis row for this sub (e.g. it was enrolled, then cancelled) is re-used — but
+      // only the swap-tracking fields are touched; existing tier responses / original_item are
+      // never reset, so a row that recorded the customer's earlier choices stays intact.
+      const { data: existing } = await admin.from("crisis_customer_actions")
+        .select("id").eq("crisis_id", plan.crisisId).eq("subscription_id", sub.id).maybeSingle();
+      const updateRow = {
+        tier1_swapped_to: { variantId: plan.toVariantId, title: plan.toLabel },
+        auto_swap_back: true,
+        updated_at: now,
+      };
+      const insertRow = {
         segment: others.length === 0 ? "berry_only" : "berry_plus",
         original_item: plan.item,
         current_tier: 1,
         tier1_sent_at: now,
         tier1_response: "accepted_on_restart",
-        tier1_swapped_to: { variantId: plan.toVariantId, title: plan.toLabel },
-        auto_swap_back: true,
+        ...updateRow,
         cancelled: false,
-        updated_at: now,
       };
-      // A prior crisis row for this sub (e.g. it was enrolled, then cancelled) is re-used.
-      const { data: existing } = await admin.from("crisis_customer_actions")
-        .select("id").eq("crisis_id", plan.crisisId).eq("subscription_id", sub.id).maybeSingle();
-      const save = (r: Record<string, unknown>) => existing
-        ? admin.from("crisis_customer_actions").update(r).eq("id", existing.id)
-        : admin.from("crisis_customer_actions").insert({
-            ...r,
-            crisis_id: plan.crisisId,
-            workspace_id: workspaceId,
-            subscription_id: sub.id,
-            customer_id: sub.customer_id,
-          });
-      let write = await save(row);
+      const save = (dropSwapBack: boolean) => {
+        if (existing) {
+          const { auto_swap_back: sb, ...restU } = updateRow;
+          return admin.from("crisis_customer_actions")
+            .update(dropSwapBack ? restU : { ...restU, auto_swap_back: sb }).eq("id", existing.id);
+        }
+        const { auto_swap_back: sb, ...restI } = insertRow;
+        return admin.from("crisis_customer_actions").insert({
+          ...(dropSwapBack ? restI : { ...restI, auto_swap_back: sb }),
+          crisis_id: plan.crisisId,
+          workspace_id: workspaceId,
+          subscription_id: sub.id,
+          customer_id: sub.customer_id,
+        });
+      };
+      let write = await save(false);
       if (write.error && /auto_swap_back/.test(write.error.message)) {
         // Code can deploy before the 30-min migration timer adds the column: keep the crisis row
         // (no second OOS email, original item kept) and flag the missing swap-back for follow-up.
-        const { auto_swap_back: _omit, ...rest } = row;
-        void _omit;
-        const retry = await save(rest);
+        const retry = await save(true);
         write = retry.error ? retry : { ...retry, error: { message: "auto_swap_back column not live yet — set it on this row" } as never };
       }
       results.push(write.error
@@ -219,9 +305,18 @@ export async function applyCrisisSwapsAfterRestart(
 /** One-line internal note for a ticket / portal log. */
 export function crisisSwapNote(results: CrisisSwapResult[]): string | null {
   if (!results.length) return null;
-  return results.map((r) => r.ok && !r.error
-    ? `Out of stock: swapped ${r.fromLabel} → ${r.toLabel}; switches back automatically when the crisis is resolved.`
-    : r.ok
-      ? `Out of stock: swapped ${r.fromLabel} → ${r.toLabel}, ⚠ ${r.error} — add the crisis row by hand so it switches back.`
-      : `⚠ Out of stock: ${r.fromLabel} could NOT be swapped to ${r.toLabel} (${r.error}). It will bill as-is — swap it by hand.`).join(" ");
+  return results.map((r) => {
+    if (r.action === "hold") {
+      return r.ok && !r.error
+        ? `Held for restock (customer chose to wait): ${r.fromLabel}; resumes automatically when the crisis is resolved.`
+        : r.ok
+          ? `Held for restock (customer chose to wait): ${r.fromLabel}, ⚠ ${r.error}`
+          : `⚠ Could NOT hold ${r.fromLabel} for restock (${r.error}) — pause it by hand so the customer isn't charged for the substitute.`;
+    }
+    return r.ok && !r.error
+      ? `Out of stock: swapped ${r.fromLabel} → ${r.toLabel}; switches back automatically when the crisis is resolved.`
+      : r.ok
+        ? `Out of stock: swapped ${r.fromLabel} → ${r.toLabel}, ⚠ ${r.error} — add the crisis row by hand so it switches back.`
+        : `⚠ Out of stock: ${r.fromLabel} could NOT be swapped to ${r.toLabel} (${r.error}). It will bill as-is — swap it by hand.`;
+  }).join(" ");
 }
