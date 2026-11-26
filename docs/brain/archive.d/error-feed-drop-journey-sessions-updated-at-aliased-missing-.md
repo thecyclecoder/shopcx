@@ -1,0 +1,1 @@
+- **Capture-filter: drop foreign journey_sessions.updated_at errors reported under a table alias** · verified 2026-11-26 · → [[../libraries/error-feed]]
