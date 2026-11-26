@@ -95,6 +95,12 @@ export interface ActionParams {
    *  Required for internal subs; ignored on external engines. */
   expected_current_realized_cents?: number;
   crisis_action_id?: string;
+  // crisis_enroll — set true when the customer REFUSED the substitute flavor
+  // and chose to wait for their original flavor to restock. The handler then
+  // records tier1_response='rejected' + hold_for_restock=true (instead of the
+  // default 'accepted_swap') so the restart swap holds them instead of swapping
+  // + charging them. See spec crisis-restart-swap-respects-wait-for-restock.
+  hold_for_restock?: boolean;
   order_number?: string;
   // Our internal orders.id (UUID). `promoteRecommendedRemedyToExecutable`
   // (src/lib/cs-director.ts) emits this as `order_id` when the recommendation
@@ -4178,10 +4184,21 @@ export const directActionHandlers: Record<
     }
     if (!subRow) return { success: false, error: "No subscription found containing the affected or swap variant" };
 
-    // 3. Already enrolled? Don't double-enroll
+    // 3. Already enrolled? Don't double-enroll. But if the customer is now
+    // declining the substitute and waiting for restock, record that on the
+    // existing row instead of returning early (so a prior 'accepted_swap'
+    // enrollment can be corrected once the customer speaks up).
     const { data: existing } = await admin.from("crisis_customer_actions")
       .select("id").eq("crisis_id", crisis.id).eq("subscription_id", subRow.id).maybeSingle();
-    if (existing) return { success: true, summary: `Already enrolled in crisis (action ${existing.id})` };
+    if (existing) {
+      if (p.hold_for_restock) {
+        await admin.from("crisis_customer_actions")
+          .update({ hold_for_restock: true, updated_at: new Date().toISOString() })
+          .eq("id", existing.id);
+        return { success: true, summary: `Updated crisis enrollment (action ${existing.id}) — held for restock (customer chose to wait)` };
+      }
+      return { success: true, summary: `Already enrolled in crisis (action ${existing.id})` };
+    }
 
     // 4. Determine segment + original item snapshot
     const items = (subRow.items as { variant_id?: string; variantId?: string; title?: string; sku?: string; quantity?: number }[]) || [];
@@ -4206,6 +4223,12 @@ export const directActionHandlers: Record<
     // physically. auto_readd=true is the critical bit: when the crisis is
     // marked resolved, the resolution job will switch the subscription
     // back to original_item.
+    //
+    // When hold_for_restock is set, the customer REFUSED the substitute and is
+    // waiting for their original flavor. Record tier1_response='rejected' (not
+    // 'accepted_swap') + hold_for_restock=true so the restart swap holds them
+    // instead of swapping + charging them. auto_readd stays true either way.
+    const holdForRestock = p.hold_for_restock === true;
     const nowIso = new Date().toISOString();
     const { data: inserted, error: insertErr } = await admin.from("crisis_customer_actions").insert({
       workspace_id: ctx.workspaceId,
@@ -4215,13 +4238,14 @@ export const directActionHandlers: Record<
       segment,
       current_tier: 1,
       tier1_sent_at: nowIso,
-      tier1_response: "accepted_swap",
-      tier1_swapped_to: crisis.default_swap_variant_id ? {
+      tier1_response: holdForRestock ? "rejected" : "accepted_swap",
+      tier1_swapped_to: holdForRestock || !crisis.default_swap_variant_id ? null : {
         variantId: crisis.default_swap_variant_id,
         title: crisis.default_swap_title,
-      } : null,
+      },
       original_item: originalItem,
       auto_readd: true,
+      hold_for_restock: holdForRestock,
     }).select("id").single();
 
     if (insertErr || !inserted) {
@@ -4233,7 +4257,12 @@ export const directActionHandlers: Record<
     await addTicketTag(ctx.ticketId, "crisis");
     await addTicketTag(ctx.ticketId, `crisis:${crisis.id}`);
 
-    return { success: true, summary: `Enrolled in crisis "${crisis.affected_product_title}" (auto_readd=true — will swap back to original on resolve)` };
+    return {
+      success: true,
+      summary: holdForRestock
+        ? `Enrolled in crisis "${crisis.affected_product_title}" — held for restock (customer declined the substitute and is waiting for their original flavor)`
+        : `Enrolled in crisis "${crisis.affected_product_title}" (auto_readd=true — will swap back to original on resolve)`,
+    };
   },
 
   // Flip auto_readd=true on an existing crisis_customer_actions row.

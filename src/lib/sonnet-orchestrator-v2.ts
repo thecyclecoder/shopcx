@@ -81,6 +81,7 @@ export interface SonnetDecision {
     amount_cents?: number;
     base_price_cents?: number;
     crisis_action_id?: string;
+    hold_for_restock?: boolean;
   }[];
   handler_name?: string;
   response_message?: string;
@@ -2202,6 +2203,7 @@ async function getCrisisStatus(admin: Admin, wsId: string, custId: string): Prom
     out.push("This customer has no crisis enrollment.");
     if (workspaceCrises?.length) {
       out.push("→ If their recent order shows the swap variant above and they're complaining about a wrong item, enroll them via crisis_enroll direct action (sets auto_readd=true so they get the original product back when crisis resolves).");
+      out.push("→ If the customer says they do NOT want the substitute flavor and will wait for their original flavor to come back, enroll them via crisis_enroll with hold_for_restock=true. This records them as waiting (not as having accepted the swap), so a later restart holds their subscription and ships the original flavor on restock instead of swapping + charging them for the substitute.");
     }
     return out.join("\n");
   }

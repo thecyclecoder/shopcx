@@ -83,7 +83,7 @@ Sonnet returns `{action_type, actions: [...]}` with the action type and params; 
 ### Crisis (see [[lifecycles/crisis-campaign]])
 - `crisis_pause` — pause sub due to crisis (auto-resume on resolution)
 - `crisis_remove` — remove the affected item but keep the sub running
-- `crisis_enroll` — enroll a sub in an active crisis campaign
+- `crisis_enroll` — enroll a sub in an active crisis campaign (pass `hold_for_restock=true` when the customer declined the substitute and is waiting for their original flavor — records `tier1_response='rejected'` + `hold_for_restock=true` so the restart swap holds them instead of swapping/charging)
 - `crisis_set_auto_readd` — toggle the auto-readd-on-resolution flag
 
 ### Ticket
