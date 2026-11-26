@@ -1,0 +1,1 @@
+- **Cancel journey: confirming a cancel must actually cancel** · verified 2026-11-26 · → [[../lifecycles/cancel-flow]]
