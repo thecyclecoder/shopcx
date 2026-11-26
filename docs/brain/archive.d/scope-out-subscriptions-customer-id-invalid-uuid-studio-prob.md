@@ -1,0 +1,1 @@
+- **Drop the Studio/REST subscriptions.customer_id invalid-UUID quick-filter probe from the error feed** · verified 2026-11-26 · → [[../libraries/error-feed]]
