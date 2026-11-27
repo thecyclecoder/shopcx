@@ -32,9 +32,11 @@ async function main() {
           why: "One shared calculator feeds the reminder, journey and Portal, so fixing it once fixes every surface.",
           what: "Non-internal subs: discounts already baked into price_cents (Subscribe & Save, quantity/volume breaks, any subscription-level automatic discount) are not subtracted again; only discounts Shopify applies on top of line prices (coupon codes, loyalty, fixed-amount credits) are; duplicate applied_discounts entries are de-duplicated.",
           body: [
-            "In src/lib/commerce/price.ts the non-internal branch sums `items[].price_cents` (already post-S&S, see src/lib/commerce/shopcx-line-ops.ts writes) then calls computeDisplayCoupon over ALL `applied_discounts`, re-applying S&S/volume discounts. Probe real `subscriptions.applied_discounts` shapes on ShopCX-engine subs (probe-db skill) to classify which entries are baked vs on-top — use the Shopify contract's discount allocation semantics (contract line `currentPrice` already includes subscription-plan pricing policies; contract `discounts` with targetType LINE_ITEM/manual codes apply on top). Ground truth: a sub with list $69.95, stored line $52.46, a $15 loyalty coupon and $4.95 shipping must total $42.41 pre-tax (customer's real charge $45.17 incl. tax).",
+            "In src/lib/commerce/price.ts the non-internal branch sums `items[].price_cents` (already post-S&S, see src/lib/commerce/shopcx-line-ops.ts writes) then calls computeDisplayCoupon over ALL `applied_discounts`, re-applying S&S/volume discounts. Probe real `subscriptions.applied_discounts` shapes on ShopCX-engine subs (probe-db skill) to classify which entries are baked vs on-top — use the Shopify contract's discount allocation semantics (contract line `currentPrice` already includes subscription-plan pricing policies; contract `discounts` with targetType LINE_ITEM/manual codes apply on top). Ground truth (unit test): list $69.95, stored line $52.46, an ACTIVE $15 loyalty coupon and $4.95 shipping must total $42.41 pre-tax. Second ground truth (real customer, renewing 2026-11-30): the same sub whose $15 coupon LOYALTY-15-* is limited to one billing cycle and was already used on the prior order must total $57.41 pre-tax ($61.14 with FL tax), i.e. the spent coupon must NOT be subtracted.",
+            "Spent / cycle-limited coupons: exclude applied_discounts entries whose usage limit (recurringCycleLimit / usageCount, or the Shopify contract discount's remaining cycles) is exhausted, matching what Shopify will bill. Read the contract discount fields via the Shopify subscription client rather than guessing.",
             "Add `isBakedIntoLinePrice(discount)` and de-dupe entries by id/code before applying. Keep the internal branch unchanged.",
-            "Add src/lib/commerce/price.double-discount.test.ts with that ground-truth case + a duplicated-entry case, registered as package.json script `test:price-double-discount`. Run existing price tests (price.freeship.test.ts).",
+            "Safety check (CEO 2026-11-27: be far more careful): in src/lib/pre-renewal-reminders.ts reminderChargePreview, compare the computed pre-tax amount against the subscription's last paid renewal order (net of tax) when the line items are unchanged; if they differ by more than $2 and no discount change explains it, set amountCents null (omit the amount) and insert one dashboard_notifications row (severity high) with sub id + both numbers. Name the helper `amountMatchesLastRenewal`.",
+            "Add src/lib/commerce/price.double-discount.test.ts with both ground-truth cases + a duplicated-entry case, registered as package.json script `test:price-double-discount`. Run existing price tests (price.freeship.test.ts).",
             "Audit script (read-only, scripts/_audit-shopcx-display-vs-last-order.ts) comparing displayed total vs last paid renewal order for active ShopCX subs; report the distribution in the PR body.",
             "Update docs/brain/libraries/commerce__price.md (or the existing commerce price page) with the baked-vs-on-top rule.",
           ].join("\n"),
@@ -44,13 +46,14 @@ async function main() {
             { position: 1, description: "tsc clean", kind: "auto", exec_kind: "tsc", params: null },
             { position: 2, description: "baked-discount rule exists", kind: "auto", exec_kind: "grep", params: { pattern: "isBakedIntoLinePrice", path: "src/lib/commerce/price.ts", expect: "present" } },
             { position: 3, description: "regression test added", kind: "auto", exec_kind: "grep", params: { pattern: "6995", path: "src/lib/commerce/price.double-discount.test.ts", expect: "present" } },
-            { position: 4, description: "test:pre-renewal-reminders passes", kind: "auto", exec_kind: "unit_test", params: { script: "test:pre-renewal-reminders" } },
+            { position: 4, description: "reminder amount cross-checked against last renewal", kind: "auto", exec_kind: "grep", params: { pattern: "amountMatchesLastRenewal", path: "src/lib/pre-renewal-reminders.ts", expect: "present" } },
+            { position: 5, description: "test:pre-renewal-reminders passes", kind: "auto", exec_kind: "unit_test", params: { script: "test:pre-renewal-reminders" } },
           ],
         },
       ],
     },
     "planned",
-    { intendedStatusSetBy: "ceo", parentKind: "mandate", parentRef: "retention#billing-integrity" },
+    { intendedStatusSetBy: "ceo", parentKind: "mandate", parentRef: "retention#subscription-continuity-billing-integrity" },
   );
   console.log(ok ? "authored" : "author write failed");
   const s = await getSpec(WORKSPACE_ID, SLUG);
