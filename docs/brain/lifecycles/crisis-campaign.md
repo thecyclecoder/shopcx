@@ -202,6 +202,14 @@ Why it matters: without this flag every later automation reads the customer as h
 
 On restart (portal or win-back journey), `crisisSwapsForItems` now takes the subscription id and reads that row: `customerIsWaitingForRestock(row)` (true for `hold_for_restock`, a `rejected` tier 1/2 response, or a tier 3 `accepted_pause`/`accepted_remove`) turns the line's plan into a **hold** instead of a swap. `applyCrisisSwapsAfterRestart` then pauses the whole sub (no auto-resume date) and stamps the existing row `paused_at`, `auto_resume=true`, so crisis Resolve resumes it with the original flavor — the customer is never charged for the substitute. A pre-existing row on a plain swap is only patched on `tier1_swapped_to`/`auto_swap_back`/`updated_at`, never wholesale-overwritten. The restart page (`crisisNotice`) and the internal note (`crisisSwapNote`) both render the hold copy.
 
+## Restock promise for a customer with NO subscription
+
+The flow above restores **subscribers** on resolve — resume, re-add, swap-back — but all of it keys off a `crisis_customer_actions` row tied to a subscription. A **one-time buyer** with no subscription that support promised ("we'll send your Cocoa when it's back") had nowhere structured to live; the promise sat only in a snoozed ticket a human had to remember (ground truth: Peggy, customer `0897b4e5`; CEO 2026-11-27 spec).
+
+**Phase 1 (record — shipped):** the `promise_restock_replacement` direct action ([[../libraries/action-executor]]) records the promise into [[../tables/replacements]] with `status='awaiting_restock'`, `crisis_id` set, `reason='crisis_restock_promise'`, and the item in `items` — **no Shopify order is created**. It resolves the crisis by explicit `crisis_id` or the active [[../tables/crisis_events]] row whose `affected_variant_id` matches, enforces the per-variant cap (`REPLACEMENT_MAX_UNITS_PER_VARIANT`), and writes an internal ticket note. The orchestrator is taught to reach for it (over `create_replacement_order`, which ships now) when the item is out of stock and the customer is waiting for restock, and the customer-data context surfaces `awaiting_restock` rows so the AI can answer "when will my Cocoa ship?". Spec: [[../specs/crisis-resolve-ships-promised-restock-replacements]].
+
+**Phase 2 (ship on resolve — shipped):** after the crisis status flips to `resolved`, the resolve route calls [[../libraries/crisis-restock-fulfillment]] `shipRestockPromises(admin, workspaceId, crisisId)`. It selects every `awaiting_restock` [[../tables/replacements]] row for the crisis, **compare-and-sets each off `awaiting_restock` → `pending` BEFORE any Shopify call** (so a double-click or concurrent Resolve can't ship twice), then ships it through [[../libraries/replacement-order]] `createReplacementOrder` REUSING the promise row via `existingReplacementId` (one row per promise, record-first intact). The customer gets the normal Shopify order confirmation and the ticket gets an internal note `Crisis resolved: restock replacement {order name} created ({items}).`. **A restock failure does NOT un-resolve the crisis** — the row is marked `failed`, the ticket reopened, and a high-severity `fulfillment_alert` [[../tables/dashboard_notifications]] row raised for a human to ship it by hand. The resolve response carries `restock_replacements_created` / `restock_replacements_failed` counts, and the GET crisis summary carries `restock_promises_pending`.
+
 ## Files touched
 
 | File | Purpose |
@@ -219,6 +227,9 @@ On restart (portal or win-back journey), `crisisSwapsForItems` now takes the sub
 | `src/app/dashboard/crisis/new/page.tsx` | Create / edit |
 | `src/app/dashboard/crisis/[id]/page.tsx` | Detail + stats + resolve button |
 | `src/app/api/workspaces/[id]/crisis/[crisisId]/resolve/route.ts` | Mass resolution actions |
+| `src/app/api/workspaces/[id]/crisis/[crisisId]/route.ts` | Resolve POST — subs side-effects + restock-promise shipping |
+| `src/lib/crisis-restock-fulfillment.ts` | `shipRestockPromises` — ships `awaiting_restock` promises on resolve |
+| `src/lib/replacement-order.ts` | `createReplacementOrder` (+ `existingReplacementId` row reuse) |
 | `src/app/api/workspaces/[id]/crisis/route.ts` | CRUD |
 
 ## Status / open work
@@ -226,6 +237,8 @@ On restart (portal or win-back journey), `crisisSwapsForItems` now takes the sub
 **Shipped:** Crisis event activation, daily cron eligibility scanning, Tier 1/2/3 journeys with flavor/product swaps, pause/remove logic, auto-resume + auto-readd on resolution — all functional.
 
 **Shipped 2026-11-22:** restarts (portal + win-back journey) swap crisis flavors to the default on the way back in and enrol `auto_swap_back` rows ([[../libraries/crisis-restart-swap]]).
+
+**Shipped (restock-promise spec):** Phase 1 — `promise_restock_replacement` records a `status='awaiting_restock'` [[../tables/replacements]] row against the crisis for a subscription-less customer. Phase 2 — crisis Resolve ships those rows through `createReplacementOrder` (row reuse via `existingReplacementId`, compare-and-set guard, failure → row `failed` + ticket reopen + `fulfillment_alert`) via [[../libraries/crisis-restock-fulfillment]] `shipRestockPromises`. See "Restock promise for a customer with NO subscription" above.
 
 **Known gaps / not yet shipped:** no "your flavor is back" email on swap-back; stock outside a crisis row is invisible (product_variants has no inventory signal).
 
