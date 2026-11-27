@@ -77,3 +77,8 @@ Every heartbeat carries `{ delivered: { swept, healed, redriven, escalated }, up
 ---
 
 [[../README]] · [[../lifecycles/return-pipeline]] · [[../inngest/returns]] · [[../integrations/easypost]] · [[../libraries/refund-ledger]] · [[../../CLAUDE]]
+
+## Escalation dedupe (2026-11-27)
+
+Every escalation card carries `metadata.dedupe_key = return_sweep:<metadata.type>:<return_id>` (`returnSweepDedupeKey`). The `dashboard_notifications_dedupe_key_open_uniq` index allows one OPEN card per key, so a still-stranded return no longer gets a fresh card each day; the 23505 on a re-mint is swallowed as "already escalated". Dismissing the card lets the next run re-raise it. Before this, 1,671 open cards had piled up for a few dozen returns. Migration `20270126120001_collapse_return_sweep_duplicate_cards.sql` dismissed the older duplicates and stamped the key on the newest card for each return.
+

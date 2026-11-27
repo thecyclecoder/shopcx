@@ -169,3 +169,15 @@ test("isEasyPostRateLimitError: arbitrary EasyPost 500 → false (keep at error,
   const err = new Error("EasyPost 500 Internal Server Error");
   assert.equal(isEasyPostRateLimitError(err), false);
 });
+
+test("returnSweepDedupeKey is stable per return + escalation type", async () => {
+  const { returnSweepDedupeKey } = await import("./returns-reconcile-sweep");
+  assert.equal(
+    returnSweepDedupeKey({ type: "return_sweep_upstream_stale", return_id: "r1", age_days: 200 }),
+    "return_sweep:return_sweep_upstream_stale:r1",
+  );
+  assert.equal(
+    returnSweepDedupeKey({ type: "return_sweep_upstream_stale", return_id: "r1", age_days: 201 }),
+    returnSweepDedupeKey({ type: "return_sweep_upstream_stale", return_id: "r1", age_days: 200 }),
+  );
+});
