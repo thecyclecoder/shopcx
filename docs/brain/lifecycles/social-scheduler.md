@@ -87,7 +87,9 @@ The IG/FB bio link can't be set via API, so we host `/links` and set the bio to 
 
 **Verified in production (2026-06-18):** owner-confirmed working; spec folded + archived ([[../archive]]).
 
-**Open:** validate Insights parsing on real posted metrics; optional resource-performance weighting + true frequency auto-tune; FB reels/stories (currently FB = feed photos + blog link cards only); multi-brand rollout (Ashwavana pages exist).
+**Fixed (2026-11-27):** (1) IG image + image-story containers are now polled to `FINISHED` before `media_publish` (`waitForContainer`), and Graph code 9007 "Media ID is not available" is tagged retryable — it had failed ~30% of IG posts Aug–Oct. (2) Reach/saves/shares had been `null` on every posted row because the Meta OAuth never requested `instagram_manage_insights` + `read_insights`; both are now in `buildMetaAuthUrl` (takes effect on the next reconnect). FB reach tries `post_total_media_view_unique` then the retired `post_impressions_unique`. Context: the page token was invalidated 2026-11-02 (password change) and every post failed silently until a reconnect — there is still no alert for a dead token (follow-up).
+
+**Open:** dead-token alert; validate Insights parsing on real posted metrics; optional resource-performance weighting + true frequency auto-tune; FB reels/stories (currently FB = feed photos + blog link cards only); multi-brand rollout (Ashwavana pages exist).
 
 ## Related
 
