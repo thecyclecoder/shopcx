@@ -12,6 +12,12 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Cancel journey: confirming a cancel must actually cancel** · verified 2026-11-26 · → [[../lifecycles/cancel-flow]]
+- **Restart out-of-stock swap must respect customers who chose to wait for restock** · verified 2026-11-26 · → [[../lifecycles/crisis-campaign]]
+- **Drop foreign-app noise: customer_payment_methods.card_last4 ad-hoc SELECT** · verified 2026-11-26 · → [[../libraries/error-feed]]
+- **Scope out foreign direct-REST noise: journey_sessions.journey_definition_id missing-column SELECT** · verified 2026-11-26 · → [[../libraries/error-feed]]
+- **Capture-filter: drop foreign journey_sessions.updated_at errors reported under a table alias** · verified 2026-11-26 · → [[../libraries/error-feed]]
+- **Drop the Studio/REST subscriptions.customer_id invalid-UUID quick-filter probe from the error feed** · verified 2026-11-26 · → [[../libraries/error-feed]]
 - **apply_loyalty_coupon self-heal retry recognizes regen-successor code** · verified 2026-11-25 · → [[../libraries/action-executor]]
 - **A cancel-after-renewal refund request runs the Refund playbook and never reaches the founder** · verified 2026-11-25 · → [[../playbooks/refund]], [[../libraries/playbook-executor]], [[../libraries/model-picker]]
 - **Drop foreign direct-REST 'subscriptions.last_charged_at does not exist' noise at capture** · verified 2026-11-25 · → [[../libraries/error-feed]]
