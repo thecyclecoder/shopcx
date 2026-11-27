@@ -1,0 +1,1 @@
+- **Stop the migration classifier from gating idempotent drop+re-add CHECK-constraint re-statements as destructive** · verified 2026-11-27 · → [[../libraries/migration-safety]]
