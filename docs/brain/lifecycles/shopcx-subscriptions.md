@@ -841,6 +841,28 @@ now verifies against `GET /webhooks.json` instead of trusting the status. No dat
 (fulfillments arrive via `orders/updated` + EasyPost), but `handleFulfillmentUpdate` is dead
 code.
 
+## ⚠️ A gift edit on the CURRENT billed cycle also locks the contract (2026-11-27)
+
+Shopify refuses every contract update while a billing cycle carries a contract edit (cancel, pause,
+resume, date change, swap, any draft) — and our one-time gifts ARE cycle edits. The lock-lift guard
+`withCycleEditLockCleared` relies on `readPendingCycleEdits` to find the offending cycle, but that
+helper originally considered only **UNBILLED** cycles. A restart-with-gift bills its first cycle
+immediately, so by the time the customer tries to cancel, the blocking edit sits on the CURRENT —
+already-billed, not-yet-ended — cycle, which the UNBILLED-only rule skipped. The guard then found
+nothing and passed Shopify's lock error straight through.
+
+Kristina's cancel (contract 54313320621) failed this way on 2026-11-27: the edited cycle was index 2
+(billed 2026-11-17, ends 2026-12-15, status `BILLED`), `readPendingCycleEdits` returned
+`editedCycles: []`, and the cancel only went through after the cycle-2 edit was deleted by hand —
+`shopifyDeleteBillingCycleEdit({ index: 2 })` on that billed-but-current cycle SUCCEEDED, so the old
+"a billed edit can't be deleted" belief holds for PAST cycles only.
+
+Fix: the rule now lives in the pure helper `isLockingEditedCycle(node, now)` —
+`edited && (status === 'UNBILLED' OR (status === 'BILLED' && now < cycleEndAt))`. The current billed
+cycle is lifted like an unbilled one, but its already-shipped gift is **not** re-added (only UNBILLED
+cycles contribute re-add `lines`). See [[../libraries/commerce__shopify-subscription-client]] §
+Billing-cycle edit lock.
+
 ## Related
 
 [[subscription-billing]] · [[dunning]] · [[customer-portal]] · [[../integrations/appstle]] ·

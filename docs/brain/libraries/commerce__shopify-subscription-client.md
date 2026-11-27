@@ -432,5 +432,14 @@ Live-verified on contract 36020289709 (2026-11-22): cancel and pause hit the loc
 `subscriptionContractSetNextBillingDate` does NOT (it succeeds with a cycle edit present).
 `readPendingCycleEdits` must start its `subscriptionBillingCycles` range at the contract's `createdAt`
 (+1s): Shopify rejects an earlier start with "Billing cycle start date out of range".
-`readPendingCycleEdits` returns only UNBILLED edited cycles: an edit left on a billed cycle does not block
-updates and cannot be deleted ("The index provided is invalid").
+`readPendingCycleEdits` returns an edited cycle when it HOLDS THE LOCK — the pure helper
+`isLockingEditedCycle(node, now)` (exported, unit-tested in
+`shopify-subscription-client.cycle-edit-lock.test.ts`) decides: `edited && (status === 'UNBILLED' OR
+(status === 'BILLED' && now < cycleEndAt))`. The query selects each cycle's `cycleEndAt` for this.
+A past billed cycle (period already ended) neither blocks updates nor can be deleted ("The index
+provided is invalid") — but the CURRENT billed cycle (order billed, period not yet ended) DOES block
+and CAN be deleted. Verified live 2026-11-27 on contract 54313320621 index 2 (billed 2026-11-17,
+ends 2026-12-15): Kristina's cancel failed with the lock error while `readPendingCycleEdits` returned
+`editedCycles: []` under the old UNBILLED-only rule; `shopifyDeleteBillingCycleEdit({ index: 2 })` on
+that billed-but-current cycle succeeded. One-time lines are collected into `lines` **only from UNBILLED
+cycles** — a BILLED cycle's gift already shipped/billed and must NOT be re-added after the update.

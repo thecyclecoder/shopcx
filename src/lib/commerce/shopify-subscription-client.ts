@@ -127,6 +127,26 @@ export const CYCLE_EDIT_LOCK_RE = /billing cycle contract edit/i;
 
 export interface PendingOneTimeLine { cycleIndex: number; variantId: string; quantity: number; price: string }
 
+/** A billing-cycle node as read for lock evaluation (`edited` flag, `status`, period end). */
+export interface BillingCycleEditNode { edited: boolean; status: string; cycleEndAt?: string | null }
+
+/**
+ * True when an edited cycle is the one holding the contract's update lock. Shopify blocks EVERY
+ * contract update while such a cycle exists, and both of these can be lifted via
+ * `shopifyDeleteBillingCycleEdit`:
+ *   - an UNBILLED edited cycle, OR
+ *   - the CURRENT billed cycle — order billed but the period has not ended yet (now < cycleEndAt).
+ * A PAST billed cycle (period already ended) neither blocks updates nor can be deleted (Shopify:
+ * "The index provided is invalid"). Verified live 2026-11-27 on contract 54313320621 index 2: a
+ * BILLED-but-current edited cycle blocked the cancel and was deletable.
+ */
+export function isLockingEditedCycle(node: BillingCycleEditNode, now: Date): boolean {
+  if (!node.edited) return false;
+  if (node.status === "UNBILLED") return true;
+  if (node.status === "BILLED" && node.cycleEndAt) return now.getTime() < new Date(node.cycleEndAt).getTime();
+  return false;
+}
+
 /**
  * The one-time lines sitting in edited billing cycles: lines on a cycle's edited contract whose id
  * is not on the base contract (i.e. added by a cycle edit, not recurring).
@@ -145,24 +165,29 @@ export async function readPendingCycleEdits(
   const start = new Date(Number.isFinite(createdMs) ? createdMs + 1000 : Date.now()).toISOString();
   const end = new Date(Date.now() + 400 * 24 * 3600 * 1000).toISOString();
   const env = await gql<{ subscriptionBillingCycles?: { edges: { node: {
-    cycleIndex: number; edited: boolean; status: string;
+    cycleIndex: number; edited: boolean; status: string; cycleEndAt?: string | null;
     editedContract?: { lines?: { edges: { node: { id: string; variantId: string | null; quantity: number; currentPrice?: { amount: string } } }[] } } | null;
   } }[] } }>(
     workspaceId,
     `query($id:ID!,$s:DateTime!,$e:DateTime!){
        subscriptionBillingCycles(contractId:$id, first:50, billingCyclesDateRangeSelector:{ startDate:$s, endDate:$e }){
-         edges { node { cycleIndex edited status
+         edges { node { cycleIndex edited status cycleEndAt
            editedContract { lines(first:50){ edges { node { id variantId quantity currentPrice { amount } } } } } } } } }`,
     { id: contractGid(contractId), s: start, e: end },
   );
   if (env.errors?.length) return { success: false, error: env.errors.map((e) => e.message).join("; "), editedCycles: [], lines: [] };
   const editedCycles: number[] = [];
   const lines: PendingOneTimeLine[] = [];
+  const now = new Date();
   for (const { node } of env.data?.subscriptionBillingCycles?.edges ?? []) {
-    // Only UNBILLED cycles: an edit on an already-billed cycle neither blocks updates nor can be
-    // deleted (Shopify: "The index provided is invalid"), seen live on 2026-11-22.
-    if (!node.edited || node.status !== "UNBILLED") continue;
+    // An UNBILLED edited cycle OR the CURRENT billed cycle (period not yet ended) holds the lock
+    // and is deletable. A past billed cycle neither blocks nor can be deleted (Shopify: "The index
+    // provided is invalid"). See isLockingEditedCycle; verified live 2026-11-27 (54313320621 idx 2).
+    if (!isLockingEditedCycle(node, now)) continue;
     editedCycles.push(node.cycleIndex);
+    // Only re-add one-time lines from UNBILLED cycles: a BILLED cycle's gift already shipped/billed
+    // and must NOT be added again after the update.
+    if (node.status !== "UNBILLED") continue;
     for (const { node: l } of node.editedContract?.lines?.edges ?? []) {
       if (baseIds.has(l.id) || !l.variantId) continue;
       lines.push({ cycleIndex: node.cycleIndex, variantId: l.variantId, quantity: l.quantity, price: l.currentPrice?.amount ?? "0.00" });
