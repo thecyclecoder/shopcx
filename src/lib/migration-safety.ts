@@ -117,6 +117,37 @@ export function cascadeAddedToExistingTable(lowerSql: string): boolean {
   });
 }
 
+/**
+ * True iff the SQL contains a `DROP CONSTRAINT` that is NOT immediately re-added in the same
+ * file (the only risky case — a genuine constraint removal). PURE.
+ *
+ * An idempotent CHECK-widening migration drops a constraint and re-adds it with a wider
+ * predicate in the SAME file: `alter table t drop constraint if exists t_ck; alter table t
+ * add constraint t_ck check (…wider…);`. That pair is ADDITIVE — the constraint still exists
+ * after the migration, just with a wider body — so it must NOT flag the migration destructive.
+ * Blanket-flagging every drop-constraint is the 2026-11 drift bug: it gated the organic_content
+ * migration (a new table + a CHECK re-statement) for an approval that never came, so the
+ * reconciler never auto-applied it. Same class as `cascadeAddedToExistingTable`.
+ *
+ * We collect every dropped constraint name and return true only if at least one dropped name has
+ * NO corresponding `add constraint <name>` elsewhere in the SQL — a bare drop (genuine removal)
+ * still flags reversible_destructive. Names may be quoted; the scan is over the SQL identifier
+ * chars (lower-cased + comment-stripped by the caller). A drop with no parseable name is treated
+ * conservatively as not-re-added (flags), erring safe.
+ */
+export function droppedConstraintNotReAdded(lowerSql: string): boolean {
+  const DROP = /\bdrop\s+constraint\s+(?:if\s+exists\s+)?("?[a-z0-9_]+"?)/g;
+  const dropped: string[] = [];
+  for (const m of lowerSql.matchAll(DROP)) dropped.push(m[1].replace(/"/g, ""));
+  if (dropped.length === 0) return false;
+  const added = new Set<string>();
+  for (const m of lowerSql.matchAll(/\badd\s+constraint\s+("?[a-z0-9_]+"?)/g)) {
+    added.add(m[1].replace(/"/g, ""));
+  }
+  // Flag if ANY dropped constraint is not re-added (a genuine removal remains gated).
+  return dropped.some((name) => !added.has(name));
+}
+
 export function classifyMigrationSql(sql: string): MigrationClassification {
   if (!sql || typeof sql !== "string") return { severity: "additive", matches: [] };
   const stripped = stripComments(sql);
@@ -134,7 +165,11 @@ export function classifyMigrationSql(sql: string): MigrationClassification {
   if (/\bdrop\s+table\b/.test(lower)) push("DROP TABLE", "irrev");
   if (/\bdrop\s+column\b/.test(lower)) push("DROP COLUMN", "irrev");
   if (/\btruncate\b/.test(lower)) push("TRUNCATE", "irrev");
-  if (/\bdrop\s+constraint\b/.test(lower)) push("ALTER … DROP CONSTRAINT", "rev");
+  // A `drop constraint if exists <name>` that is immediately RE-ADDED as `add constraint <name>`
+  // in the same file is an idempotent CHECK-widening re-statement — ADDITIVE (the constraint still
+  // exists afterward). Only a BARE drop with no matching re-add stays flagged. See
+  // `droppedConstraintNotReAdded` for the 2026-11 organic_content drift bug this closes.
+  if (droppedConstraintNotReAdded(lower)) push("ALTER … DROP CONSTRAINT", "rev");
   if (/\bdrop\s+default\b/.test(lower)) push("ALTER … DROP DEFAULT", "rev");
   // `ON DELETE CASCADE` is only risky when ADDED to an EXISTING table — an
   // `ALTER TABLE … ADD … ON DELETE CASCADE` changes delete behavior on rows already in the DB.

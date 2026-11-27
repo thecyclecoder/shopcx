@@ -18,6 +18,7 @@ import assert from "node:assert/strict";
 import {
   classifyMigrationSql,
   cascadeAddedToExistingTable,
+  droppedConstraintNotReAdded,
   computeBlastRadius,
   splitSqlStatements,
   isRenameAndExpire,
@@ -169,6 +170,21 @@ test("classifyMigrationSql flags ALTER … DROP CONSTRAINT / DROP DEFAULT as rev
   assert.equal(c.severity, "reversible_destructive");
   const d = classifyMigrationSql("ALTER TABLE t ALTER COLUMN a DROP DEFAULT;");
   assert.equal(d.severity, "reversible_destructive");
+});
+
+test("classifyMigrationSql: a drop+re-add CHECK-constraint re-statement is additive, but a bare drop stays reversible_destructive", () => {
+  // Idempotent CHECK-widening: drop the old constraint, re-add it with a wider predicate in the
+  // same file. The constraint still exists afterward → additive (must auto-apply).
+  const restate =
+    "alter table organic_content drop constraint if exists organic_content_kind_ck; " +
+    "alter table organic_content add constraint organic_content_kind_ck check (kind in ('a','b','c'));";
+  assert.equal(classifyMigrationSql(restate).severity, "additive");
+  // A bare drop with no matching re-add is a genuine removal → still gated.
+  const bare = "alter table t drop constraint c;";
+  assert.equal(classifyMigrationSql(bare).severity, "reversible_destructive");
+  // Helper-level assertions over the already-lower-cased SQL the classifier feeds it.
+  assert.equal(droppedConstraintNotReAdded(restate), false);
+  assert.equal(droppedConstraintNotReAdded(bare), true);
 });
 
 test("classifyMigrationSql: INSERT ... ON CONFLICT DO UPDATE SET (no WHERE) is NOT flagged (row-scoped by ON CONFLICT)", () => {
