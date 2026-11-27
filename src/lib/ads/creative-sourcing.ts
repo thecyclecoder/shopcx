@@ -323,7 +323,7 @@ async function queryProvenAngles(admin: Admin, workspaceId: string, q: QueryOpti
   let query = admin
     .from("creative_skeletons")
     .select(
-      "advertiser, hook, framework, mechanism_claim, proof, offer, days_running, heat, destination_domain, image_url, resume_advertising, winner_tier, winner_score, concept_tags, elements, product_presentation, punchiness",
+      "advertiser, hook, framework, mechanism_claim, proof, offer, days_running, heat, destination_domain, image_url, thumb_path, resume_advertising, winner_tier, winner_score, concept_tags, elements, product_presentation, punchiness",
     )
     .eq("workspace_id", workspaceId)
     .eq("status", "analyzed")
@@ -350,7 +350,8 @@ async function queryProvenAngles(admin: Admin, workspaceId: string, q: QueryOpti
   else if (q.productId) query = query.eq("product_id", q.productId);
   else if (q.niche) query = query.or(`advertiser.ilike.%${q.niche}%,hook.ilike.%${q.niche}%,mechanism_claim.ilike.%${q.niche}%`);
   const { data } = await query;
-  const mapped: CompetitorAngle[] = ((data ?? []) as Array<Record<string, unknown>>).map(mapRowToCompetitorAngle);
+  const rows = (data ?? []) as Array<Record<string, unknown>>;
+  const mapped: CompetitorAngle[] = await Promise.all(rows.map((r) => mapRowWithSignedImage(admin, r)));
   return rankByWinnerSignalAndIntent(mapped, q.intent);
 }
 
@@ -412,7 +413,7 @@ export function mapRowToCompetitorAngle(r: Record<string, unknown>): CompetitorA
     daysRunning: r.days_running == null ? null : Number(r.days_running),
     heat: r.heat == null ? null : Number(r.heat),
     destinationDomain: (r.destination_domain as string | null) ?? null,
-    imageUrl: (r.image_url as string | null) ?? null,
+    imageUrl: directImageUrl(r.image_url),
     resumeAdvertising: typeof r.resume_advertising === "boolean" ? (r.resume_advertising as boolean) : null,
     winnerTier: (r.winner_tier as string | null) ?? null,
     winnerScore: r.winner_score == null ? null : Number(r.winner_score),
@@ -434,13 +435,38 @@ export async function getCompetitorAngleBySkeletonId(
   const { data } = await admin
     .from("creative_skeletons")
     .select(
-      "advertiser, hook, framework, mechanism_claim, proof, offer, days_running, heat, destination_domain, image_url, resume_advertising, winner_tier, winner_score, concept_tags, elements, product_presentation, punchiness",
+      "advertiser, hook, framework, mechanism_claim, proof, offer, days_running, heat, destination_domain, image_url, thumb_path, resume_advertising, winner_tier, winner_score, concept_tags, elements, product_presentation, punchiness",
     )
     .eq("workspace_id", workspaceId)
     .eq("id", skeletonId)
     .maybeSingle();
   if (!data) return null;
-  return mapRowToCompetitorAngle(data as Record<string, unknown>);
+  return mapRowWithSignedImage(admin, data as Record<string, unknown>);
+}
+
+/** `creative_skeletons.image_url` holds the Meta Ad Library `ad_snapshot_url` — a
+ *  `facebook.com/ads/archive/render_ad/` HTML page, NOT image bytes. Handing it to Gemini as a
+ *  design reference made every competitor-imitation render 400 "Unable to process input image"
+ *  (the daily ad-creative failure since 2026-11-16). Only a URL that is not a render_ad page is
+ *  kept as a direct image URL. Pure. */
+export function directImageUrl(v: unknown): string | null {
+  if (typeof v !== "string" || v.length === 0) return null;
+  if (/facebook\.com\/ads\/archive\/render_ad/i.test(v)) return null;
+  return v;
+}
+
+/** The skeleton's real pixels live in the private `creative-shots` bucket at `thumb_path`
+ *  (written by `ingestAd`). Sign that object so `imageUrl` is fetchable image bytes; falls back
+ *  to `directImageUrl(image_url)` when there is no stored shot or signing fails. A 7-day TTL so
+ *  the provenance link on the ad detail page outlives the generation run. */
+const COMPETITOR_SHOT_TTL_SEC = 7 * 24 * 60 * 60;
+async function mapRowWithSignedImage(admin: Admin, r: Record<string, unknown>): Promise<CompetitorAngle> {
+  const angle = mapRowToCompetitorAngle(r);
+  const thumbPath = typeof r.thumb_path === "string" && r.thumb_path.length > 0 ? r.thumb_path : null;
+  if (!thumbPath) return angle;
+  const { data, error } = await admin.storage.from("creative-shots").createSignedUrl(thumbPath, COMPETITOR_SHOT_TTL_SEC);
+  if (error || !data?.signedUrl) return angle;
+  return { ...angle, imageUrl: data.signedUrl };
 }
 
 /** Winner-tier-first ranking + optional intent-scoped partition. Pure so a unit test can pin

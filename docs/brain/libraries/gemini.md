@@ -35,7 +35,7 @@ The ad-tool's **holding-product** + **talking-head/b-roll** engine. Per-workspac
 
 ## Errors
 
-`gemini_not_connected` · `gemini_{status}:{msg}` · `gemini_no_image` · `image_fetch_{status}` · `veo_{status}:{msg}` · `veo_no_operation` · `veo_op:{msg}` · `veo_no_video` · `veo_download_{status}` · `veo_timeout`.
+`gemini_not_connected` · `gemini_{status}:{msg}` · `gemini_no_image` · `image_fetch_{status}` · `image_not_image_{content-type}` (a reference URL served a text/* page, e.g. HTML, instead of image bytes) · `veo_{status}:{msg}` · `veo_no_operation` · `veo_op:{msg}` · `veo_no_video` · `veo_download_{status}` · `veo_timeout`.
 
 ## Callers
 

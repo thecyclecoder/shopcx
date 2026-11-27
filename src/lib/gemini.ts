@@ -29,6 +29,9 @@ async function toInlineData(url: string): Promise<{ mime_type: string; data: str
   const res = await fetch(url);
   if (!res.ok) throw new Error(`image_fetch_${res.status}`);
   const ct = res.headers.get("content-type") || "image/png";
+  // A text/html (or other text/*) body is a web page, not an image. Relabelling it image/png only
+  // moves the failure to Gemini's opaque 400 "Unable to process input image"; fail here by name.
+  if (ct.startsWith("text/")) throw new Error(`image_not_image_${ct.split(";")[0]}`);
   const buf = Buffer.from(await res.arrayBuffer());
   return { mime_type: ct.startsWith("image/") ? ct : "image/png", data: buf.toString("base64") };
 }
