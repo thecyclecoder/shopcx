@@ -1,0 +1,1 @@
+- **Scope out foreign order_refunds.shopify_order_id phantom-column noise at capture** · verified 2026-11-25 · → [[../libraries/error-feed]] · [[../tables/order_refunds]]

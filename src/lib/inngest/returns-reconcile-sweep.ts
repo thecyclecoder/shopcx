@@ -84,6 +84,12 @@ const UPSTREAM_MIN_AGE_MS = 14 * 24 * 60 * 60 * 1000;
 // A return that STILL says in_transit past this age has almost
 // certainly been lost by the carrier — escalate, don't wait forever.
 const UPSTREAM_MAX_AGE_DAYS = 30;
+// A label the carrier has NEVER scanned (tracker `unknown` / `pre_transit`) this long after it was
+// created is an abandoned return: the customer kept the item. Auto-cancel it via `cancelReturn`
+// (silent — no customer message; voids the unused label) instead of escalating it to the CEO
+// every day. CEO decision 2026-11-27.
+export const ABANDONED_LABEL_DAYS = 60;
+const NEVER_SCANNED_TRACKER_STATUSES = new Set(["", "unknown", "pre_transit"]);
 
 // EasyPost briefly rate-limits us — the sweep is already self-healing
 // (skip this return, next daily run retries) so log at warn, not error,
@@ -162,6 +168,7 @@ export type UpstreamSweepAction =
   | { kind: "promote_delivered"; reason: string }
   | { kind: "escalate_failure"; trackerStatus: string; reason: string }
   | { kind: "escalate_stale"; reason: string }
+  | { kind: "cancel_abandoned"; reason: string }
   | { kind: "no_action"; reason: string };
 
 /**
@@ -185,6 +192,12 @@ export function decideUpstreamSweep(input: {
       kind: "escalate_failure",
       trackerStatus: s,
       reason: `EasyPost tracker says ${s}`,
+    };
+  }
+  if (NEVER_SCANNED_TRACKER_STATUSES.has(s) && input.ageDays >= ABANDONED_LABEL_DAYS) {
+    return {
+      kind: "cancel_abandoned",
+      reason: `label never scanned (${s || "no tracker status"}) after ${input.ageDays} days — abandoned return`,
     };
   }
   if (input.ageDays >= UPSTREAM_MAX_AGE_DAYS) {
@@ -227,6 +240,7 @@ interface SweepCounts {
   healed: number;
   redriven: number;
   escalated: number;
+  cancelled?: number;
 }
 
 export const returnsReconcileSweep = inngest.createFunction(
@@ -478,6 +492,25 @@ async function sweepOneUpstream(
     return;
   }
 
+  if (action.kind === "cancel_abandoned") {
+    const { cancelReturn } = await import("@/lib/shopify-returns");
+    const res = await cancelReturn(ret.workspace_id, ret.id, `Auto-cancelled by returns sweep: ${action.reason}`);
+    if (res.success) {
+      // The return is resolved, so any open sweep card for it is moot.
+      await admin
+        .from("dashboard_notifications")
+        .update({ dismissed: true })
+        .eq("workspace_id", ret.workspace_id)
+        .eq("dismissed", false)
+        .like("metadata->>type", "return_sweep_%")
+        .eq("metadata->>return_id", ret.id);
+      counts.cancelled = (counts.cancelled ?? 0) + 1;
+    } else {
+      console.warn(`[returns-reconcile-sweep] cancel_abandoned refused for return ${ret.id}: ${res.error}`);
+    }
+    return;
+  }
+
   if (action.kind === "escalate_failure") {
     await escalate(admin, {
       workspace_id: ret.workspace_id,
@@ -549,13 +582,26 @@ async function escalate(
     metadata: Record<string, unknown>;
   },
 ): Promise<void> {
-  await admin.from("dashboard_notifications").insert({
+  // One OPEN card per (return, escalation type). The sweep runs daily and a stranded return stays
+  // stranded, so without a key every run minted a fresh card for the same return (1,671 open cards
+  // for a few dozen returns by 2026-11-27). The `dashboard_notifications_dedupe_key_open_uniq`
+  // partial index rejects a second open card with 23505, which here means "already escalated".
+  // Dismissing the card lets the next sweep re-raise it if the return is still stuck.
+  const { error } = await admin.from("dashboard_notifications").insert({
     workspace_id: input.workspace_id,
     type: "system",
     title: input.title,
     body: input.body,
-    metadata: input.metadata,
+    metadata: { ...input.metadata, dedupe_key: returnSweepDedupeKey(input.metadata) },
   });
+  if (error && error.code !== "23505") {
+    console.warn(`[returns-reconcile-sweep] escalation insert failed: ${error.message}`);
+  }
+}
+
+/** `return_sweep:<metadata.type>:<return_id>` — stable per return and escalation type. Pure. */
+export function returnSweepDedupeKey(metadata: Record<string, unknown>): string {
+  return `return_sweep:${String(metadata.type ?? "unknown")}:${String(metadata.return_id ?? "none")}`;
 }
 
 function formatCents(cents: number): string {

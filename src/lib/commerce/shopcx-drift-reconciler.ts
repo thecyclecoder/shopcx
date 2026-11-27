@@ -205,6 +205,19 @@ export interface LateSub {
    * a standing repair job nobody could act on, because "re-pin the date" would override the customer.
    */
   customerScheduled?: boolean;
+  /**
+   * The next-charge date MATCHES the authoritative live Shopify contract's nextBillingDate (within
+   * DATE_TOLERANCE_MS). A date the contract itself holds was scheduled by Shopify — a billing anchor
+   * or first-cycle alignment — not drift WE caused, so there is nothing to re-pin: overwriting it
+   * would fight the system that actually holds the money. Counted in the heartbeat but never paged,
+   * the same way `inDunning` / `inheritedFromAppstle` / `internalAccount` / `customerScheduled`
+   * lateness is already suppressed. This closes the last benign category that slips through
+   * `isEscalatableLate`.
+   *
+   * ⚠️ Measured 2026-11-25: the daily cron paged "2 late beyond their own cadence", but both subs'
+   * next_billing_date was identical to their live contract's nextBillingDate — no drift we caused.
+   */
+  contractAgreesWithNextDate?: boolean;
 }
 
 /**
@@ -226,12 +239,13 @@ export const CUSTOMER_SCHEDULING_EVENT_TYPES = [
 
 /**
  * The single source of truth for "should this late sub PAGE anyone". A late sub escalates only when
- * its lateness is unexplained: not held by a dunning cycle, not inherited behind from Appstle, and
- * not an internal test account. Every benign category is suppressed here so the alert stays
- * readable and fires only on real-customer scheduling drift WE caused.
+ * its lateness is unexplained: not held by a dunning cycle, not inherited behind from Appstle, not
+ * an internal test account, not a customer-chosen date, and not a date the authoritative live Shopify
+ * contract itself holds. Every benign category is suppressed here so the alert stays readable and
+ * fires only on real-customer scheduling drift WE caused.
  */
 export function isEscalatableLate(l: LateSub): boolean {
-  return !l.inDunning && !l.inheritedFromAppstle && !l.internalAccount && !l.customerScheduled;
+  return !l.inDunning && !l.inheritedFromAppstle && !l.internalAccount && !l.customerScheduled && !l.contractAgreesWithNextDate;
 }
 
 function cadenceDays(interval: string | null, count: number | null): number {
@@ -347,13 +361,32 @@ export async function findLateSubscriptions(
         const { count: evCount } = await ev;
         customerScheduled = (evCount ?? 0) > 0;
       }
+      const inDunning = (count ?? 0) > 0;
+      const internalAccount = Boolean(customerIsInternal || (s as { is_internal?: boolean | null }).is_internal);
+      // Would this row otherwise page? Only then is it worth a live Shopify contract read: if the
+      // authoritative contract itself holds this exact next date (billing anchor / first-cycle
+      // alignment), the lateness was Shopify-scheduled, not drift we caused — benign, suppressed.
+      // The read is deliberately gated behind the escalatable check so we never spend a Shopify API
+      // call on a sub already explained by dunning/inherited/internal/customer-scheduled.
+      let contractAgreesWithNextDate = false;
+      const wouldOtherwiseEscalate = !inDunning && !inherited && !internalAccount && !customerScheduled;
+      if (wouldOtherwiseEscalate) {
+        const live = await getSubscriptionContract(workspaceId, s.shopify_contract_id);
+        if (live.success && live.contract?.nextBillingDate) {
+          const delta = Math.abs(
+            new Date(live.contract.nextBillingDate).getTime() - new Date(s.next_billing_date).getTime(),
+          );
+          contractAgreesWithNextDate = delta <= DATE_TOLERANCE_MS;
+        }
+      }
       out.push({
         contractId: s.shopify_contract_id, cadenceDays: cad, extraDays: extra,
         lastChargedAt: String(last[0].created_at), nextBillingDate: s.next_billing_date,
-        inDunning: (count ?? 0) > 0,
+        inDunning,
         inheritedFromAppstle: inherited,
-        internalAccount: Boolean(customerIsInternal || (s as { is_internal?: boolean | null }).is_internal),
+        internalAccount,
         customerScheduled,
+        contractAgreesWithNextDate,
       });
     }
     if (page.length < 200) break;

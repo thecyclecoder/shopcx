@@ -631,6 +631,15 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     livenessWindowMs: 30 * HOUR,
   },
   {
+    id: "organic-nugget-generate",
+    kind: "cron",
+    owner: "cmo",
+    label: "Organic nugget generator",
+    description: "Daily — drafts educational nugget carousels, keeping ≥7 queued for approval.",
+    expectedCadence: "daily (0 7 * * *)",
+    livenessWindowMs: 30 * HOUR,
+  },
+  {
     id: "control-tower-monitor",
     kind: "cron",
     owner: "platform",

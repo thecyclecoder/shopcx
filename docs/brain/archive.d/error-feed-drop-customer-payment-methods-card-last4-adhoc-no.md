@@ -1,0 +1,1 @@
+- **Drop foreign-app noise: customer_payment_methods.card_last4 ad-hoc SELECT** · verified 2026-11-26 · → [[../libraries/error-feed]]

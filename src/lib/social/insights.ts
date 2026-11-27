@@ -26,7 +26,10 @@ async function fetchInstagramMetrics(mediaId: string, token: string): Promise<Me
   const fields = await gget(mediaId, token, "&fields=like_count,comments_count");
   const ins = await gget(`${mediaId}/insights`, token, "&metric=reach,saved,shares");
   const m: Record<string, number> = {};
-  for (const row of ins?.data || []) m[row.name] = row.values?.[0]?.value ?? 0;
+  for (const row of ins?.data || []) {
+    const v = row.values?.[0]?.value ?? row.total_value?.value;
+    if (typeof v === "number") m[row.name] = v;
+  }
   const likes = fields?.like_count ?? null, comments = fields?.comments_count ?? null;
   const saves = m.saved ?? null, shares = m.shares ?? null, reach = m.reach ?? null;
   const engagement = [likes, comments, saves, shares].some((x) => x != null)
@@ -34,12 +37,27 @@ async function fetchInstagramMetrics(mediaId: string, token: string): Promise<Me
   return { reach, likes, comments, saves, shares, engagement };
 }
 
+/** FB post unique reach. Meta retired `post_impressions_unique` in favor of
+ *  the media-view metrics (late 2025), so try the new name first and fall
+ *  back. A metric the API doesn't know errors the whole call, hence one
+ *  request per name. Needs the `read_insights` scope. */
+const FB_REACH_METRICS = ["post_total_media_view_unique", "post_impressions_unique"];
+
+async function fetchFacebookReach(postId: string, token: string): Promise<number | null> {
+  for (const metric of FB_REACH_METRICS) {
+    const d = await gget(`${postId}/insights`, token, `&metric=${metric}`);
+    const v = d?.data?.find((r: any) => r.name === metric)?.values?.[0]?.value;
+    if (typeof v === "number") return v;
+  }
+  return null;
+}
+
 async function fetchFacebookMetrics(postId: string, token: string): Promise<Metrics> {
-  const d = await gget(postId, token, "&fields=likes.summary(true).limit(0),comments.summary(true).limit(0),shares,insights.metric(post_impressions_unique)");
+  const d = await gget(postId, token, "&fields=likes.summary(true).limit(0),comments.summary(true).limit(0),shares");
   const likes = d?.likes?.summary?.total_count ?? null;
   const comments = d?.comments?.summary?.total_count ?? null;
   const shares = d?.shares?.count ?? null;
-  const reach = d?.insights?.data?.find((r: any) => r.name === "post_impressions_unique")?.values?.[0]?.value ?? null;
+  const reach = await fetchFacebookReach(postId, token);
   const engagement = [likes, comments, shares].some((x) => x != null) ? (likes || 0) + (comments || 0) + (shares || 0) : null;
   return { reach, likes, comments, saves: null, shares, engagement };
 }

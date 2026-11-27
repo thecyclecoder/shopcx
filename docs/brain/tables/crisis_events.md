@@ -89,6 +89,14 @@ ruled her Hazelnut-for-Cocoa report false three times because the order row said
 - **The ordered variant on `orders.line_items` is not the shipped flavor during a crisis** — see
   the Substitution behavior section above. Read `likely_substituted` (via
   [[../libraries/crisis-substitution]]), never the raw order line, as ground truth for what shipped.
+- **Validate `crisisId` before querying — `undefined` serializes into a Postgres uuid-cast error.** 
+  When a `crisisId` is passed as metadata (e.g., from journey completion in `src/app/api/journey/[token]/complete/route.ts` 
+  `sendCrisisConfirmation`), always validate it is a string matching the UUID regex 
+  `/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i` BEFORE calling `.eq('id', crisisId)`. 
+  If the guard fails, skip the lookup and use fallbacks (e.g., `restockDate='soon'`, `affectedItem='your item'`). 
+  An unguarded `.eq('id', undefined)` serializes `undefined` into the query string, producing `WHERE id = 'undefined'` 
+  — Postgres rejects this with a uuid-cast error on every attempt. The guard lives in the journey-complete route 
+  (`sendCrisisConfirmation`, ~line 1414-1425).
 - Probe before assuming — see [[../README]] § Probing technique.
 
 ---

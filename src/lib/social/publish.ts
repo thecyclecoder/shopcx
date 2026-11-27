@@ -10,6 +10,7 @@
  */
 import { createAdminClient } from "@/lib/supabase/admin";
 import { decrypt } from "@/lib/crypto";
+import { getOrganicContent } from "@/lib/social/organic-content";
 
 const GRAPH = "https://graph.facebook.com/v21.0";
 const SIGNED_URL_TTL = 3600; // 1h — Meta fetches within seconds of the call
@@ -42,7 +43,24 @@ function isTransientGraph(status: number, json: any): boolean {
   if (status >= 500 || status === 429) return true;
   const e = json?.error;
   if (e?.is_transient === true) return true;
-  return [1, 2, 4, 17, 32, 341, 613].includes(Number(e?.code));
+  if ([1, 2, 4, 17, 32, 341, 613].includes(Number(e?.code))) return true;
+  // 9007 / "Media ID is not available" = the IG container isn't ready yet.
+  // Retrying (after a wait) publishes it; it is not a permanent media error.
+  return Number(e?.code) === 9007 || /media id is not available/i.test(String(e?.message || ""));
+}
+
+/** Wait for an IG media container to reach FINISHED before media_publish.
+ *  Image containers are usually ready at once but not always — publishing
+ *  too early fails with "Media ID is not available" (~30% of IG posts in
+ *  Aug–Oct 2026). Returns null when ready, or an Err on ERROR/EXPIRED/timeout. */
+async function waitForContainer(creationId: string, token: string, tries: number, intervalMs: number, label: string): Promise<Err | null> {
+  for (let i = 0; i < tries; i++) {
+    const s = await fetch(`${GRAPH}/${creationId}?fields=status_code&access_token=${token}`).then((x) => x.json()).catch(() => ({}));
+    if (s?.status_code === "FINISHED") return null;
+    if (s?.status_code === "ERROR" || s?.status_code === "EXPIRED") return { ok: false, error: `${label} processing ${s.status_code}` };
+    await sleep(intervalMs);
+  }
+  return { ok: false, error: `${label} processing timed out`, retryable: true };
 }
 
 /** Build an Err from a Graph response, tagging transient failures retryable. */
@@ -96,6 +114,8 @@ export async function publishInstagramImage(
 ): Promise<PublishResult> {
   const c = await graphPost(`${igUserId}/media`, { image_url: imageUrl, caption, access_token: token });
   if (!c.ok || !c.json?.id) return graphFail(c, "IG image container failed");
+  const notReady = await waitForContainer(c.json.id, token, 12, 2500, "IG image");
+  if (notReady) return notReady;
   return igPublish(igUserId, token, c.json.id);
 }
 
@@ -107,13 +127,60 @@ export async function publishInstagramReel(
   if (!c.ok || !c.json?.id) return graphFail(c, "IG reel container failed");
   const creationId = c.json.id;
   // Poll status_code (up to ~2 min) — video transcode takes time.
-  for (let i = 0; i < 24; i++) {
-    await sleep(5000);
-    const s = await fetch(`${GRAPH}/${creationId}?fields=status_code&access_token=${token}`).then((x) => x.json()).catch(() => ({}));
-    if (s?.status_code === "FINISHED") return igPublish(igUserId, token, creationId);
-    if (s?.status_code === "ERROR" || s?.status_code === "EXPIRED") return { ok: false, error: `IG reel processing ${s.status_code}` };
+  const notReady = await waitForContainer(creationId, token, 24, 5000, "IG reel");
+  if (notReady) return notReady;
+  return igPublish(igUserId, token, creationId);
+}
+
+/**
+ * Publish a 2–10 slide carousel to the IG feed (nugget slideshows).
+ * Two-step per Graph: one child container per image (`is_carousel_item: true`),
+ * wait each to FINISHED, create the parent (`media_type: 'CAROUSEL'`, `children`,
+ * `caption`), wait it, then media_publish. All slides must share one aspect
+ * ratio (we render nuggets at 4:5 1080×1350).
+ */
+export async function publishInstagramCarousel(
+  igUserId: string, token: string, imageUrls: string[], caption: string,
+): Promise<PublishResult> {
+  if (imageUrls.length < 2 || imageUrls.length > 10) {
+    return { ok: false, error: `IG carousel needs 2–10 slides (got ${imageUrls.length})` };
   }
-  return { ok: false, error: "IG reel processing timed out" };
+  const childIds: string[] = [];
+  for (const url of imageUrls) {
+    const c = await graphPost(`${igUserId}/media`, { image_url: url, is_carousel_item: true, access_token: token });
+    if (!c.ok || !c.json?.id) return graphFail(c, "IG carousel child container failed");
+    const notReady = await waitForContainer(c.json.id, token, 12, 2500, "IG carousel child");
+    if (notReady) return notReady;
+    childIds.push(c.json.id);
+  }
+  const parent = await graphPost(`${igUserId}/media`, {
+    media_type: "CAROUSEL", children: childIds.join(","), caption, access_token: token,
+  });
+  if (!parent.ok || !parent.json?.id) return graphFail(parent, "IG carousel parent container failed");
+  const notReady = await waitForContainer(parent.json.id, token, 24, 3000, "IG carousel");
+  if (notReady) return notReady;
+  return igPublish(igUserId, token, parent.json.id);
+}
+
+/**
+ * Publish a multi-photo post to a Facebook Page feed (the FB rendering of a
+ * carousel). Upload each photo unpublished (`published: false`) to get a media
+ * fbid, then POST /{page}/feed with `attached_media`.
+ */
+export async function publishFacebookCarousel(
+  pageId: string, pageToken: string, imageUrls: string[], message: string,
+): Promise<PublishResult> {
+  if (imageUrls.length < 2) return { ok: false, error: `FB carousel needs ≥2 photos (got ${imageUrls.length})` };
+  const attached: Array<{ media_fbid: string }> = [];
+  for (const url of imageUrls) {
+    const up = await graphPost(`${pageId}/photos`, { url, published: false, access_token: pageToken });
+    if (!up.ok || !up.json?.id) return graphFail(up, "FB carousel photo upload failed");
+    attached.push({ media_fbid: String(up.json.id) });
+  }
+  const r = await graphPost(`${pageId}/feed`, { message, attached_media: attached, access_token: pageToken });
+  const id = r.json?.id || r.json?.post_id;
+  if (!r.ok || !id) return graphFail(r, "FB carousel post failed");
+  return { ok: true, platformId: id, permalink: `https://www.facebook.com/${id}` };
 }
 
 /** Publish a Story (image or video). Stories are media-only — no caption/overlay via the API. */
@@ -125,15 +192,11 @@ export async function publishInstagramStory(
     : { media_type: "STORIES", image_url: mediaUrl, access_token: token };
   const c = await graphPost(`${igUserId}/media`, body);
   if (!c.ok || !c.json?.id) return graphFail(c, "IG story container failed");
-  if (isVideo) {
-    // Video stories need the same processing poll.
-    for (let i = 0; i < 24; i++) {
-      await sleep(5000);
-      const s = await fetch(`${GRAPH}/${c.json.id}?fields=status_code&access_token=${token}`).then((x) => x.json()).catch(() => ({}));
-      if (s?.status_code === "FINISHED") break;
-      if (s?.status_code === "ERROR" || s?.status_code === "EXPIRED") return { ok: false, error: `IG story processing ${s.status_code}` };
-    }
-  }
+  // Every story container (image too) must be FINISHED before publish.
+  const notReady = isVideo
+    ? await waitForContainer(c.json.id, token, 24, 5000, "IG story")
+    : await waitForContainer(c.json.id, token, 12, 2500, "IG story");
+  if (notReady) return notReady;
   return igPublish(igUserId, token, c.json.id);
 }
 
@@ -151,6 +214,28 @@ export async function resolveMediaUrl(
   return post.media_url || null;
 }
 
+/**
+ * Resolve the ordered, publicly-fetchable slide URLs of a carousel row. Carousel
+ * rows carry no single media_* asset — their slides live in the linked
+ * organic_content row (source_ref_id → organic_content.id). Each slide's private
+ * image_bucket/image_path is re-signed fresh (never persisted).
+ */
+async function resolveCarouselUrls(
+  admin: ReturnType<typeof createAdminClient>, workspaceId: string, sourceRefId: string | null | undefined,
+): Promise<string[]> {
+  if (!sourceRefId) return [];
+  const content = await getOrganicContent(admin, workspaceId, sourceRefId);
+  if (!content) return [];
+  const urls: string[] = [];
+  for (const s of content.slides) {
+    if (s.image_bucket && s.image_path) {
+      const { data } = await admin.storage.from(s.image_bucket).createSignedUrl(s.image_path, SIGNED_URL_TTL);
+      if (data?.signedUrl) urls.push(data.signedUrl);
+    }
+  }
+  return urls;
+}
+
 // ── Orchestration ──
 
 export interface ScheduledPostRow {
@@ -158,11 +243,12 @@ export interface ScheduledPostRow {
   workspace_id: string;
   meta_page_id: string;
   platform: "facebook" | "instagram";
-  post_type: "feed" | "reel" | "story";
+  post_type: "feed" | "reel" | "story" | "carousel";
   caption: string | null;
   media_url: string | null;
   media_bucket: string | null;
   media_path: string | null;
+  source_ref_id?: string | null;  // carousel → organic_content.id
   link_url?: string | null;   // blog posts → FB link card
 }
 
@@ -182,6 +268,18 @@ export async function publishScheduledPost(post: ScheduledPostRow): Promise<Publ
 
   let token: string;
   try { token = decrypt(page.access_token_encrypted); } catch { return { ok: false, error: "token decrypt failed" }; }
+
+  // Carousel (nugget slideshow) — multi-image, resolved from the linked organic_content row.
+  if (post.post_type === "carousel") {
+    const urls = await resolveCarouselUrls(admin, post.workspace_id, post.source_ref_id);
+    if (urls.length < 2) return { ok: false, error: "carousel has <2 resolvable slides" };
+    const caption = post.caption || "";
+    if (post.platform === "facebook") {
+      return publishFacebookCarousel(String(page.meta_page_id), token, urls, caption);
+    }
+    const igUserId = String(page.meta_instagram_id || page.meta_page_id);
+    return publishInstagramCarousel(igUserId, token, urls, caption);
+  }
 
   const mediaUrl = await resolveMediaUrl(post);
   if (!mediaUrl) return { ok: false, error: "could not resolve media url" };

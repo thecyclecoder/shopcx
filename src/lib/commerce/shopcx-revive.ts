@@ -44,6 +44,7 @@ import {
 } from "@/lib/commerce/shopify-subscription-migrate";
 import { isAppstleRetired } from "@/lib/appstle-retired";
 import { errText } from "@/lib/error-text";
+import type { DiscontinuedReplacement } from "@/lib/migrate-to-internal";
 
 // ── Types ───────────────────────────────────────────────────────────────────────────────────
 
@@ -91,6 +92,13 @@ export interface ReviveOptions {
   address?: RawShippingAddress;
   /** A card the caller wants on the contract (switch-payment-method). Used when it is usable. */
   paymentMethodId?: string;
+  /**
+   * Restart-with-replacement: substitute each discontinued (excluded) product line with its
+   * configured replacement variant — same quantity/interval, priced at the replacement's per-unit
+   * rate so planMigration grandfathers it to exactly that amount. Lets a sub whose only product is
+   * discontinued restart on the replacement instead of being dropped to `no_lines`.
+   */
+  replaceDiscontinued?: boolean;
 }
 
 /** The `subscriptions` columns the revive reads. */
@@ -303,6 +311,36 @@ function humanizeShippingCode(code: string): string {
  * The whole mirror → contract-input mapping, PURE. Everything `buildShopcxFromMirror` decides
  * before it touches Shopify happens here, so it can be tested without a fake GraphQL.
  */
+/**
+ * Substitute every snapshot line whose product is discontinued (resolves into
+ * `discontinuedProductIds`) with the configured replacement variant — same quantity, priced at the
+ * replacement's per-unit rate (`current`/`effective` both set to it) so `planMigration` builds the
+ * standard MSRP line and grandfathers it down to exactly that amount (the migration pricing model,
+ * see shopify-subscription-migrate header). Lines that resolve to a non-discontinued product —
+ * including Shipping Protection, which is never a discontinued product — pass through untouched.
+ */
+export function substituteDiscontinuedLines(
+  lines: ReturnType<typeof mirrorItemsToSnapshotLines>,
+  ctx: PricingContext,
+  discontinuedProductIds: ReadonlySet<string>,
+  replacement: DiscontinuedReplacement,
+): ReturnType<typeof mirrorItemsToSnapshotLines> {
+  return lines.map((l) => {
+    const v =
+      ctx.variantBySku.get(String(l.sku ?? "").toLowerCase()) ??
+      ctx.variantByShopifyId.get(String(l.variant_id));
+    if (!v || !discontinuedProductIds.has(v.product_id)) return l;
+    return {
+      sku: replacement.variant.sku,
+      variant_id: replacement.variant.shopifyVariantId,
+      quantity: l.quantity,
+      current_price_cents: replacement.priceCents,
+      effective_unit_cents: replacement.priceCents,
+      code_allocation_unit_cents: 0,
+    };
+  });
+}
+
 export function planShopcxFromMirror(input: {
   row: MirrorRow;
   intent: EngineIntent;
@@ -312,6 +350,9 @@ export function planShopcxFromMirror(input: {
   address: ReturnType<typeof resolveReviveAddress>;
   now: Date;
   nextBillingDateOverride?: string;
+  /** Resolved replacement for a discontinued line; when set with `discontinuedProductIds`, excluded lines are substituted. */
+  replacement?: DiscontinuedReplacement | null;
+  discontinuedProductIds?: ReadonlySet<string>;
 }):
   | {
       ok: true;
@@ -336,6 +377,10 @@ export function planShopcxFromMirror(input: {
     };
   }
 
+  let snapshotLines = mirrorItemsToSnapshotLines(row.items);
+  if (input.replacement && input.discontinuedProductIds?.size) {
+    snapshotLines = substituteDiscontinuedLines(snapshotLines, input.ctx, input.discontinuedProductIds, input.replacement);
+  }
   const plan = planMigration(
     {
       appstle_contract_id: row.shopify_contract_id,
@@ -345,7 +390,7 @@ export function planShopcxFromMirror(input: {
       status: target.status,
       payment_method_id: input.card.id,
       payment_method_revoked: false,
-      lines: mirrorItemsToSnapshotLines(row.items),
+      lines: snapshotLines,
       raw: { deliveryMethod: { address: input.address.address } },
     },
     input.ctx,
@@ -560,8 +605,28 @@ export async function buildShopcxFromMirror(
   }
   if (!ctx) return { ok: false, reason: "no_pricing_rule", error: "no active pricing rule" };
 
+  // Restart-with-replacement: resolve the configured replacement for any discontinued line on this
+  // sub (DB read is done here, not in the pure planner, and threaded in). A dynamic import avoids a
+  // module cycle (migrate-to-internal → subscription → shopcx-revive).
+  let replacement: DiscontinuedReplacement | null = null;
+  let discontinuedProductIds: ReadonlySet<string> | undefined;
+  if (opts.replaceDiscontinued) {
+    try {
+      const { replacementForDiscontinued, MIGRATION_EXCLUDED_PRODUCT_IDS } = await import("@/lib/migrate-to-internal");
+      discontinuedProductIds = MIGRATION_EXCLUDED_PRODUCT_IDS;
+      const productIds = mirrorItemsToSnapshotLines(row.items)
+        .map((l) => (ctx.variantBySku.get(String(l.sku ?? "").toLowerCase()) ?? ctx.variantByShopifyId.get(String(l.variant_id)))?.product_id ?? "")
+        .filter(Boolean);
+      const { createAdminClient } = await import("@/lib/supabase/admin");
+      replacement = await replacementForDiscontinued(createAdminClient(), workspaceId, productIds);
+    } catch (e) {
+      return { ok: false, reason: "lookup_failed", error: `replacement lookup failed: ${errText(e)}` };
+    }
+  }
+
   const planned = planShopcxFromMirror({
     row, intent, ctx, card, customerGid, address, now, nextBillingDateOverride: opts.nextBillingDate,
+    replacement, discontinuedProductIds,
   });
   if (!planned.ok) return planned;
 
@@ -748,6 +813,7 @@ export async function ensureShopcxEngine(
   if (!subId) return { ok: false, reason: "not_found", error: `no subscription row for contract ${live}` };
   const r = await deps.build(workspaceId, subId, intent, {
     nextBillingDate: opts.nextBillingDate, address: opts.address, paymentMethodId: opts.paymentMethodId,
+    replaceDiscontinued: opts.replaceDiscontinued,
   });
   if (!r.ok) return r;
   return { ok: true, contractId: r.contractId, engine: "shopcx", built: r.flipped, handledLocally: false };

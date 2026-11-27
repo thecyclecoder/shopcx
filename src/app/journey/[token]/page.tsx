@@ -990,6 +990,9 @@ interface NextOrderEditableItem {
   variant_id?: string;
   quantity: number;
   price?: string | null;
+  // False when this is the only product line — removing it would empty the sub, so the builder marks
+  // it non-removable and we steer to Skip / Cancel instead (Portal parity).
+  removable?: boolean;
 }
 
 interface NextOrderSub {
@@ -1309,7 +1312,9 @@ function NextOrderJourney({
                 {item.variant_title && <p className="text-xs text-zinc-500">{item.variant_title}</p>}
                 {item.price && <p className="text-xs text-zinc-400">{item.price}</p>}
               </div>
-              {editableItems.length > 1 && (
+              {/* Remove only when it is NOT the last product line (builder sets removable=false).
+                  On the only item, removing would empty the sub — steer to Skip / Cancel below. */}
+              {item.removable !== false && editableItems.length > 1 ? (
                 <button
                   onClick={() => runEdit({ action: "remove", subscription_id: selectedSub.id, variant_id: item.variant_id! })}
                   disabled={busy}
@@ -1317,7 +1322,11 @@ function NextOrderJourney({
                 >
                   Remove
                 </button>
-              )}
+              ) : item.removable === false ? (
+                <span className="shrink-0 text-right text-[11px] text-zinc-400">
+                  Only item — skip or cancel below
+                </span>
+              ) : null}
             </div>
             <div className="mt-2 flex items-center gap-2">
               <span className="text-xs text-zinc-500">Qty</span>
@@ -1396,6 +1405,9 @@ function NextOrderJourney({
           <input
             type="date"
             value={dateValue}
+            // The next delivery date must be in the FUTURE — min=tomorrow stops a past/today pick that
+            // the ShopCX engine rejects (the 2026-11-24 failed change). The server re-validates.
+            min={new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString().slice(0, 10)}
             onChange={(e) => setDateValue(e.target.value)}
             disabled={busy}
             className="flex-1 rounded-md border border-zinc-200 px-2 py-2 text-sm"

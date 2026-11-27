@@ -41,3 +41,5 @@ nothing, adds no gift. Win-back send scripts must call the same function so the 
 the click gate can't diverge (CEO: never send restart offers to banned, fraud or chargeback customers).
 
 **2026-11-22:** the success message and ticket note include any out-of-stock swap made on restart ([[crisis-restart-swap]]).
+
+**2026-11-27 — restart-with-replacement.** When the chosen value is `reactivate_replace` (`parseReactivateValue().replaceDiscontinued`), `handleReactivateChoice` resolves the replacement BEFORE restarting (via [[reactivate-journey-builder]] `subDiscontinuedReplacement` on the sub's current items — they change to the replacement afterwards), passes `replaceDiscontinued` to [[subscription-reactivate]], and renders the shared `replacementResultMessage` / `replacementTicketNote` (identical to the portal). The revive substitutes the discontinued line for the replacement variant at the configured per-unit price. See [[../lifecycles/shopcx-subscriptions]] § Reactivation.

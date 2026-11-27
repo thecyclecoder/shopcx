@@ -130,6 +130,7 @@ import { abandonedCartReminder } from "@/lib/inngest/abandoned-cart";
 import { socialSchedulerPlan, socialPublish } from "@/lib/inngest/social-scheduler";
 import { autoBlogGenerate } from "@/lib/inngest/auto-blog";
 import { featuredReviewCardsCron } from "@/lib/inngest/featured-review-cards";
+import { organicNuggetGenerate } from "@/lib/inngest/organic-nugget-generate";
 import { socialInsightsSync } from "@/lib/inngest/social-insights";
 import { socialPromoGraphics } from "@/lib/inngest/social-promo-graphics";
 import { shopifyReviewMetafieldsSync } from "@/lib/inngest/shopify-review-metafields-sync";
@@ -333,6 +334,7 @@ export const registeredInngestFunctions = [
   socialPublish,
   autoBlogGenerate,
   featuredReviewCardsCron,
+  organicNuggetGenerate,
   socialInsightsSync,
   socialPromoGraphics,
   shopifyReviewMetafieldsSync,

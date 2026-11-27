@@ -342,6 +342,25 @@ now `"gift_order"`.
 
 Setting a next-billing-date on a PAUSED contract is allowed and survives the resume (verified), so
 reactivate's set-date-then-resume ordering is sound.
+
+**Restart-with-replacement for a discontinued-only sub (2026-11-27).** 42 Wave-1 win-back subs are
+ACV-Gummies-only; ACV is discontinued no-restock (CEO 2026-10-01) so every restart dead-ended at
+`only_excluded_products`. Now the restart page ([[../libraries/reactivate-journey-builder]]
+`subDiscontinuedReplacement`) detects a sub whose every real line is a discontinued product and, when
+a replacement is configured ([[../tables/products]]`.discontinued_replacement_product_id` /
+`discontinued_replacement_price_cents` — live: ACV → **Ashwavana Zen Relax @ $29.95**), offers it:
+*"Apple Cider Vinegar Gummies has been discontinued. Would you like to restart with Ashwavana Zen
+Relax for $29.95 instead?"* Confirming passes `replaceDiscontinued` to
+[[../libraries/subscription-reactivate]] `reactivateSubscription`; the revive
+([[../libraries/commerce__shopcx-revive]] `substituteDiscontinuedLines`) swaps each discontinued line
+for the replacement variant (same quantity/interval), priced so `planMigration` grandfathers the
+effective per-unit to exactly `discontinued_replacement_price_cents`. Both surfaces — the win-back
+journey ([[../libraries/winback-reactivate-choice]]) and the portal
+([[../libraries/portal__handlers__reactivate]]) — pass the flag and render the IDENTICAL result
+message (`"Restarted with {replacement} at ${price}. Next order: {date}."`) and ticket note
+(`"[Win-back] Restarted with {replacement} in place of discontinued {product} at ${price}."`). When a
+discontinued-only sub has NO replacement configured, the page says so plainly (never the old "our team
+will reach out"). Shipping Protection is never a product line and is untouched.
 | pause · cancel · resume · skip · dates | [[../libraries/commerce__subscription]] | direct Shopify mutations |
 
 Each of the coupon surfaces previously read the workspace's Appstle key and, without one, either

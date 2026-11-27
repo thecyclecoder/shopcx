@@ -72,6 +72,8 @@ An out-of-policy refund/return from a customer who **clears one of the tiers abo
 
 **Motivating case — ticket `87ce35a1`.** June originally escalated an out-of-policy renewal-refund on a customer with LTV **$1,569 / 19 orders / no disqualifier** to the founder — even though the customer cleared BOTH Tier 1 (`store_credit_return`) and Tier 2 (`refund_return`) with no disqualifier active. The correct verdict was `approve_remedy` routing back into `offer_exception` (the sanctioned save the playbook was designed for), not a founder page.
 
+**Cancel-after-renewal is never `escalate_founder`** (spec [[../specs/cancel-after-renewal]]). A refund request on a renewal that charged BEFORE the customer cancelled is a standard case — stay inside the Refund playbook (`approve_remedy` back into the ladder), never a founder page. A customer's **mention** of a bank dispute or chargeback is NOT a chargeback: it counts as a real dispute only when [[../tables/chargeback_events]] has a row for the order, and even then June routes it to the chargeback pipeline, not the founder. Ground truth: ticket `b44584dc` (Brooke Miedema) cancelled 2h20m after a renewal charged and asked for a refund citing a bank dispute; no `chargeback_events` row existed, yet the 'chargeback' was escalated to the founder. The `cs_director_call` grader rubric PENALIZES `escalate_founder` on this case (seeded calibration row via `supabase/migrations/20261125123000_cs_director_grader_cancel_after_renewal.sql`).
+
 ## Disqualifiers (`disqualifier_behavior='silent'`)
 
 - **previous_exception** — customer got a playbook exception before → blocks `exceptions_only`. In-policy returns still allowed.

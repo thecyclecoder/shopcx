@@ -66,7 +66,7 @@ anything materially later.
 
 Not every late sub is a defect, so each `LateSub` carries a reason flag, and the pure predicate
 **`isEscalatableLate(l)`** is the single source of truth for "should this PAGE anyone". It pages only
-when lateness is unexplained — `!inDunning && !inheritedFromAppstle && !internalAccount && !customerScheduled`. The cron
+when lateness is unexplained — `!inDunning && !inheritedFromAppstle && !internalAccount && !customerScheduled && !contractAgreesWithNextDate`. The cron
 ([[../inngest/shopcx-drift-reconcile]]) filters on that same logic before opening a
 `shopcx-subscription-health:late` repair job, and every suppressed category is still counted in the
 heartbeat for visibility.
@@ -77,6 +77,7 @@ heartbeat for visibility.
 | `inheritedFromAppstle` | last charge predates migration — it arrived already behind | `lateInherited` |
 | `internalAccount` | the owning customer (or the sub) is an **internal test account** — the founder's manually-manipulated test harness, not a real customer money path | `lateInternal` |
 | `customerScheduled` | the customer chose the date: a `customer_events` row in `CUSTOMER_SCHEDULING_EVENT_TYPES` (portal date change, agent `change_next_date` → `agent.date.changed`, pause/resume/auto-resume, reactivation, Order Now, Appstle next-order-date-changed / paused) on this contract or its `migrated_from_contract_id` (`properties->>shopify_contract_id`) since the last charge | `lateCustomerScheduled` |
+| `contractAgreesWithNextDate` | the `next_billing_date` MATCHES the authoritative live Shopify contract's `nextBillingDate` (within `DATE_TOLERANCE_MS`) — a date Shopify itself scheduled via a billing anchor or first-cycle alignment, so there is no drift we caused and nothing to re-pin | `lateContractAgrees` |
 
 **Internal-account exclusion (2026-10-14).** `findLateSubscriptions` selects `customer_id, is_internal`
 and resolves the owning [[../tables/customers]]`.is_internal` per candidate, setting
@@ -91,6 +92,17 @@ the customer chose (6 portal date changes, 7 Order Now, 7 pause/auto-resume, 4 r
 "Re-pin the date" would have overridden the customer, so those are now flagged `customerScheduled`,
 counted, and never paged. Order Now counts because it bills the upcoming cycle early, so the next
 date correctly sits one full cadence past that cycle.
+
+**Contract-authoritative exclusion (2026-11-25).** The cron paged "2 late beyond their own cadence",
+but both subs' `next_billing_date` was identical to their live Shopify contract's `nextBillingDate` —
+a date Shopify itself scheduled (billing anchor / first-cycle alignment), not drift we caused. The
+analyzer had only ever compared our date to our own last order, never to the contract that actually
+holds the money, so Shopify-authoritative scheduling read as a defect. `findLateSubscriptions` now,
+**only for a row that would otherwise escalate** (so no Shopify API call is spent on an already-explained
+sub), reads the live contract via `getSubscriptionContract` and sets
+`contractAgreesWithNextDate = contract readable && |contract.nextBillingDate − next_billing_date| ≤ DATE_TOLERANCE_MS`.
+Such rows are counted (`lateContractAgrees`) but never paged, closing the last benign category that
+slipped through `isEscalatableLate`.
 
 ## Related
 

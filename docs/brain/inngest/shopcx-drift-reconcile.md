@@ -21,7 +21,7 @@ makes that visible. See [[../operational-rules]] § North star.
 - **Steps:** kill-switch → list workspaces → one `reconcileShopcxDrift(ws, {apply:true})` step per
   workspace → cadence-check (`findLateSubscriptions`) → escalate-if-needed → heartbeat
 - **Heartbeat:** `emitCronHeartbeat` on every run including the switched-off path, carrying
-  `{checked, repaired, date, status, late, lateInDunning, lateInherited, lateInternal}` so the counts are visible in Control Tower without
+  `{checked, repaired, date, status, late, lateInDunning, lateInherited, lateInternal, lateCustomerScheduled, lateContractAgrees}` so the counts are visible in Control Tower without
   reading logs
 
 ## ⭐ It ESCALATES now — a monitor that only logs is not a monitor
@@ -60,7 +60,7 @@ never escalated, matching the dunning/inherited suppressions. See [[../libraries
 
 ### ⚠️ Only OUR lateness pages anyone
 
-`late` is split five ways, and just one of them escalates:
+`late` is split six ways, and just one of them escalates:
 
 - **explained by dunning** — the current cycle went through dunning, so the late date is dunning-owned,
   not scheduling drift; expected, never escalated. This covers both the *open* states
@@ -75,9 +75,13 @@ never escalated, matching the dunning/inherited suppressions. See [[../libraries
 - **customer-scheduled** — the customer moved the date since the last charge (portal date change,
   pause/resume, reactivation, Order Now); counted in `lateCustomerScheduled`, never escalated. Added
   2026-11-21 after 26 of 30 "unexplained" late subs turned out to be customer-chosen dates.
+- **contract-authoritative** — the `next_billing_date` matches the live Shopify contract's `nextBillingDate`
+  (within `DATE_TOLERANCE_MS`), a date Shopify itself scheduled via billing anchor or first-cycle alignment;
+  counted in `lateContractAgrees`, never escalated. Added 2026-11-25 after the cron paged daily on dates
+  the contract itself held.
 - **caused by us** — everything else. This is the only group that opens a repair job.
 
-Escalating the first three would fire daily forever and train everyone to ignore the alert — and the
+Escalating the first five would fire daily forever and train everyone to ignore the alert — and the
 one that mattered would go with it. That split is what makes the alert worth reading.
 
 ## Verified 2026-10-01 — and the heartbeat proved the point

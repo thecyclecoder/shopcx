@@ -130,6 +130,8 @@ On confirm:
 - Tag the ticket `j:cancel`, `jo:negative`.
 - Write `outcome='rejected'` to [[../tables/remedy_outcomes]] for each remedy that was shown but not accepted (so we capture the missed-save signal). `'rejected'` is the `remedy_outcomes_outcome_check` value for "customer churned after seeing this remedy" — the JOURNEY-level `journey_sessions.outcome='cancelled'` is a separate, coarser column.
 
+**Verify before report (2026-11-26).** The confirm step reports success ONLY when the cancel actually landed. The route tracks `cancelFailed = !result.success` on the `subscriptionAction("cancel", …)` call: when it fails the route does NOT send the "Your subscription has been cancelled" message (neither the external `ticket_messages` row nor the `sendTicketReply` email) and does NOT close the ticket — instead it sends the honest "We couldn't finish cancelling automatically. Our team has been notified…" apology, returns `success:false`, sets `tickets.status='open'` + `handled_by=null`, inserts a high-severity `dashboard_notifications` row (title "Cancel journey: cancel failed to apply", metadata ticket/session/contract/error), and stores `journey_sessions.outcome='cancel_failed'`. `journey_sessions.outcome_action_taken` is set true ONLY when the cancel (or save) actually applied. This mirrors the save-failure path in the same handler.
+
 ## Phase 4 — outcome tags
 
 Outcomes drive analytics. Tags applied:
@@ -221,6 +223,9 @@ All three produce the same [[../tables/ticket_messages]] rows + the same [[../ta
 
 **Fixed 2026-07-08 (ticket 472310cc):**
 - **Refund-playbook pause step is skipped when the identified subscription is already cancelled.** A `pause_subscription`/`pause` step in the Refund playbook now routes through `decidePauseSubscriptionStep` in `playbook-executor.ts`: if the target sub's status is `cancelled`, the step advances with no action and no response (nothing for the step-level claim-guard to block); on active/paused the pause still fires with `backedActions: ["pause_timed", "pause"]`. Previously the step tried to pause an already-cancelled sub, the "I've paused your subscription" claim was unbacked, and the guard dead-ended the run in escalation. See [[../playbooks/refund]] § Communication rules.
+
+**Fixed 2026-11-26 (cancel journey confirmed-cancel regression since 11/22):**
+- **Confirming a cancel now actually reaches the cancel handler.** Since the pre-renewal/next-order goal merged (5b19a44c, 2026-11-22), `src/app/api/journey/[token]/complete/route.ts` computed `cancelFlow` from `config.cancelJourney` BEFORE the code-driven block set it, and a cancel session's stored `config_snapshot` never carries `cancelJourney` — so every confirmed cancel was marked `outcome='cancelled'` and the customer told it worked while the subscription kept billing (six customers in four days). The decision now routes through the exported [[../libraries/journey-cancel-flow]] `resolveCancelFlow(config, cancel_flow)` helper, which treats the cancel journey types (`cancel_subscription`/`cancellation`/`cancel`) as cancel flow from `journeyType`, keeping the fb8f4a14 client-flag security rule. The dead `config.cancelJourney = true` mutation in the code-driven block was removed. Pinned by `src/lib/journey-cancel-flow.test.ts` (`npm run test:journey-cancel-flow`).
 
 **Known gaps / open work:**
 - **Internal-sub billing/dunning not wired.** `appstleAttemptBilling` / dunning have no internal path (Braintree renewal scheduler not built — see `internal-subscription.ts` stubs). Internal subs don't generate Appstle billing attempts, so this isn't reached in normal flow, but bill-now / dunning admin paths assume Appstle.

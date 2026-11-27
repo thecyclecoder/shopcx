@@ -59,10 +59,17 @@ export interface ArmEngagement {
   emailsSent: number;
   /** Reminder SMS that sent or scheduled (treatment only). */
   smsSent: number;
-  /** SMS suppressed because the customer sent STOP (opt-out) — an M3 guardrail input. */
+  /** SMS suppressed because the customer was ALREADY unsubscribed at send time (sent STOP before the
+   *  run). INFORMATIONAL only — these customers were never texted a reminder, so they are NOT an
+   *  opt-out caused by the test and must not feed the guardrail (the 2026-11-24 false-trip root cause). */
   smsSuppressedStop: number;
   /** SMS suppressed for plain non-consent / bad phone. */
   smsSuppressedNoConsent: number;
+  /** Customers who WERE texted a reminder (sms_status 'scheduled'|'sent') and then opted out of SMS
+   *  marketing AFTER the send (STOP reply → sms_marketing_status flipped to unsubscribed after
+   *  sms_scheduled_send_at). This — NOT the already-unsubscribed count above — is the true
+   *  post-reminder opt-out the guardrail trips on. */
+  smsOptOutsAfterReminder: number;
   /** Next-order journeys opened. */
   opened: number;
   /** Journeys where the customer made an edit. */
@@ -106,8 +113,12 @@ export interface ReminderGuardrails {
   holdoutN: number;
   /** Both arms reached the pre-registered per-arm sample size. */
   sampleComplete: boolean;
-  /** STOP opt-outs seen across arms (TCPA / message-fatigue guardrail). */
-  smsOptOuts: number;
+  /** STOP replies to reminder texts across arms — customers texted a reminder who then opted out
+   *  (the TCPA / message-fatigue guardrail metric). */
+  smsOptOutsAfterReminder: number;
+  /** Customers already unsubscribed BEFORE the run (suppressed at send time) across arms.
+   *  INFORMATIONAL only — not caused by the test, never feeds the guardrail. */
+  smsAlreadyUnsubscribed: number;
   /** Coarse health read: 'ok' until a secondary metric on treatment breaches holdout. */
   status: "ok" | "watch";
   notes: string[];
@@ -167,6 +178,7 @@ function emptyEngagement(): ArmEngagement {
     smsSent: 0,
     smsSuppressedStop: 0,
     smsSuppressedNoConsent: 0,
+    smsOptOutsAfterReminder: 0,
     opened: 0,
     edited: 0,
     swapped: 0,
@@ -187,10 +199,19 @@ function emptyEngagement(): ArmEngagement {
  *   • Lifecycle events (step_key 'lifecycle') are attributed to an arm via that map; an event whose
  *     session isn't on the ledger is ignored. Swap/add-on is the `edited` subset whose label reads
  *     swap/add (same detection as the metrics module).
+ *   • `optOutAtByCustomer` maps a customer_id → the ISO timestamp their SMS marketing flipped to
+ *     unsubscribed (present ONLY for currently-unsubscribed customers). A texted treatment row whose
+ *     customer is in this map, with the opt-out stamped AFTER the send, is a post-reminder opt-out
+ *     (`smsOptOutsAfterReminder`). Because only sent/scheduled rows count — and a reminder only sends
+ *     to a consented customer — a now-unsubscribed texted customer necessarily opted out after the
+ *     text, so a missing/illegible timestamp still counts (the send itself proves they were
+ *     subscribed at send time). Rows already unsubscribed at send time never reach sent/scheduled
+ *     (they are `suppressed_stop`), so they can't inflate this count.
  */
 export function rollupEngagement(
   ledgerRows: ReminderLedgerRow[],
   lifecycleEvents: JourneyLifecycleEvent[],
+  optOutAtByCustomer: Map<string, string | null> = new Map(),
 ): Record<ExperimentArm, ArmEngagement> {
   const byArm: Record<ExperimentArm, ArmEngagement> = {
     treatment: emptyEngagement(),
@@ -204,7 +225,19 @@ export function rollupEngagement(
     if (!e) continue;
     e.reminded += 1;
     if (r.email_status === "sent") e.emailsSent += 1;
-    if (r.sms_status === "sent" || r.sms_status === "scheduled") e.smsSent += 1;
+    if (r.sms_status === "sent" || r.sms_status === "scheduled") {
+      e.smsSent += 1;
+      // Post-reminder opt-out: this customer was texted (so was consented at send time) and is now
+      // unsubscribed. Count it when the opt-out is stamped after the send, or when either timestamp
+      // is missing (the send itself proves pre-text consent → a current unsubscribe is post-text).
+      if (optOutAtByCustomer.has(r.customer_id)) {
+        const optOutMs = Date.parse(optOutAtByCustomer.get(r.customer_id) ?? "");
+        const textedMs = r.sms_scheduled_send_at ? Date.parse(r.sms_scheduled_send_at) : NaN;
+        if (Number.isNaN(optOutMs) || Number.isNaN(textedMs) || optOutMs > textedMs) {
+          e.smsOptOutsAfterReminder += 1;
+        }
+      }
+    }
     if (r.sms_status === "suppressed_stop") e.smsSuppressedStop += 1;
     if (r.sms_status === "suppressed_no_consent") e.smsSuppressedNoConsent += 1;
     if (r.journey_session_id) sessionToArm.set(r.journey_session_id, arm);
@@ -272,7 +305,10 @@ export function deriveGuardrails(
   const treatmentN = arms.treatment.customerGroups;
   const holdoutN = arms.holdout.customerGroups;
   const sampleComplete = requiredN != null && treatmentN >= requiredN && holdoutN >= requiredN;
-  const smsOptOuts = engagement.treatment.smsSuppressedStop + engagement.holdout.smsSuppressedStop;
+  const smsOptOutsAfterReminder =
+    engagement.treatment.smsOptOutsAfterReminder + engagement.holdout.smsOptOutsAfterReminder;
+  const smsAlreadyUnsubscribed =
+    engagement.treatment.smsSuppressedStop + engagement.holdout.smsSuppressedStop;
 
   const notes: string[] = [];
   let status: "ok" | "watch" = "ok";
@@ -288,7 +324,7 @@ export function deriveGuardrails(
     status = "watch";
   }
 
-  return { requiredNPerArm: requiredN, treatmentN, holdoutN, sampleComplete, smsOptOuts, status, notes, tripped: false, trippedReason: null };
+  return { requiredNPerArm: requiredN, treatmentN, holdoutN, sampleComplete, smsOptOutsAfterReminder, smsAlreadyUnsubscribed, status, notes, tripped: false, trippedReason: null };
 }
 
 /** Derive the verdict from the harness experiment status + the primary metric. PURE. */
@@ -379,6 +415,35 @@ async function fetchLifecycleEvents(
 }
 
 /**
+ * For the given (texted) customers, return a map customer_id → opt-out timestamp for those whose SMS
+ * marketing is CURRENTLY unsubscribed. There is no dedicated consent-event ledger, so the signal is
+ * `customers.sms_marketing_status = 'unsubscribed'` + its `updated_at` (the instant the flip was
+ * written by the STOP / unsubscribe path — see src/lib/action-executor.ts, shopify-webhooks.ts).
+ * Read-only. The caller only passes customers who were texted, so a hit is a post-reminder opt-out.
+ */
+async function fetchSmsOptOuts(
+  admin: Admin,
+  workspaceId: string,
+  customerIds: string[],
+): Promise<Map<string, string | null>> {
+  const out = new Map<string, string | null>();
+  if (customerIds.length === 0) return out;
+  const unique = [...new Set(customerIds)];
+  for (const part of chunk(unique, IN_CHUNK)) {
+    const { data } = await admin
+      .from("customers")
+      .select("id, updated_at")
+      .eq("workspace_id", workspaceId)
+      .eq("sms_marketing_status", "unsubscribed")
+      .in("id", part);
+    for (const row of (data as { id: string; updated_at: string | null }[] | null) ?? []) {
+      out.set(row.id, row.updated_at ?? null);
+    }
+  }
+  return out;
+}
+
+/**
  * The read-only results rollup for the pre-renewal-reminder test in a workspace. Composes the
  * harness experiment row + metrics, the reminder send ledger, and the next-order journey events
  * into a typed treatment-vs-holdout shape. Mutates nothing. Returns zeroed arms (and an `absent`
@@ -402,7 +467,15 @@ export async function getReminderTestResults(
     .filter((id): id is string => Boolean(id));
   const lifecycleEvents = await fetchLifecycleEvents(admin, workspaceId, sessionIds);
 
-  const engagement = rollupEngagement(ledger, lifecycleEvents);
+  // Resolve the post-reminder opt-out signal: for every customer who was actually TEXTED a reminder,
+  // read their current SMS marketing state + when it last changed. A texted customer now unsubscribed
+  // opted out AFTER the text (they were consented at send time) — the real guardrail input.
+  const textedCustomerIds = ledger
+    .filter((r) => r.sms_status === "sent" || r.sms_status === "scheduled")
+    .map((r) => r.customer_id);
+  const optOutAtByCustomer = await fetchSmsOptOuts(admin, workspaceId, textedCustomerIds);
+
+  const engagement = rollupEngagement(ledger, lifecycleEvents, optOutAtByCustomer);
   const arms: Record<ExperimentArm, ArmResults> = {
     treatment: buildArmResults(metrics.arms.treatment, engagement.treatment),
     holdout: buildArmResults(metrics.arms.holdout, engagement.holdout),

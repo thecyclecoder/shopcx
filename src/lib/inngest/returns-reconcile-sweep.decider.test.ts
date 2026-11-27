@@ -169,3 +169,29 @@ test("isEasyPostRateLimitError: arbitrary EasyPost 500 → false (keep at error,
   const err = new Error("EasyPost 500 Internal Server Error");
   assert.equal(isEasyPostRateLimitError(err), false);
 });
+
+test("returnSweepDedupeKey is stable per return + escalation type", async () => {
+  const { returnSweepDedupeKey } = await import("./returns-reconcile-sweep");
+  assert.equal(
+    returnSweepDedupeKey({ type: "return_sweep_upstream_stale", return_id: "r1", age_days: 200 }),
+    "return_sweep:return_sweep_upstream_stale:r1",
+  );
+  assert.equal(
+    returnSweepDedupeKey({ type: "return_sweep_upstream_stale", return_id: "r1", age_days: 201 }),
+    returnSweepDedupeKey({ type: "return_sweep_upstream_stale", return_id: "r1", age_days: 200 }),
+  );
+});
+
+test("decideUpstreamSweep: label never scanned at 60d → cancel_abandoned", () => {
+  for (const s of ["unknown", "pre_transit", null]) {
+    assert.equal(decideUpstreamSweep({ trackerStatus: s, ageDays: 60 }).kind, "cancel_abandoned");
+  }
+});
+
+test("decideUpstreamSweep: never-scanned label under 60d still escalates stale, not cancel", () => {
+  assert.equal(decideUpstreamSweep({ trackerStatus: "pre_transit", ageDays: 45 }).kind, "escalate_stale");
+});
+
+test("decideUpstreamSweep: a SCANNED in_transit return is never auto-cancelled", () => {
+  assert.equal(decideUpstreamSweep({ trackerStatus: "in_transit", ageDays: 200 }).kind, "escalate_stale");
+});

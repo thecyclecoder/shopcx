@@ -1,0 +1,1 @@
+- **Drop foreign direct-REST 'subscriptions.last_charged_at does not exist' noise at capture** · verified 2026-11-25 · → [[../libraries/error-feed]]

@@ -141,14 +141,87 @@ export function giftOptionValue(variantId: string): string {
   return `reactivate:${variantId}`;
 }
 
-/** `reactivate` → plain restart; `reactivate:<variant uuid>` → restart + that gift; else not a restart. */
-export function parseReactivateValue(value: string): { restart: boolean; giftVariantId: string | null } {
-  if (value === "reactivate") return { restart: true, giftVariantId: null };
+/** Option value for "restart on the discontinued product's replacement". Parsed by `parseReactivateValue`. */
+export const REACTIVATE_REPLACE_VALUE = "reactivate_replace";
+
+/**
+ * `reactivate` → plain restart; `reactivate_replace` → restart on the discontinued product's
+ * replacement; `reactivate:<variant uuid>` → restart + that gift; else not a restart.
+ */
+export function parseReactivateValue(value: string): { restart: boolean; giftVariantId: string | null; replaceDiscontinued: boolean } {
+  if (value === "reactivate") return { restart: true, giftVariantId: null, replaceDiscontinued: false };
+  if (value === REACTIVATE_REPLACE_VALUE) return { restart: true, giftVariantId: null, replaceDiscontinued: true };
   if (value.startsWith("reactivate:")) {
     const id = value.slice("reactivate:".length).trim();
-    return { restart: true, giftVariantId: id || null };
+    return { restart: true, giftVariantId: id || null, replaceDiscontinued: false };
   }
-  return { restart: false, giftVariantId: null };
+  return { restart: false, giftVariantId: null, replaceDiscontinued: false };
+}
+
+/** `$29.95` from `2995`. The one place the restart price is rendered, so both surfaces match. */
+export function formatReplacementPrice(cents: number): string {
+  return `$${(cents / 100).toFixed(2)}`;
+}
+
+export interface SubDiscontinuedReplacement {
+  /** The configured replacement, or null when a discontinued-only sub has none configured. */
+  replacement: import("@/lib/migrate-to-internal").DiscontinuedReplacement | null;
+  /** Titles of the discontinued products on the sub (for the page copy + ticket note). */
+  discontinuedTitles: string[];
+}
+
+/**
+ * When EVERY real product line on a sub is a discontinued product, describe the replacement to
+ * offer on restart (or `{ replacement: null }` when none is configured). Returns null when the sub
+ * is NOT discontinued-only — the normal restart path applies. Resolves line → product via
+ * `product_variants` (by Shopify id, then sku), then reads the configured replacement through the
+ * [[migrate-to-internal]] reader. Shipping-protection / $0 lines are never counted.
+ */
+export async function subDiscontinuedReplacement(
+  admin: Admin, workspaceId: string, items: unknown,
+): Promise<SubDiscontinuedReplacement | null> {
+  const list = (items as { sku?: string; title?: string; price_cents?: number; variant_id?: string | number }[] | null) || [];
+  const real = list.filter((i) => !isProtectionLine(i) && Number(i.price_cents ?? 1) !== 0);
+  if (!real.length) return null;
+
+  const { data: variants } = await admin.from("product_variants")
+    .select("product_id, sku, shopify_variant_id")
+    .eq("workspace_id", workspaceId);
+  const byShopify = new Map<string, string>();
+  const bySku = new Map<string, string>();
+  for (const v of (variants || []) as { product_id: string; sku: string | null; shopify_variant_id: string | null }[]) {
+    if (v.shopify_variant_id) byShopify.set(String(v.shopify_variant_id), v.product_id);
+    if (v.sku) bySku.set(String(v.sku).toLowerCase(), v.product_id);
+  }
+  const productIds = new Set<string>();
+  for (const i of real) {
+    const pid = byShopify.get(String(i.variant_id ?? "")) ?? bySku.get(String(i.sku ?? "").toLowerCase());
+    if (pid) productIds.add(String(pid));
+  }
+  if (!productIds.size) return null;
+
+  const { MIGRATION_EXCLUDED_PRODUCT_IDS, replacementForDiscontinued } = await import("@/lib/migrate-to-internal");
+  // Only a sub whose EVERY real line is a discontinued product gets the replacement treatment.
+  if (![...productIds].every((id) => MIGRATION_EXCLUDED_PRODUCT_IDS.has(id))) return null;
+
+  const { data: dps } = await admin.from("products").select("title").in("id", [...productIds]);
+  const discontinuedTitles = ((dps || []) as { title: string | null }[]).map((d) => String(d.title ?? "")).filter(Boolean);
+  const replacement = await replacementForDiscontinued(admin, workspaceId, [...productIds]);
+  return { replacement, discontinuedTitles };
+}
+
+/**
+ * The result message BOTH surfaces render after a replacement restart succeeds — identical copy
+ * (CLAUDE.md: mini-site and live chat produce identical ticket messages, only rendering differs).
+ */
+export function replacementResultMessage(replacementTitle: string, priceCents: number, when: string): string {
+  return `Restarted with ${replacementTitle} at ${formatReplacementPrice(priceCents)}. Next order: ${when}.`;
+}
+
+/** The internal ticket note for a replacement restart, shared by both surfaces. */
+export function replacementTicketNote(replacementTitle: string, discontinuedTitles: string[], priceCents: number): string {
+  const disc = discontinuedTitles.join(", ") || "the discontinued product";
+  return `[Win-back] Restarted with ${replacementTitle} in place of discontinued ${disc} at ${formatReplacementPrice(priceCents)}.`;
 }
 
 /** Human-readable item summary, e.g. "Superfood Tabs — Mixed Berry ×2". */
@@ -170,10 +243,51 @@ export async function buildReactivateSteps(
 
   const what = describeItems(sub.items);
   const wasPaused = sub.status === "paused";
+
+  // Discontinued-only sub: offer the configured replacement instead of a restart that would fail
+  // `only_excluded_products`. When no replacement is configured, say plainly it is discontinued
+  // (never the old "our team will reach out").
+  const disc = await subDiscontinuedReplacement(admin, workspaceId, sub.items);
+  if (disc) {
+    const discName = disc.discontinuedTitles.join(", ") || "This product";
+    if (disc.replacement) {
+      const price = formatReplacementPrice(disc.replacement.priceCents);
+      return {
+        codeDriven: true,
+        multiStep: false,
+        steps: [{
+          key: "reactivate_choice",
+          type: "single_choice",
+          question: `${discName} has been discontinued. Would you like to restart with ${disc.replacement.title} for ${price} instead?`,
+          subtitle: `We'll restart your subscription with ${disc.replacement.title} at ${price} per order. Your next order processes tomorrow.`,
+          options: [
+            { value: REACTIVATE_REPLACE_VALUE, label: `Yes, restart with ${disc.replacement.title}` },
+            { value: "not_now", label: "Not right now" },
+          ],
+          isTerminal: true,
+        }],
+        metadata: { journeyType: "reactivate_subscription", subscriptionId: sub.id, contractId: sub.shopify_contract_id, previousStatus: sub.status, customerId, workspaceId, ticketId },
+      };
+    }
+    return {
+      codeDriven: true,
+      multiStep: false,
+      steps: [{
+        key: "reactivate_choice",
+        type: "single_choice",
+        question: `${discName} has been discontinued, so we can't restart this subscription as it was.`,
+        subtitle: "We don't have a replacement to offer yet. You can keep your subscription off for now.",
+        options: [{ value: "not_now", label: "Okay, keep it off" }],
+        isTerminal: true,
+      }],
+      metadata: { journeyType: "reactivate_subscription", subscriptionId: sub.id, contractId: sub.shopify_contract_id, previousStatus: sub.status, customerId, workspaceId, ticketId },
+    };
+  }
+
   const gifts = await loadWinbackGifts(admin, workspaceId);
   // Out-of-stock flavors (active crisis) are swapped on restart; say so BEFORE they click.
   const { crisisSwapsForItems, crisisNotice } = await import("@/lib/crisis-restart-swap");
-  const notice = crisisNotice(await crisisSwapsForItems(admin, workspaceId, sub.items));
+  const notice = crisisNotice(await crisisSwapsForItems(admin, workspaceId, sub.items, sub.id));
   const options = gifts.length
     ? [
         ...gifts.map((g) => ({ value: giftOptionValue(g.variant_id), label: `Restart + free ${g.label}` })),

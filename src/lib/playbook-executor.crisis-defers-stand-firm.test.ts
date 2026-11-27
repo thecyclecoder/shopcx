@@ -12,6 +12,14 @@
  * so unified-ticket-handler falls through to the Sonnet white-glove crisis path
  * instead of short-circuiting on `intent_playbook_routed`.
  *
+ * Phase 1 of [[cancel-after-renewal]]: "active" now means the crisis row's linked
+ * subscription is not CANCELLED. Ground truth: ticket b44584dc (Brooke Miedema)
+ * cancelled 2h20m after a renewal charged and asked for a refund; her Strawberry
+ * Lemonade crisis row had `cancelled=false` but pointed at a cancelled subscription,
+ * so the guard fired and kept her cancel-after-renewal refund out of the Refund
+ * playbook. The last test asserts that a crisis row on a cancelled sub routes into
+ * the Refund playbook instead of deferring.
+ *
  * Run: `npx tsx --test src/lib/playbook-executor.crisis-defers-stand-firm.test.ts`.
  */
 import test from "node:test";
@@ -30,17 +38,18 @@ interface StubOpts {
     trigger_intents: string[];
     stand_firm_max: number;
   }>;
-  // count returned for the crisis_customer_actions head/count read
-  crisisCount: number;
+  // crisis_customer_actions rows (each with its joined subscription status) returned
+  // for the crisis read — the guard filters out rows whose subscription is cancelled.
+  crisisRows: Array<{ subscriptions: { status: string } | null }>;
 }
 
 /**
  * A minimal Supabase-shaped stub. Routes by table name:
  *  - tickets  → terminal `.single()` resolves `{ data: ticket }`
  *  - playbooks → terminal `.order()` resolves `{ data: playbooks }`
- *  - crisis_customer_actions → thenable chain resolves `{ count: crisisCount }`
- * If the router routes (never expected in these tests) `startPlaybook`'s
- * `.update(...).eq(...)` would be hit — we throw so a stray route is loud.
+ *  - crisis_customer_actions → thenable chain resolves `{ data: crisisRows }`
+ * If the router routes (expected only in the cancelled-sub test) `startPlaybook`'s
+ * `.update(...).eq(...)` would be hit — we throw so a route is observable.
  */
 function stubAdmin(opts: StubOpts): unknown {
   function chainFor(table: string): unknown {
@@ -66,9 +75,9 @@ function stubAdmin(opts: StubOpts): unknown {
       update() {
         throw new Error(`unexpected write to ${table} — router should have deferred`);
       },
-      // thenable so the crisis count read (ends on `.eq('cancelled', false)`) awaits here
+      // thenable so the crisis read (ends on `.eq('cancelled', false)`) awaits here
       then(resolve: (v: unknown) => void) {
-        resolve({ count: opts.crisisCount, data: null, error: null });
+        resolve({ data: opts.crisisRows, count: null, error: null });
       },
     };
     return chain;
@@ -84,11 +93,11 @@ const REFUND_STAND_FIRM = {
   stand_firm_max: 3,
 };
 
-test("crisis-confirmed customer + refund_request + stand-firm Refund playbook → defers to orchestrator (NOT routed)", async () => {
+test("crisis-confirmed customer (ACTIVE sub) + refund_request + stand-firm Refund playbook → defers to orchestrator (NOT routed)", async () => {
   const admin = stubAdmin({
     ticket: { active_playbook_id: null, customer_id: "cust-april" },
     playbooks: [REFUND_STAND_FIRM],
-    crisisCount: 1,
+    crisisRows: [{ subscriptions: { status: "active" } }],
   });
   const r = await routeIntentToPlaybook(admin as never, "ws-1", "tkt-1", "refund_request");
   assert.equal(r.routed, false);
@@ -99,14 +108,30 @@ test("crisis-confirmed customer + refund_request + stand-firm Refund playbook �
   );
 });
 
+test("crisis row on a CANCELLED subscription + refund_request → the guard does NOT fire (routes into Refund playbook)", async () => {
+  // Brooke Miedema: her only crisis row has cancelled=false but points at a cancelled
+  // subscription, so the guard must ignore it and let the router start the Refund
+  // playbook. The stubbed `.update` throws, proving the router reached the routing path.
+  const admin = stubAdmin({
+    ticket: { active_playbook_id: null, customer_id: "cust-brooke" },
+    playbooks: [REFUND_STAND_FIRM],
+    crisisRows: [{ subscriptions: { status: "cancelled" } }],
+  });
+  await assert.rejects(
+    () => routeIntentToPlaybook(admin as never, "ws-1", "tkt-brooke", "refund_request"),
+    /unexpected write to tickets|unexpected write to playbooks/,
+    "a crisis row on a cancelled subscription must not keep a cancel-after-renewal refund out of the Refund playbook",
+  );
+});
+
 test("NON-crisis customer + refund_request + stand-firm Refund playbook → the guard does NOT fire (would route)", async () => {
-  // crisisCount:0 means the guard is skipped; the router proceeds to startPlaybook,
+  // No crisis rows means the guard is skipped; the router proceeds to startPlaybook,
   // whose stubbed `.update` throws — proving the guard did NOT short-circuit and the
   // routing path was reached for a non-crisis customer (narrowness of the guard).
   const admin = stubAdmin({
     ticket: { active_playbook_id: null, customer_id: "cust-normal" },
     playbooks: [REFUND_STAND_FIRM],
-    crisisCount: 0,
+    crisisRows: [],
   });
   await assert.rejects(
     () => routeIntentToPlaybook(admin as never, "ws-1", "tkt-2", "refund_request"),

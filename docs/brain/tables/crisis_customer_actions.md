@@ -29,6 +29,7 @@ Per-customer state in a crisis campaign — segment, current tier, responses, sw
 | `auto_resume` | `bool` | ✓ | default: `false` |
 | `removed_item_at` | `timestamptz` | ✓ |  |
 | `auto_readd` | `bool` | ✓ | default: `false` |
+| `hold_for_restock` | `bool` | — | default: `false` · the customer DECLINED the substitute flavor and chose to wait for their original flavor to come back in stock. Set by `crisis_enroll` ([[../libraries/action-executor]]) when called with `hold_for_restock=true` (which also writes `tier1_response='rejected'`, not `'accepted_swap'`). Signals downstream automation — notably the restart swap ([[../libraries/crisis-restart-swap]]) — that this customer must NOT be auto-swapped + charged for the substitute. See [[../lifecycles/crisis-campaign]] and spec `crisis-restart-swap-respects-wait-for-restock`. |
 | `auto_swap_back` | `bool` | — | default: `false` · set by [[../libraries/crisis-restart-swap]] on a restart swap; Resolve swaps the row back to `original_item` |
 | `cancelled` | `bool` | ✓ | default: `false` |
 | `cancel_date` | `timestamptz` | ✓ |  |

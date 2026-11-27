@@ -9,11 +9,12 @@
  */
 import { createAdminClient } from "@/lib/supabase/admin";
 import { isSeasonallyAppropriate } from "@/lib/social/seasonality";
+import { listApprovedOrganicContent, type OrganicFormat, type OrganicPillar } from "@/lib/social/organic-content";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
 export interface PickedAsset {
-  sourceRefId: string;          // campaign_id | ad_video_id | post_id
+  sourceRefId: string;          // campaign_id | ad_video_id | post_id | organic_content_id
   productId: string | null;
   mediaBucket?: string;
   mediaPath?: string;
@@ -21,6 +22,8 @@ export interface PickedAsset {
   resourceSummary?: string;     // resources / blog only
   linkUrl?: string;             // blog only — public article URL (FB link card)
   title?: string;               // blog only — article title (caption grounding)
+  hook?: string;                // organic — the nugget/review hook (caption grounding)
+  dinnerLine?: string;          // organic carousel — the shareable dinner-table takeaway
 }
 
 /** Parse `{bucket, path}` out of a Supabase storage object URL (signed or public). */
@@ -175,6 +178,47 @@ export async function pickNewestBlog(admin: Admin, workspaceId: string, exclude:
     linkUrl,
     title: (pick.title as string) || undefined,
   };
+}
+
+const ORGANIC_PILLARS: OrganicPillar[] = ["body", "food_first", "superfoods"];
+
+/**
+ * Pick an APPROVED organic-library asset of a format (carousel / reel / review) — the organic feed's
+ * source, separate from the ads system. Honors the workspace reuse window (source_kind='organic')
+ * and, for carousels, rotates the three content pillars by day so the feed varies.
+ *
+ * - carousel → sourceRefId=organic_content.id, NO media (publishScheduledPost resolves slides).
+ * - reel     → video_bucket/video_path.
+ * - review   → the rendered card lives in slides[0].image_bucket/image_path.
+ */
+export async function pickOrganic(
+  admin: Admin, workspaceId: string, format: OrganicFormat, reuseDays: number, now: Date = new Date(),
+): Promise<PickedAsset | null> {
+  const exclude = await recentlyUsedRefIds(admin, workspaceId, "organic", reuseDays);
+  const items = (await listApprovedOrganicContent(admin, workspaceId, { format })).filter((c) => !exclude.has(c.id));
+  if (!items.length) return null;
+
+  let pick = items[0];
+  if (format === "carousel") {
+    // Rotate pillars: prefer today's pillar, else fall back to the freshest available.
+    const dayNum = Math.floor(now.getTime() / 86_400_000);
+    const wantPillar = ORGANIC_PILLARS[dayNum % ORGANIC_PILLARS.length];
+    pick = items.find((c) => c.pillar === wantPillar) || items[0];
+  } else {
+    pick = pickRandom(items) || items[0];
+  }
+
+  if (format === "carousel") {
+    return { sourceRefId: pick.id, productId: pick.product_id, hook: pick.hook || undefined, dinnerLine: pick.dinner_line || undefined };
+  }
+  if (format === "reel") {
+    if (!pick.video_bucket || !pick.video_path) return null;
+    return { sourceRefId: pick.id, productId: pick.product_id, mediaBucket: pick.video_bucket, mediaPath: pick.video_path, hook: pick.hook || undefined };
+  }
+  // review — single rendered card image in slides[0]
+  const slide = pick.slides[0];
+  if (!slide?.image_bucket || !slide.image_path) return null;
+  return { sourceRefId: pick.id, productId: pick.product_id, mediaBucket: slide.image_bucket, mediaPath: slide.image_path, hook: pick.hook || undefined };
 }
 
 export type SourceKind = "avatar" | "ad_video" | "testimonial" | "resource" | "blog";
