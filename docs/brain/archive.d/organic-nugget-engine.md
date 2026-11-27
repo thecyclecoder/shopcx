@@ -1,0 +1,1 @@
+- **Organic social engine: nugget slideshows + animated reels, separated from ads** · verified 2026-11-27 · → [[../lifecycles/social-scheduler]]
