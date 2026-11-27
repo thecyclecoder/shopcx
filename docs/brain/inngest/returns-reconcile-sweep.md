@@ -82,3 +82,7 @@ Every heartbeat carries `{ delivered: { swept, healed, redriven, escalated }, up
 
 Every escalation card carries `metadata.dedupe_key = return_sweep:<metadata.type>:<return_id>` (`returnSweepDedupeKey`). The `dashboard_notifications_dedupe_key_open_uniq` index allows one OPEN card per key, so a still-stranded return no longer gets a fresh card each day; the 23505 on a re-mint is swallowed as "already escalated". Dismissing the card lets the next run re-raise it. Before this, 1,671 open cards had piled up for a few dozen returns. Migration `20270126120001_collapse_return_sweep_duplicate_cards.sql` dismissed the older duplicates and stamped the key on the newest card for each return.
 
+
+## Abandoned labels auto-cancel (CEO decision 2026-11-27)
+
+An upstream return whose EasyPost tracker has NEVER scanned (`unknown` / `pre_transit` / no status) at `ABANDONED_LABEL_DAYS` (60) after creation decides to `cancel_abandoned`. The sweep calls `cancelReturn` ([[../libraries/shopify-returns]]), which is silent to the customer, voids the unused label, and writes a `return_cancelled` customer event. It then dismisses that return's open sweep cards. A scanned `in_transit` return is never auto-cancelled; it still escalates as stale at 30 days. Trade-off accepted: if a customer ships an auto-cancelled return later, the refund will not fire automatically. The 65 returns stranded as of 2026-11-27 (110 to 221 days, 8 of them already refunded) were cancelled the same day.
