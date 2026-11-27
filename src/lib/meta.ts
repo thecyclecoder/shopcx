@@ -574,6 +574,11 @@ export function buildMetaAuthUrl(params: {
     // instagram_basic). Needed for cross-posting + scheduled IG
     // content.
     "instagram_content_publish",
+    // Post-level insights for the organic social optimizer. Without these
+    // the reach / saves / shares pulls come back empty: every posted row
+    // had reach=null through Nov 2026 and pickBestSlot had no signal.
+    "instagram_manage_insights", // IG media insights (reach, saved, shares) + online_followers
+    "read_insights",             // FB Page post insights (unique reach)
     // ads_read = lets us call /{ad_id} for creative.object_story_spec.link_data.link
     // so ad-comment moderation can match the comment to the destination product.
     "ads_read",

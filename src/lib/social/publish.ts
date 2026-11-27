@@ -42,7 +42,24 @@ function isTransientGraph(status: number, json: any): boolean {
   if (status >= 500 || status === 429) return true;
   const e = json?.error;
   if (e?.is_transient === true) return true;
-  return [1, 2, 4, 17, 32, 341, 613].includes(Number(e?.code));
+  if ([1, 2, 4, 17, 32, 341, 613].includes(Number(e?.code))) return true;
+  // 9007 / "Media ID is not available" = the IG container isn't ready yet.
+  // Retrying (after a wait) publishes it; it is not a permanent media error.
+  return Number(e?.code) === 9007 || /media id is not available/i.test(String(e?.message || ""));
+}
+
+/** Wait for an IG media container to reach FINISHED before media_publish.
+ *  Image containers are usually ready at once but not always — publishing
+ *  too early fails with "Media ID is not available" (~30% of IG posts in
+ *  Aug–Oct 2026). Returns null when ready, or an Err on ERROR/EXPIRED/timeout. */
+async function waitForContainer(creationId: string, token: string, tries: number, intervalMs: number, label: string): Promise<Err | null> {
+  for (let i = 0; i < tries; i++) {
+    const s = await fetch(`${GRAPH}/${creationId}?fields=status_code&access_token=${token}`).then((x) => x.json()).catch(() => ({}));
+    if (s?.status_code === "FINISHED") return null;
+    if (s?.status_code === "ERROR" || s?.status_code === "EXPIRED") return { ok: false, error: `${label} processing ${s.status_code}` };
+    await sleep(intervalMs);
+  }
+  return { ok: false, error: `${label} processing timed out`, retryable: true };
 }
 
 /** Build an Err from a Graph response, tagging transient failures retryable. */
@@ -96,6 +113,8 @@ export async function publishInstagramImage(
 ): Promise<PublishResult> {
   const c = await graphPost(`${igUserId}/media`, { image_url: imageUrl, caption, access_token: token });
   if (!c.ok || !c.json?.id) return graphFail(c, "IG image container failed");
+  const notReady = await waitForContainer(c.json.id, token, 12, 2500, "IG image");
+  if (notReady) return notReady;
   return igPublish(igUserId, token, c.json.id);
 }
 
@@ -107,13 +126,9 @@ export async function publishInstagramReel(
   if (!c.ok || !c.json?.id) return graphFail(c, "IG reel container failed");
   const creationId = c.json.id;
   // Poll status_code (up to ~2 min) — video transcode takes time.
-  for (let i = 0; i < 24; i++) {
-    await sleep(5000);
-    const s = await fetch(`${GRAPH}/${creationId}?fields=status_code&access_token=${token}`).then((x) => x.json()).catch(() => ({}));
-    if (s?.status_code === "FINISHED") return igPublish(igUserId, token, creationId);
-    if (s?.status_code === "ERROR" || s?.status_code === "EXPIRED") return { ok: false, error: `IG reel processing ${s.status_code}` };
-  }
-  return { ok: false, error: "IG reel processing timed out" };
+  const notReady = await waitForContainer(creationId, token, 24, 5000, "IG reel");
+  if (notReady) return notReady;
+  return igPublish(igUserId, token, creationId);
 }
 
 /** Publish a Story (image or video). Stories are media-only — no caption/overlay via the API. */
@@ -125,15 +140,11 @@ export async function publishInstagramStory(
     : { media_type: "STORIES", image_url: mediaUrl, access_token: token };
   const c = await graphPost(`${igUserId}/media`, body);
   if (!c.ok || !c.json?.id) return graphFail(c, "IG story container failed");
-  if (isVideo) {
-    // Video stories need the same processing poll.
-    for (let i = 0; i < 24; i++) {
-      await sleep(5000);
-      const s = await fetch(`${GRAPH}/${c.json.id}?fields=status_code&access_token=${token}`).then((x) => x.json()).catch(() => ({}));
-      if (s?.status_code === "FINISHED") break;
-      if (s?.status_code === "ERROR" || s?.status_code === "EXPIRED") return { ok: false, error: `IG story processing ${s.status_code}` };
-    }
-  }
+  // Every story container (image too) must be FINISHED before publish.
+  const notReady = isVideo
+    ? await waitForContainer(c.json.id, token, 24, 5000, "IG story")
+    : await waitForContainer(c.json.id, token, 12, 2500, "IG story");
+  if (notReady) return notReady;
   return igPublish(igUserId, token, c.json.id);
 }
 
