@@ -18,6 +18,7 @@ import {
   reminderChargePreview,
   planReminderSmsSend,
   buildReminderSmsBody,
+  amountMatchesLastRenewal,
   type ReminderChargePreview,
 } from "@/lib/pre-renewal-reminders";
 import {
@@ -283,4 +284,56 @@ test("buildReminderSmsBody renders a comped renewal as 'on us', never a bare $0.
   const body = buildReminderSmsBody(p, "https://superfd.co/j/x");
   assert.match(body, /it is on us/);
   assert.doesNotMatch(body, /\$0\.00/);
+});
+
+/* ---- amountMatchesLastRenewal: the CEO 2026-11-27 renewal cross-check guardrail ---- */
+
+test("amountMatchesLastRenewal: no prior order → matches (nothing to compare)", () => {
+  const r = amountMatchesLastRenewal({ computedPreTaxCents: 5741, currentLineKey: "v1:1", activeOnTopCents: 0, spentOnTopCents: 0, last: null });
+  assert.equal(r.matches, true);
+});
+
+test("amountMatchesLastRenewal: a double-discounted amount far below the last charge is FLAGGED", () => {
+  // The bug symptom: last paid $45.17 net, no coupon change, but computed collapses to $29.28.
+  const r = amountMatchesLastRenewal({
+    computedPreTaxCents: 2928, currentLineKey: "v1:1", activeOnTopCents: 0, spentOnTopCents: 0,
+    last: { lastPaidPreTaxCents: 4517, lineKey: "v1:1" },
+  });
+  assert.equal(r.matches, false);
+  assert.equal(r.lastPaidPreTaxCents, 4517);
+});
+
+test("amountMatchesLastRenewal: a spent one-cycle coupon explains a HIGHER charge → matches", () => {
+  // Ground truth 2: last order used the $15 coupon ($42.41 net); it is now spent, so the correct
+  // $57.41 is $15 higher. The spent-coupon term accounts for it — not a mismatch.
+  const r = amountMatchesLastRenewal({
+    computedPreTaxCents: 5741, currentLineKey: "v1:1", activeOnTopCents: 0, spentOnTopCents: 1500,
+    last: { lastPaidPreTaxCents: 4241, lineKey: "v1:1" },
+  });
+  assert.equal(r.matches, true);
+});
+
+test("amountMatchesLastRenewal: a newly-active coupon explains a LOWER charge → matches", () => {
+  // A $15 coupon active this cycle legitimately drops the charge $15 below last time.
+  const r = amountMatchesLastRenewal({
+    computedPreTaxCents: 2741, currentLineKey: "v1:1", activeOnTopCents: 1500, spentOnTopCents: 0,
+    last: { lastPaidPreTaxCents: 4241, lineKey: "v1:1" },
+  });
+  assert.equal(r.matches, true);
+});
+
+test("amountMatchesLastRenewal: changed line items → matches (a price change is expected)", () => {
+  const r = amountMatchesLastRenewal({
+    computedPreTaxCents: 9999, currentLineKey: "v1:2|v2:1", activeOnTopCents: 0, spentOnTopCents: 0,
+    last: { lastPaidPreTaxCents: 4241, lineKey: "v1:1" },
+  });
+  assert.equal(r.matches, true);
+});
+
+test("amountMatchesLastRenewal: within $2 of last renewal → matches", () => {
+  const r = amountMatchesLastRenewal({
+    computedPreTaxCents: 4260, currentLineKey: "v1:1", activeOnTopCents: 0, spentOnTopCents: 0,
+    last: { lastPaidPreTaxCents: 4241, lineKey: "v1:1" },
+  });
+  assert.equal(r.matches, true);
 });
