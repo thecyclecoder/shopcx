@@ -20,7 +20,11 @@ const PUBLIC_ROUTES = ["/login", "/auth/callback", "/privacy", "/terms", "/eula"
   // Slack webhooks — Slack POSTs server-to-server with NO session; the auth is the
   // signing-secret verification inside each route, so they must bypass session auth.
   // Without this the middleware 307-redirects them to /login → buttons fail with 405.
-  "/api/slack/interactions", "/api/slack/events"];
+  "/api/slack/interactions", "/api/slack/events",
+  // AI shopping agent (ai-shopping-agent-mcp) — ChatGPT / Claude / Grok call the public MCP
+  // endpoint server-to-server with NO session, and OpenAI fetches the domain-verification
+  // token anonymously. Without these the gate 307s both to /login and no AI app can connect.
+  "/api/mcp/", "/.well-known/openai-apps-challenge"];
 const WORKSPACE_SETUP_ROUTES = ["/workspace/new", "/workspace/select"];
 const ADMIN_EMAIL = "dylan@superfoodscompany.com";
 const PRIMARY_DOMAINS = ["shopcx.ai", "www.shopcx.ai", "localhost"];
