@@ -9,6 +9,8 @@ The shared SDK for **where great ad ideas come from** + **how ads actually perfo
 - **`analyzeAccountAds(token, metaAccountId, {datePreset})`** — the per-ad performance analyzer: spend, purchases, CPP, ATC, **cost-per-ATC**, **CPM**, CTR, reactions/saves/shares. Meta ground truth.
 - *(Web DR-angle research — a future pool.)*
 
+**Competitor `imageUrl` is the stored shot, never the Ad Library page (2026-11-27).** `creative_skeletons.image_url` holds Meta's `ad_snapshot_url`, a `facebook.com/ads/archive/render_ad/` HTML page. Both readers now select `thumb_path` and set `CompetitorAngle.imageUrl` to a 7-day signed URL for that object in the private `creative-shots` bucket (`mapRowWithSignedImage`). With no shot, or when signing fails, `directImageUrl(image_url)` keeps `image_url` only if it is not a render_ad page; otherwise `imageUrl` is null. Before this, every competitor-imitation render handed Gemini the HTML as its design reference and got 400 "Unable to process input image". That is why the product's daily ad-creative job failed from 2026-11-16. Pinned by `creative-sourcing.image-url.test.ts`.
+
 ## The validated signal model (why these fields)
 Proven on **99 historical ads** (45 winners, 24 losers): **cost-per-ATC** ($25 winners vs $79 losers) and **CPM** ($93 vs $148) discriminate winners. **CTR + reactions are TRAPS** — losers click 2× and react 7× *more* (clickbait). So the analyzer surfaces CTR/engagement for visibility but winners are chosen on cost-per-ATC + CPM. This is the same model [[meta-cpa-signal]] trims/crowns on.
 
