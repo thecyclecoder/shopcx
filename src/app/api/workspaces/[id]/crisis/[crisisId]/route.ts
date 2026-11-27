@@ -6,6 +6,7 @@ import {
   subscriptionAddItem,
 } from "@/lib/commerce/subscription";
 import { subSwapVariant, subUpdateLineItemPrice } from "@/lib/subscription-items";
+import { shipRestockPromises } from "@/lib/crisis-restock-fulfillment";
 
 // GET — single crisis detail with full stats
 export async function GET(
@@ -51,8 +52,19 @@ export async function GET(
 
   const allActions = actions || [];
 
+  // Restock promises recorded against this crisis for no-subscription customers
+  // (replacements.status='awaiting_restock'). These ship automatically on
+  // Resolve (Phase 2 of crisis-resolve-ships-promised-restock-replacements).
+  const { count: restockPromisesPending } = await admin
+    .from("replacements")
+    .select("id", { count: "exact", head: true })
+    .eq("workspace_id", workspaceId)
+    .eq("crisis_id", crisisId)
+    .eq("status", "awaiting_restock");
+
   // Compute stats
   const stats = {
+    restock_promises_pending: restockPromisesPending ?? 0,
     total: allActions.length,
     by_segment: {
       berry_only: allActions.filter(a => a.segment === "berry_only").length,
@@ -405,6 +417,21 @@ export async function POST(
 
     if (error) return NextResponse.json({ error: error.message }, { status: 500 });
 
+    // ── Ship the promised restock replacements (Phase 2 of
+    // crisis-resolve-ships-promised-restock-replacements) ──────────────
+    // A customer with NO subscription was promised the out-of-stock item at
+    // restock via the `promise_restock_replacement` direct action, which
+    // recorded an `awaiting_restock` replacements row against this crisis (no
+    // Shopify order). Now that the crisis is resolved, ship each promise
+    // through the canonical createReplacementOrder helper — REUSING the promise
+    // row via `existingReplacementId` so the record-first ledger stays a single
+    // row per promise. A compare-and-set claims each row off `awaiting_restock`
+    // BEFORE creating, so a double-click on Resolve (or a concurrent resolve)
+    // can't ship twice. A restock failure does NOT un-resolve the crisis — it
+    // marks the row failed, reopens the ticket, and alerts the operator.
+    const { created: restockCreated, failed: restockFailed } =
+      await shipRestockPromises(admin, workspaceId, crisisId);
+
     return NextResponse.json({
       crisis: crisis ?? null,
       side_effects: {
@@ -414,6 +441,10 @@ export async function POST(
         skipped_already_active: skippedAlreadyActive.length,
         skipped_already_readded: skippedAlreadyReadded.length,
         failed_count: failed.length,
+        // Restock promises shipped on resolve (no-subscription customers).
+        restock_replacements_created: restockCreated.length,
+        restock_replacements_failed: restockFailed.length,
+        restock_replacements: { created: restockCreated, failed: restockFailed },
       },
     });
   }

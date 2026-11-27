@@ -67,6 +67,8 @@ async function createReplacementOrder(input: CreateReplacementInput) : Promise<C
 
 Enforces the per-variant cap via `decideOverCap()` BEFORE inserting the row or calling Shopify. Returns a refusal with the standard failure shape (`success:false, replacementId:'', shopifyOrderName:null, error:...`) if any variant exceeds the cap without a founder grant. When a grant IS present it `console.warn`s `replacement_over_cap_authorized` (workspace, customer, variant, requested, cap, authorizer) and persists `reason_detail = "over-cap N>4 authorized by: <who>"` on the `replacements` row — a granted exception is loud and attributable, never silent.
 
+**Row reuse — `input.existingReplacementId`.** When set, the SDK UPDATES that existing `replacements` row (workspace-scoped) in place instead of INSERTing a new one, keeping its id / `crisis_id` / `customer_id` / `created_at`. This is the path a crisis-resolve restock promise takes (Phase 2 of [[../specs/crisis-resolve-ships-promised-restock-replacements]]): the `awaiting_restock` promise row recorded by `promise_restock_replacement` is handed back here so the record-first ledger stays a single row per promise (`awaiting_restock → pending → created`/`failed`) rather than minting a second row. The SDK does NOT compare-and-set on status itself — the CALLER owns the claim (`update … where status='awaiting_restock'`) before calling, so a double-click on Resolve can't ship twice. A missing/cross-workspace id fails loudly (`Failed to reuse replacements row <id>: …`). Omit it for the default insert-a-fresh-pending-row behaviour.
+
 ### `CreateReplacementInput` — interface
 
 ### `CreateReplacementResult` — interface

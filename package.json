@@ -100,6 +100,8 @@
     "test:order-now-cadence": "tsx --test src/lib/portal/order-now-cadence.test.ts",
     "test:create-order-charges": "tsx --test src/lib/action-executor.create-order-charges.test.ts",
     "test:money-order-ref": "tsx --test src/lib/action-executor.money-order-ref.test.ts",
+    "test:promise-restock-replacement": "tsx --test src/lib/action-executor.promise-restock-replacement.test.ts",
+    "test:crisis-restock-fulfillment": "tsx --test src/lib/crisis-restock-fulfillment.test.ts",
     "test:migrate-to-internal-promo-flags": "tsx --test src/lib/migrate-to-internal.promo-flags.test.ts",
     "test:migrate-to-internal-cancel-old-engine": "tsx --test src/lib/migrate-to-internal.cancel-old-engine.test.ts",
     "test:migrate-to-internal-legacy-base": "tsx --test src/lib/migrate-to-internal.legacy-base.test.ts",

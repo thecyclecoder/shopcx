@@ -2109,7 +2109,14 @@ async function getReturns(admin: Admin, wsId: string, custId: string): Promise<s
     for (const r of replacements) {
       const items = (r.items as { title?: string; type?: string; quantity?: number }[] || []).map(i => `${i.title || "item"} (${i.type || "replacement"})`).join(", ");
       const date = new Date(r.created_at).toLocaleDateString("en-US", { month: "short", day: "numeric" });
-      parts.push(`- ${date} | Status: ${r.status} | Original order: #${r.original_order_number || "?"} | Items: ${items} | Reason: ${r.reason || "?"}${r.shopify_replacement_order_name ? ` | Replacement order: ${r.shopify_replacement_order_name}` : ""}`);
+      // A status='awaiting_restock' row is a recorded restock PROMISE, not a
+      // shipped order — it ships automatically when the crisis is resolved. Say
+      // that explicitly so the AI can answer "when will my Cocoa ship?" without
+      // reading it as an already-created order.
+      const restockNote = r.status === "awaiting_restock"
+        ? " | RESTOCK PROMISE — not yet shipped; ships automatically when the out-of-stock crisis is resolved (tell the customer it's queued to ship on restock, do NOT create a new order)"
+        : "";
+      parts.push(`- ${date} | Status: ${r.status} | Original order: #${r.original_order_number || "?"} | Items: ${items} | Reason: ${r.reason || "?"}${r.shopify_replacement_order_name ? ` | Replacement order: ${r.shopify_replacement_order_name}` : ""}${restockNote}`);
     }
   } else {
     parts.push("\nREPLACEMENT ORDERS: No replacement orders found for this customer.");
@@ -2204,6 +2211,7 @@ async function getCrisisStatus(admin: Admin, wsId: string, custId: string): Prom
     if (workspaceCrises?.length) {
       out.push("→ If their recent order shows the swap variant above and they're complaining about a wrong item, enroll them via crisis_enroll direct action (sets auto_readd=true so they get the original product back when crisis resolves).");
       out.push("→ If the customer says they do NOT want the substitute flavor and will wait for their original flavor to come back, enroll them via crisis_enroll with hold_for_restock=true. This records them as waiting (not as having accepted the swap), so a later restart holds their subscription and ships the original flavor on restock instead of swapping + charging them for the substitute.");
+      out.push("→ If the customer has NO active subscription (a one-time buyer) and was promised the out-of-stock item when it's back, record the promise with the promise_restock_replacement direct action (params: variant_id of the affected item, quantity, optional original_order_number and reason_detail). It does NOT ship anything now — it stores an awaiting_restock replacement against the crisis, and resolving the crisis ships it automatically. Use this instead of create_replacement_order (which would ship immediately) whenever the item is out of stock and the customer is waiting for restock.");
     }
     return out.join("\n");
   }

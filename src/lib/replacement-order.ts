@@ -128,6 +128,21 @@ export interface CreateReplacementInput {
   /** Optional display name of the human (when initiatedBy='agent'/'script'). */
   initiatedByName?: string;
   /**
+   * REUSE an already-recorded `replacements` row instead of inserting a new one.
+   *
+   * Phase 2 of crisis-resolve-ships-promised-restock-replacements: a restock
+   * PROMISE is recorded first (status='awaiting_restock', `promise_restock_replacement`)
+   * with no Shopify order; when the crisis resolves we ship it by handing that
+   * same row's id here. The SDK then UPDATES the existing row to created/failed
+   * (keeping its id, crisis_id, customer_id, items, ticket_id) rather than
+   * minting a second row — the record-first guarantee is preserved because the
+   * row already exists. The caller is responsible for its own compare-and-set
+   * (update ... where status='awaiting_restock') BEFORE calling, so a
+   * double-click on Resolve can't ship twice. When omitted, behaviour is
+   * unchanged (insert a fresh `pending` row).
+   */
+  existingReplacementId?: string;
+  /**
    * FOUNDER GRANT for a replacement that exceeds [[REPLACEMENT_MAX_UNITS_PER_VARIANT]].
    *
    * The cap exists so no autonomous caller can self-serve a large replacement — that stays true:
@@ -311,9 +326,7 @@ export async function createReplacementOrder(input: CreateReplacementInput): Pro
     originalOrderId = data?.id || null;
   }
 
-  const { data: replacement, error: insertErr } = await admin.from("replacements").insert({
-    workspace_id: input.workspaceId,
-    customer_id: input.customerId,
+  const rowPatch = {
     original_order_id: originalOrderId,
     original_order_number: input.originalOrderNumber || null,
     reason: input.reason,
@@ -329,14 +342,46 @@ export async function createReplacementOrder(input: CreateReplacementInput): Pro
     ...(capDecision.granted
       ? { reason_detail: `over-cap ${capDecision.over.requested}>${capDecision.over.cap} authorized by: ${capDecision.authorizedBy}` }
       : {}),
-  }).select("id").single();
+  };
 
-  if (insertErr || !replacement) {
-    return {
-      success: false, replacementId: "",
-      shopifyOrderName: null,
-      error: `Failed to insert replacements row: ${insertErr?.message || "unknown"}`,
-    };
+  let replacement: { id: string } | null = null;
+  let insertErr: { message: string } | null = null;
+  if (input.existingReplacementId) {
+    // REUSE path — the row already exists (a recorded restock promise). Update
+    // it in place (workspace-scoped) rather than inserting a second row; this
+    // keeps its id, crisis_id, customer_id, and created_at intact. We do NOT
+    // compare-and-set on status here — the caller owns that guard (it already
+    // flipped the row off 'awaiting_restock' before calling); we only require
+    // the row exists in this workspace.
+    const { data, error } = await admin.from("replacements")
+      .update(rowPatch)
+      .eq("id", input.existingReplacementId)
+      .eq("workspace_id", input.workspaceId)
+      .select("id").single();
+    replacement = data;
+    insertErr = error;
+    if (insertErr || !replacement) {
+      return {
+        success: false, replacementId: input.existingReplacementId,
+        shopifyOrderName: null,
+        error: `Failed to reuse replacements row ${input.existingReplacementId}: ${insertErr?.message || "row not found in workspace"}`,
+      };
+    }
+  } else {
+    const { data, error } = await admin.from("replacements").insert({
+      workspace_id: input.workspaceId,
+      customer_id: input.customerId,
+      ...rowPatch,
+    }).select("id").single();
+    replacement = data;
+    insertErr = error;
+    if (insertErr || !replacement) {
+      return {
+        success: false, replacementId: "",
+        shopifyOrderName: null,
+        error: `Failed to insert replacements row: ${insertErr?.message || "unknown"}`,
+      };
+    }
   }
 
   // ── 1b. Loud-fail on an unresolvable countryCode ─────────────────

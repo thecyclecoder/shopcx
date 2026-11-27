@@ -95,6 +95,14 @@ export interface ActionParams {
    *  Required for internal subs; ignored on external engines. */
   expected_current_realized_cents?: number;
   crisis_action_id?: string;
+  // promise_restock_replacement — the crisis_events row this restock promise
+  // is recorded against. Optional: when omitted the handler resolves the
+  // active crisis whose affected_variant_id matches variant_id. reason_detail
+  // is the human explanation (persisted to replacements.reason_detail);
+  // original_order_number cites the order the out-of-stock item was on.
+  crisis_id?: string;
+  original_order_number?: string;
+  reason_detail?: string;
   // crisis_enroll — set true when the customer REFUSED the substitute flavor
   // and chose to wait for their original flavor to restock. The handler then
   // records tier1_response='rejected' + hold_for_restock=true (instead of the
@@ -1515,7 +1523,7 @@ async function resolveVaultedPm(
  * ungrouped customer keeps the exact pre-fallback behavior (own id or null).
  * Returns null when no member of the group carries a `shopify_customer_id`.
  */
-async function resolveGroupShopifyCustomerId(
+export async function resolveGroupShopifyCustomerId(
   admin: Admin,
   workspaceId: string,
   customerId: string,
@@ -4758,6 +4766,94 @@ export const directActionHandlers: Record<
     if (!r.success) return { success: false, error: r.error || "replacement creation failed" };
     const itemsSummary = resolvedItems.map(i => `${i.quantity}x ${i.title}`).join(" + ");
     return { success: true, summary: `Replacement order ${r.shopifyOrderName || "created"} — ${itemsSummary} shipped free` };
+  },
+
+  // promise_restock_replacement — record a "send X when it's back in stock"
+  // promise for a customer who has NO subscription to swap/resume. Resolving a
+  // crisis only touches subscriptions, so a promise made during a stockout
+  // previously lived only as a snoozed ticket a human had to remember (Peggy,
+  // customer 0897b4e5). This writes the promise structurally into
+  // `replacements` with status='awaiting_restock' against the crisis; Phase 2
+  // of the spec ships every awaiting_restock row through createReplacementOrder
+  // when the crisis is resolved. This action creates NO Shopify order.
+  promise_restock_replacement: async (ctx, p) => {
+    const { admin, workspaceId, customerId, ticketId } = ctx;
+    const variantId = String(p.variant_id || "").trim();
+    if (!variantId) return { success: false, error: "promise_restock_replacement needs variant_id" };
+    const quantity = Number(p.quantity) > 0 ? Number(p.quantity) : 1;
+
+    // Resolve the crisis: an explicit crisis_id wins; otherwise the active
+    // crisis whose affected_variant_id matches the promised variant.
+    let crisis: { id: string; affected_product_title: string | null; expected_restock_date: string | null } | null = null;
+    if (p.crisis_id) {
+      const { data } = await admin.from("crisis_events")
+        .select("id, affected_product_title, expected_restock_date")
+        .eq("workspace_id", workspaceId).eq("id", p.crisis_id).maybeSingle();
+      crisis = data;
+      if (!crisis) return { success: false, error: `No crisis found for crisis_id ${p.crisis_id}` };
+    }
+    if (!crisis) {
+      const { data } = await admin.from("crisis_events")
+        .select("id, affected_product_title, expected_restock_date")
+        .eq("workspace_id", workspaceId).eq("status", "active").eq("affected_variant_id", variantId)
+        .order("created_at", { ascending: false }).limit(1).maybeSingle();
+      crisis = data;
+    }
+    if (!crisis) return { success: false, error: `No active crisis found for variant ${variantId}` };
+
+    // Enforce the per-variant cap (REPLACEMENT_MAX_UNITS_PER_VARIANT) — the
+    // same CEO ceiling every other replacement caller inherits from the SDK.
+    const { findVariantOverCap, REPLACEMENT_MAX_UNITS_PER_VARIANT } = await import("@/lib/replacement-order");
+    const over = findVariantOverCap([{ variantId, quantity }]);
+    if (over) {
+      return { success: false, error: `Restock promise exceeds the ${REPLACEMENT_MAX_UNITS_PER_VARIANT}-unit cap for variant ${over.variantId} (requested ${over.requested})` };
+    }
+
+    // Resolve a human-readable title for the item (note + stored items).
+    let title = crisis.affected_product_title || "item";
+    try {
+      const { data: pv } = await admin.from("product_variants")
+        .select("title, products(title)")
+        .eq("workspace_id", workspaceId)
+        .eq("shopify_variant_id", variantId).maybeSingle();
+      if (pv) {
+        const productTitle = (pv.products as { title?: string } | null)?.title;
+        title = pv.title && productTitle ? `${productTitle} (${pv.title})` : (pv.title || productTitle || title);
+      }
+    } catch { /* fall back to the crisis product title */ }
+
+    // Record the promise. status='awaiting_restock' is the signal Phase 2's
+    // crisis-resolve handler loads on. items reuses the canonical replacement
+    // shape ({ variantId, quantity, title, type }) so the row can be handed
+    // straight to createReplacementOrder when the crisis resolves.
+    const { data: inserted, error: insertErr } = await admin.from("replacements").insert({
+      workspace_id: workspaceId,
+      customer_id: customerId,
+      crisis_id: crisis.id,
+      ticket_id: ticketId || null,
+      original_order_number: p.original_order_number || null,
+      items: [{ variantId, quantity, title, type: "all" }],
+      status: "awaiting_restock",
+      reason: "crisis_restock_promise",
+      reason_detail: p.reason_detail || null,
+    }).select("id").single();
+    if (insertErr || !inserted) {
+      return { success: false, error: `Failed to record restock promise: ${insertErr?.message || "insert returned no row"}` };
+    }
+
+    // Internal ticket note so a human reading the thread knows the promise is
+    // now tracked and will ship automatically on resolve.
+    if (ticketId) {
+      await admin.from("ticket_messages").insert({
+        ticket_id: ticketId,
+        direction: "outbound",
+        visibility: "internal",
+        author_type: "system",
+        body: `Recorded restock promise: ${quantity} x ${title}; ships automatically when the crisis is resolved.`,
+      });
+    }
+
+    return { success: true, summary: `Recorded restock promise: ${quantity} x ${title} (ships when the crisis is resolved)` };
   },
 
   // dollar_replacement — Phase 3 $-bearing variant. Ships a replacement
