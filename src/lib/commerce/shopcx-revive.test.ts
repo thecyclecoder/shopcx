@@ -36,6 +36,7 @@ import {
 } from "./shopcx-revive";
 import type { PricingContext, CatalogVariant } from "./shopify-subscription-migrate";
 import type { PaymentMethod } from "@/lib/dunning";
+import type { DiscontinuedReplacement } from "@/lib/migrate-to-internal";
 
 const WS = "11111111-1111-1111-1111-111111111111";
 const SUB = "22222222-2222-2222-2222-222222222222";
@@ -263,6 +264,82 @@ test("codes: every customer code is dropped and named; structural and Buy-N are 
   ]);
   assert.deepEqual(r, ["VIP10", "LOYALTY-5", "Free Shipping on Subscriptions"]);
   assert.deepEqual(droppedMirrorCodes(null), []);
+});
+
+// ── replaceDiscontinued: restart a discontinued-only sub on the replacement ───────────────────
+
+const ACV_ID = "ad466a2f-061e-4692-a3d3-f672797fcecf";
+const ZEN_ID = "48bfa48c-b8db-42f9-9303-19c70ab8e7a1";
+
+/** A pricing ctx carrying the discontinued ACV variant AND its Zen Relax replacement, both on-rule. */
+function discontinuedCtx(): PricingContext {
+  const acv = variant("v-acv", ACV_ID, "ACV-1", "900", 2757);
+  const zen = variant("v-zen", ZEN_ID, "ZEN-1", "901", 4995);
+  const all = [acv, zen];
+  return {
+    snsPct: 25,
+    breaks: [{ quantity: 2, discount_pct: 8 }, { quantity: 3, discount_pct: 12 }],
+    ruleProducts: new Set([ACV_ID, ZEN_ID]),
+    productTitle: new Map([[ACV_ID, "Apple Cider Vinegar Gummies"], [ZEN_ID, "Ashwavana Zen Relax"]]),
+    variantBySku: new Map(all.map((v) => [String(v.sku).toLowerCase(), v])),
+    variantByShopifyId: new Map(all.map((v) => [String(v.shopify_variant_id), v])),
+  };
+}
+
+const ZEN_REPLACEMENT: DiscontinuedReplacement = {
+  productId: ZEN_ID,
+  title: "Ashwavana Zen Relax",
+  variant: { id: "v-zen", shopifyVariantId: "901", sku: "ZEN-1", title: "Default", priceCents: 4995 },
+  priceCents: 2995,
+};
+
+test("replaceDiscontinued: the ACV line is SUBSTITUTED with Zen Relax and grandfathered to exactly $29.95", () => {
+  const row = mirrorRow({ items: [{ sku: "ACV-1", variant_id: "900", quantity: 1, price_cents: 2757, title: "Apple Cider Vinegar Gummies" }] });
+  const r = planShopcxFromMirror({
+    row, intent: "resume", ctx: discontinuedCtx(), card: CARD, customerGid: "gid://shopify/Customer/7000001",
+    address: resolveReviveAddress({ row: ADDRESS }), now: NOW,
+    replacement: ZEN_REPLACEMENT, discontinuedProductIds: new Set([ACV_ID]),
+  });
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+  assert.equal(r.plan.lines.length, 1, "the ACV line was replaced, not dropped");
+  const line = r.plan.lines[0];
+  assert.equal(line.shopifyVariantId, "901", "the line is now the Zen Relax variant");
+  // ⭐ The whole point: the per-unit price after S&S and quantity breaks equals 2995, not the MSRP.
+  assert.equal(line.finalUnitCents, 2995);
+  assert.equal(r.plan.newTotalCents, 2995);
+  // And it's a grandfather LOCK against the standard price (3747 after 25% S&S) — not a silent base change.
+  assert.ok(line.grandfatherUnitCents > 0, "a grandfather lock holds the $29.95");
+  assert.equal(line.standardUnitCents - line.grandfatherUnitCents, 2995);
+  // The create input carries the Zen Relax variant + a Legacy-rate discount.
+  const built = r.createInput.lines[0] as { line: { productVariantId: string }; discounts: { title: string }[] };
+  assert.equal(built.line.productVariantId, "gid://shopify/ProductVariant/901");
+  assert.ok(built.discounts.some((d) => d.title === "Legacy rate"));
+});
+
+test("replaceDiscontinued: quantity is preserved on substitution (2 units → still 2, priced at 2995 each)", () => {
+  const row = mirrorRow({ items: [{ sku: "ACV-1", variant_id: "900", quantity: 2, price_cents: 2757, title: "Apple Cider Vinegar Gummies" }] });
+  const r = planShopcxFromMirror({
+    row, intent: "resume", ctx: discontinuedCtx(), card: CARD, customerGid: "gid://shopify/Customer/7000001",
+    address: resolveReviveAddress({ row: ADDRESS }), now: NOW,
+    replacement: ZEN_REPLACEMENT, discontinuedProductIds: new Set([ACV_ID]),
+  });
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+  assert.equal(r.plan.lines[0].quantity, 2);
+  assert.equal(r.plan.lines[0].finalUnitCents, 2995);
+  assert.equal(r.plan.newTotalCents, 5990);
+});
+
+test("replaceDiscontinued: WITHOUT the replacement, an ACV-only sub still fails (no_lines) — the bug this fixes", () => {
+  const row = mirrorRow({ items: [{ sku: "ACV-1", variant_id: "900", quantity: 1, price_cents: 2757, title: "Apple Cider Vinegar Gummies" }] });
+  const r = planShopcxFromMirror({
+    row, intent: "resume", ctx: discontinuedCtx(), card: CARD, customerGid: "gid://shopify/Customer/7000001",
+    address: resolveReviveAddress({ row: ADDRESS }), now: NOW,
+  });
+  assert.equal(r.ok, false);
+  if (r.ok) return;
+  assert.equal(r.reason, "no_lines");
 });
 
 // ── buildShopcxFromMirror ───────────────────────────────────────────────────────────────────

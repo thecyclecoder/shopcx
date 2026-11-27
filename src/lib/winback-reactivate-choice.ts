@@ -86,8 +86,16 @@ export async function handleReactivateChoice(
     return { outcome: "error_no_target_sub", message: "We couldn't find a subscription to restart. Our team will reach out shortly to help." };
   }
 
+  // Discontinued-only restart: resolve the replacement BEFORE restarting (the sub's items change to
+  // the replacement afterwards) so the result copy + ticket note can name the discontinued product.
+  const { subDiscontinuedReplacement } = await import("@/lib/reactivate-journey-builder");
+  const disc = parsed.replaceDiscontinued
+    ? await subDiscontinuedReplacement(admin, session.workspace_id, (sub as { items?: unknown }).items)
+    : null;
+  const replaceDiscontinued = !!(disc && disc.replacement);
+
   const { reactivateSubscription } = await import("@/lib/subscription-reactivate");
-  const r = await reactivateSubscription(session.workspace_id, String(sub.shopify_contract_id));
+  const r = await reactivateSubscription(session.workspace_id, String(sub.shopify_contract_id), { replaceDiscontinued });
   if (!r.ok) {
     const needsCard = r.reason === "needs_payment_method";
     const needsAddress = r.reason === "needs_address";
@@ -138,7 +146,11 @@ export async function handleReactivateChoice(
   }
   const { crisisSwapNote } = await import("@/lib/crisis-restart-swap");
   const swapNote = crisisSwapNote(r.crisisSwaps);
-  await note(`[Win-back] Customer restarted their subscription (contract ${r.contractId}). Next order: ${when}.`
+  const { replacementResultMessage, replacementTicketNote } = await import("@/lib/reactivate-journey-builder");
+  const baseNote = replaceDiscontinued && disc?.replacement
+    ? replacementTicketNote(disc.replacement.title, disc.discontinuedTitles, disc.replacement.priceCents) + ` Next order: ${when}.`
+    : `[Win-back] Customer restarted their subscription (contract ${r.contractId}). Next order: ${when}.`;
+  await note(baseNote
     + (giftLabel ? ` Free gift added: ${giftLabel}.` : "")
     + (swapNote ? ` ${swapNote}` : "")
     + (giftError ? ` ⚠ Free gift NOT added (${giftError}) — add it manually.` : ""));
@@ -159,11 +171,13 @@ export async function handleReactivateChoice(
     : "";
   const done = {
     outcome: "reactivated",
-    message: giftLabel
-      ? `You're all set! Your subscription is back on, and your free ${giftLabel} ships with your next order on ${when}.`
-      : giftError
-        ? `You're all set! Your subscription is back on, and your next order processes on ${when}. We'll add your free gift to it.`
-        : `You're all set! Your subscription is back on, and your next order processes on ${when}.`,
+    message: replaceDiscontinued && disc?.replacement
+      ? replacementResultMessage(disc.replacement.title, disc.replacement.priceCents, when)
+      : giftLabel
+        ? `You're all set! Your subscription is back on, and your free ${giftLabel} ships with your next order on ${when}.`
+        : giftError
+          ? `You're all set! Your subscription is back on, and your next order processes on ${when}. We'll add your free gift to it.`
+          : `You're all set! Your subscription is back on, and your next order processes on ${when}.`,
   };
   return { ...done, message: done.message + swapLine };
 }

@@ -27,6 +27,7 @@ import { isEnginePromotion, type BillingSource } from "@/lib/internal-subscripti
 import { subscriptionCancelAtVendorForMigration } from "@/lib/commerce/subscription";
 import { inferAppstleLineBase, resolveLineSnsPct, type AppstleLine } from "@/lib/appstle-pricing";
 import { OPEN_DUNNING_STATUSES, updateDunningCycle } from "@/lib/dunning";
+import { getAmplifierOnHandBySku } from "@/lib/inventory/read";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -179,6 +180,96 @@ export interface DroppedLine {
 export const MIGRATION_EXCLUDED_PRODUCT_IDS: ReadonlySet<string> = new Set([
   "ad466a2f-061e-4692-a3d3-f672797fcecf", // Apple Cider Vinegar Gummies
 ]);
+
+/**
+ * The replacement product a restart offers in place of a discontinued one, and the per-unit
+ * price the customer pays for it AFTER all discounts (S&S, quantity breaks), before tax and
+ * shipping. Both are DB-driven (`products.discontinued_replacement_product_id` /
+ * `discontinued_replacement_price_cents`) — never hardcoded (CLAUDE.md). Live config: Apple
+ * Cider Vinegar Gummies → Ashwavana Zen Relax @ $29.95 (CEO 2026-11-27).
+ */
+export interface DiscontinuedReplacement {
+  productId: string;
+  title: string;
+  /** Default in-stock variant of the replacement product (ship-truth preferred). */
+  variant: {
+    id: string;
+    shopifyVariantId: string | null;
+    sku: string | null;
+    title: string | null;
+    priceCents: number;
+  };
+  /** `discontinued_replacement_price_cents` — the per-unit price after all discounts. */
+  priceCents: number;
+}
+
+/**
+ * Given the product ids on a subscription, return the configured replacement for a discontinued
+ * line among them (its product, default in-stock variant, and the per-unit replacement price), or
+ * null when none of the ids is a discontinued product with a replacement configured.
+ *
+ * "In-stock" is resolved against the 3PL ship truth ([[inventory_levels]] via
+ * `getAmplifierOnHandBySku`) — the authority for what can actually ship — joined through the
+ * variant sku; falls back to the first `available` variant by position when no 3PL figure exists.
+ */
+export async function replacementForDiscontinued(
+  admin: Admin,
+  workspaceId: string,
+  productIds: string[],
+): Promise<DiscontinuedReplacement | null> {
+  const ids = Array.from(new Set(productIds.filter(Boolean)));
+  if (!ids.length) return null;
+
+  const { data: discontinued } = await admin
+    .from("products")
+    .select("id, discontinued_replacement_product_id, discontinued_replacement_price_cents")
+    .eq("workspace_id", workspaceId)
+    .in("id", ids)
+    .not("discontinued_replacement_product_id", "is", null);
+  const cfg = (discontinued || []).find(
+    (r) => r.discontinued_replacement_product_id && r.discontinued_replacement_price_cents != null,
+  );
+  if (!cfg) return null;
+
+  const replacementId = String(cfg.discontinued_replacement_product_id);
+  const priceCents = Number(cfg.discontinued_replacement_price_cents);
+
+  const { data: product } = await admin
+    .from("products")
+    .select("id, title")
+    .eq("workspace_id", workspaceId)
+    .eq("id", replacementId)
+    .maybeSingle();
+  if (!product) return null;
+
+  const { data: variants } = await admin
+    .from("product_variants")
+    .select("id, shopify_variant_id, sku, title, price_cents, available, position")
+    .eq("workspace_id", workspaceId)
+    .eq("product_id", replacementId)
+    .order("position", { ascending: true });
+  const rows = variants || [];
+  if (!rows.length) return null;
+
+  const onHand = await getAmplifierOnHandBySku(admin, workspaceId);
+  const chosen =
+    rows.find((v) => v.available !== false && v.sku && (onHand.get(String(v.sku).trim()) ?? 0) > 0) ||
+    rows.find((v) => v.available !== false) ||
+    rows[0];
+
+  return {
+    productId: String(product.id),
+    title: String(product.title ?? ""),
+    variant: {
+      id: String(chosen.id),
+      shopifyVariantId: (chosen.shopify_variant_id as string | null) ?? null,
+      sku: (chosen.sku as string | null) ?? null,
+      title: (chosen.title as string | null) ?? null,
+      priceCents: Number(chosen.price_cents ?? 0),
+    },
+    priceCents,
+  };
+}
 
 /**
  * A live line deliberately left off the migrated sub: an excluded product

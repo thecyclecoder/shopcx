@@ -16,17 +16,20 @@ test("no choice → null", () => {
   assert.equal(winbackChoiceFrom(null, null), null);
 });
 
-import { parseReactivateValue, giftOptionValue } from "./reactivate-journey-builder";
+import { parseReactivateValue, giftOptionValue, REACTIVATE_REPLACE_VALUE } from "./reactivate-journey-builder";
 
 test("plain restart value", () => {
-  assert.deepEqual(parseReactivateValue("reactivate"), { restart: true, giftVariantId: null });
+  assert.deepEqual(parseReactivateValue("reactivate"), { restart: true, giftVariantId: null, replaceDiscontinued: false });
 });
 test("restart + gift round-trips the variant id", () => {
   const v = "e3953a24-c060-41e7-9ca4-06a481df236b";
-  assert.deepEqual(parseReactivateValue(giftOptionValue(v)), { restart: true, giftVariantId: v });
+  assert.deepEqual(parseReactivateValue(giftOptionValue(v)), { restart: true, giftVariantId: v, replaceDiscontinued: false });
+});
+test("restart-with-replacement value is flagged", () => {
+  assert.deepEqual(parseReactivateValue(REACTIVATE_REPLACE_VALUE), { restart: true, giftVariantId: null, replaceDiscontinued: true });
 });
 test("not_now is not a restart", () => {
-  assert.deepEqual(parseReactivateValue("not_now"), { restart: false, giftVariantId: null });
+  assert.deepEqual(parseReactivateValue("not_now"), { restart: false, giftVariantId: null, replaceDiscontinued: false });
 });
 
 import { pickTargetSubscription, isProtectionLine, hasRealItems } from "./reactivate-journey-builder";
