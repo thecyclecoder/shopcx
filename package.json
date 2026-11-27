@@ -425,6 +425,7 @@
     "test:commerce-subscription-create-hydrate": "tsx --test src/lib/commerce/subscription.create-hydrate.test.ts",
     "test:commerce-subscription-update-shipping-address": "tsx --test src/lib/commerce/subscription.updateShippingAddress.test.ts",
     "test:commerce-shopcx-revive": "tsx --test src/lib/commerce/shopcx-revive.test.ts",
+    "test:commerce-cycle-edit-lock": "tsx --test src/lib/commerce/shopify-subscription-client.cycle-edit-lock.test.ts",
     "test:appstle-retired": "tsx --test src/lib/appstle-retired.test.ts",
     "test:commerce-refund": "tsx --test src/lib/commerce/refund.test.ts",
     "test:commerce-price-freeship": "tsx --test src/lib/commerce/price.freeship.test.ts",
