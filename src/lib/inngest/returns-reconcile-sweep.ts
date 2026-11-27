@@ -549,13 +549,26 @@ async function escalate(
     metadata: Record<string, unknown>;
   },
 ): Promise<void> {
-  await admin.from("dashboard_notifications").insert({
+  // One OPEN card per (return, escalation type). The sweep runs daily and a stranded return stays
+  // stranded, so without a key every run minted a fresh card for the same return (1,671 open cards
+  // for a few dozen returns by 2026-11-27). The `dashboard_notifications_dedupe_key_open_uniq`
+  // partial index rejects a second open card with 23505, which here means "already escalated".
+  // Dismissing the card lets the next sweep re-raise it if the return is still stuck.
+  const { error } = await admin.from("dashboard_notifications").insert({
     workspace_id: input.workspace_id,
     type: "system",
     title: input.title,
     body: input.body,
-    metadata: input.metadata,
+    metadata: { ...input.metadata, dedupe_key: returnSweepDedupeKey(input.metadata) },
   });
+  if (error && error.code !== "23505") {
+    console.warn(`[returns-reconcile-sweep] escalation insert failed: ${error.message}`);
+  }
+}
+
+/** `return_sweep:<metadata.type>:<return_id>` — stable per return and escalation type. Pure. */
+export function returnSweepDedupeKey(metadata: Record<string, unknown>): string {
+  return `return_sweep:${String(metadata.type ?? "unknown")}:${String(metadata.return_id ?? "none")}`;
 }
 
 function formatCents(cents: number): string {
