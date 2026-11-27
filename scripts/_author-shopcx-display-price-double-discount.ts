@@ -50,7 +50,7 @@ async function main() {
       ],
     },
     "planned",
-    { intendedStatusSetBy: "ceo", parentKind: "mandate", parentRef: "retention#subscription-continuity-billing-integrity" },
+    { intendedStatusSetBy: "ceo", parentKind: "mandate", parentRef: "retention#billing-integrity" },
   );
   console.log(ok ? "authored" : "author write failed");
   const s = await getSpec(WORKSPACE_ID, SLUG);
