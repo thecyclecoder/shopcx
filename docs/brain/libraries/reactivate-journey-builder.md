@@ -8,13 +8,19 @@ The one-click win-back journey (journey slug `reactivate-subscription`, journey 
 ## Exports
 
 - `buildReactivateSteps(admin, workspaceId, customerId, ticketId)` → a single terminal
-  `single_choice` step `reactivate_choice`. With gifts configured: one option per gift
+  `single_choice` step `reactivate_choice`. **Discontinued-only sub** (every real line is a discontinued
+  product, via `subDiscontinuedReplacement`): with a replacement configured → `"{discontinued} has been
+  discontinued. Would you like to restart with {replacement} for ${price} instead?"` + option
+  `reactivate_replace` + `not_now`; with no replacement → plainly says it's discontinued (never the old
+  "our team will reach out") + a single `not_now`. Otherwise: with gifts configured one option per gift
   (`reactivate:<variant uuid>`, "Restart + free {label}") plus `not_now`; without: `reactivate` / `not_now`.
 - `loadWinbackGifts(admin, workspaceId)` → `{ variant_id, label }[]` from
   `journey_definitions.config.winback_gifts` on the active win-back journey (DB-driven; seeded by
   migration `20270121120000_winback_gift_options.sql`: Ashwavana Strawberry, Creatine Prime+ Piña
   Colada, Cinnamon Roll Creamer — excess inventory, CEO 2026-11-21).
-- `giftOptionValue(variantId)` / `parseReactivateValue(value)` → `{ restart, giftVariantId }`.
+- `giftOptionValue(variantId)` / `REACTIVATE_REPLACE_VALUE` (`"reactivate_replace"`) / `parseReactivateValue(value)` → `{ restart, giftVariantId, replaceDiscontinued }`.
+- `subDiscontinuedReplacement(admin, workspaceId, items)` → `{ replacement, discontinuedTitles } | null` — null unless EVERY real line is a discontinued product; resolves line→product via `product_variants` (Shopify id, then sku) then reads the offer through [[migrate-to-internal]] `replacementForDiscontinued`. `replacement` is null when a discontinued-only sub has none configured.
+- `formatReplacementPrice(cents)` (`$29.95`), `replacementResultMessage(title, cents, when)` (`"Restarted with {title} at ${price}. Next order: {date}."`) and `replacementTicketNote(title, discTitles, cents)` (`"[Win-back] Restarted with {title} in place of discontinued {product} at ${price}."`) — the shared copy so the journey and the portal render identically.
 - `resolveTargetSubscription(admin, workspaceId, customerId, preferredSubscriptionId?)` → the
   session's bound `subscription_id` when it is still cancelled/paused in the customer's linked-account
   group; otherwise a paused sub with real items, else the most recently updated cancelled sub with

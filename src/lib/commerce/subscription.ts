@@ -738,7 +738,7 @@ export function defaultReactivationDate(): string {
 export async function reactivateSubscription(
   workspaceId: string,
   contractIdIn: string,
-  opts: { nextBillingDate?: string } = {},
+  opts: { nextBillingDate?: string; replaceDiscontinued?: boolean } = {},
 ): Promise<ReactivateResult> {
   let contractId = String(contractIdIn);
   let nextBillingDate = opts.nextBillingDate || defaultReactivationDate();
@@ -748,7 +748,10 @@ export async function reactivateSubscription(
     let engine = await resolveBillingSource(workspaceId, contractId);
 
     if (engine === "appstle") {
-      const ens = await ensureShopcxEngine(workspaceId, contractId, "resume", { nextBillingDate });
+      // `replaceDiscontinued` substitutes each discontinued (excluded) line with its configured
+      // replacement during the revive, so a sub whose only product is discontinued restarts on the
+      // replacement instead of failing `only_excluded_products`. See [[migrate-to-internal]].
+      const ens = await ensureShopcxEngine(workspaceId, contractId, "resume", { nextBillingDate, replaceDiscontinued: opts.replaceDiscontinued });
       if (!ens.ok) {
         if (ens.reason === "needs_payment_method" || ens.reason === "needs_address") {
           return { ok: false, reason: ens.reason, message: ens.error };

@@ -16,7 +16,8 @@ export const reactivate: RouteHandler = async ({ auth, route, req }) => {
   let payload: Record<string, unknown> | null = null;
   try { payload = await req.json(); } catch { payload = null; }
 
-  const resolved = await resolveSub(createAdminClient(), auth.workspaceId, payload?.contractId, auth.loggedInCustomerId);
+  const admin = createAdminClient();
+  const resolved = await resolveSub(admin, auth.workspaceId, payload?.contractId, auth.loggedInCustomerId);
   let contractId = resolved?.shopify_contract_id || "";
   if (!contractId) return jsonErr({ error: "missing_contractId" }, 400);
 
@@ -25,9 +26,18 @@ export const reactivate: RouteHandler = async ({ auth, route, req }) => {
     ? new Date(payload.nextBillingDate as string).toISOString()
     : addDaysFromNow(1);
 
+  // Discontinued-only restart: when the customer chose the replacement, resolve it BEFORE restarting
+  // (the sub's items change to the replacement afterwards) so the result copy + ticket note can name
+  // the discontinued product — identical to the win-back journey.
+  const { subDiscontinuedReplacement } = await import("@/lib/reactivate-journey-builder");
+  const disc = payload?.replaceDiscontinued === true
+    ? await subDiscontinuedReplacement(admin, auth.workspaceId, (resolved as { items?: unknown })?.items)
+    : null;
+  const replaceDiscontinued = !!(disc && disc.replacement);
+
   // ⭐ Shared with the win-back journey (src/lib/subscription-reactivate.ts) so the portal and the
   // mini-site restart a subscription the exact same way.
-  const r = await reactivateSubscription(auth.workspaceId, String(contractId), { nextBillingDate: requestedDate });
+  const r = await reactivateSubscription(auth.workspaceId, String(contractId), { nextBillingDate: requestedDate, replaceDiscontinued });
   if (!r.ok) {
     if (r.reason === "needs_payment_method" || r.reason === "needs_address") {
       return jsonErr({ error: r.reason, message: r.message }, 409);
@@ -38,13 +48,21 @@ export const reactivate: RouteHandler = async ({ auth, route, req }) => {
   contractId = r.contractId;
   const nextBillingDate = r.nextBillingDate;
 
+  const when = new Date(nextBillingDate).toLocaleDateString("en-US", { month: "long", day: "numeric", timeZone: "UTC" });
+  const { replacementResultMessage, replacementTicketNote } = await import("@/lib/reactivate-journey-builder");
+  const resultMessage = replaceDiscontinued && disc?.replacement
+    ? replacementResultMessage(disc.replacement.title, disc.replacement.priceCents, when)
+    : null;
+
   const customer = await findCustomer(auth.workspaceId, auth.loggedInCustomerId);
   if (customer) {
     await logPortalAction({
       workspaceId: auth.workspaceId, customerId: customer.id,
       eventType: "portal.subscription.reactivated",
-      summary: "Customer reactivated subscription via portal",
-      properties: { shopify_contract_id: String(contractId), nextBillingDate },
+      summary: replaceDiscontinued && disc?.replacement
+        ? replacementTicketNote(disc.replacement.title, disc.discontinuedTitles, disc.replacement.priceCents)
+        : "Customer reactivated subscription via portal",
+      properties: { shopify_contract_id: String(contractId), nextBillingDate, replace_discontinued: replaceDiscontinued },
       createNote: true,
     });
     // Out-of-stock flavors swapped on restart — same behaviour + same note as the win-back journey.
@@ -63,6 +81,7 @@ export const reactivate: RouteHandler = async ({ auth, route, req }) => {
 
   return jsonOk({
     ok: true, route, contractId,
+    ...(resultMessage ? { message: resultMessage } : {}),
     crisisSwaps: r.crisisSwaps.filter((x) => x.ok).map((x) => ({ from: x.fromLabel, to: x.toLabel, expectedRestock: x.expectedRestock })),
     patch: { status: "ACTIVE", nextBillingDate, portalReactivatedAt: new Date().toISOString() },
   });
