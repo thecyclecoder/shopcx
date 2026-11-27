@@ -18,9 +18,10 @@ A standing engine of genuinely useful, human-voiced content (blog + resources) t
 - **Specs:** **auto-blog-generation** ✅ (verified + archived → [[../lifecycles/auto-blog-generation]]) · **blog-resources** ✅ (verified + archived → [[../lifecycles/blog-resources]])
 
 ### Organic social
-Always-on organic posts/reels/stories to FB + IG for engagement, sourced from existing assets + PI-grounded copy.
-- **Metric:** posting cadence kept full, organic reach/engagement.
-- **Specs:** [[../specs/automated-social-scheduler]] ✅
+Always-on organic posts to FB + IG for engagement. As of organic-nugget-engine, **organic is a content library SEPARATE from the ads system** ([[../tables/organic_content]] + [[../libraries/organic-content]]) — it no longer recycles paid-ad creative (`avatar`/`ad_video` are no longer picked). Three formats: educational nugget **carousels** (AI-drafted by [[../libraries/nugget-generator]], human-approved), the Hidden Four animated **reels** (offer-free cuts), and **review** highlights. Every post carries one shareable "dinner table" takeaway; nuggets cite one real study with "supports" language (no disease/product claims). Cadence: ~1 carousel/day, 3–4 reels/week, a review ~1 in 5 posts, stories daily, blog slot kept.
+- **Metric:** posting cadence kept full, organic reach/engagement (the 386-posts-for-103-likes Aug–Nov 2026 baseline is what this replaces).
+- **Specs:** [[../specs/automated-social-scheduler]] ✅ · organic-nugget-engine ✅ (library + carousel publishing + nugget generator + reels/cadence)
+- **Tool:** the always-on organic poster ([[../lifecycles/social-scheduler]]); the daily `organicNuggetGenerate` cron keeps the carousel queue full for approval.
 
 ### Review collection
 Keep a live supply of first-party product reviews. Reviews are load-bearing across the business — storefront PDPs, the Shopify theme's star ratings and Google rich snippets, the ad tool's tier-4 proof anchors, [[../lifecycles/product-intelligence]] grounding, cancel-journey social proof, and review cards. They were collected by Klaviyo until that vendor was retired; the last review landed **2026-07-01** and nothing has collected one since.

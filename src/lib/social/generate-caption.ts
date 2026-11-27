@@ -16,8 +16,8 @@ import { currentDateContext } from "@/lib/social/seasonality";
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 
-export type SourceKind = "avatar" | "ad_video" | "testimonial" | "resource" | "promo" | "blog";
-export type PostType = "feed" | "reel" | "story";
+export type SourceKind = "avatar" | "ad_video" | "testimonial" | "resource" | "promo" | "blog" | "organic";
+export type PostType = "feed" | "reel" | "story" | "carousel";
 
 export interface ProductPI {
   title: string;
@@ -66,10 +66,18 @@ HARD RULES:
 - Instagram captions can't have clickable links — if a CTA is needed, say "link in bio" or "shop the link in our bio", never paste a URL.
 - Output ONLY the caption text. No preamble, no quotes around it, no "Caption:" label.`;
 
-function userPrompt(kind: SourceKind, postType: PostType, pi: ProductPI | null, resourceSummary?: string): string {
+function userPrompt(kind: SourceKind, postType: PostType, pi: ProductPI | null, resourceSummary?: string, organic?: { hook?: string; dinnerLine?: string }): string {
   const len = postType === "story" ? "Ultra-short (stories show no caption text — keep it to a punchy line in case it's used as alt/feed)."
     : postType === "reel" ? "Reel caption: a strong hook in the first line, then 1-2 short lines. ~250-400 chars."
     : "Feed caption: hook line + 2-3 short lines of benefit. ~300-500 chars.";
+  if (kind === "organic") {
+    // Organic nuggets/reels/reviews: educational, SHAREABLE, NO offer copy. Lead with the hook,
+    // end with the dinner-table takeaway + a save/share nudge. Never pitch the product.
+    return `Write a caption for an ORGANIC educational post (a nugget carousel, an animated reel, or a review highlight). This is NOT an ad — there is NO offer, NO discount, NO "shop now". Lead with the hook. Keep it warm, plain, and genuinely useful. END with the dinner-table takeaway line, then a soft nudge to "save this" or "send it to someone who needs it". Do NOT paste a URL. ${len}
+
+HOOK: ${organic?.hook || "(none)"}
+DINNER-TABLE TAKEAWAY: ${organic?.dinnerLine || "(none)"}`;
+  }
   switch (kind) {
     case "promo":
       return `Write a caption for a SALE / PROMO graphic (the offer + discount are already ON the image). Don't repeat the exact discount text; add urgency + a real product benefit and nudge them to shop (Instagram → "link in bio"). ${len}\n\nPRODUCT INTELLIGENCE:\n${pi ? piBlock(pi) : "(none)"}`;
@@ -95,6 +103,8 @@ export interface GenerateCaptionArgs {
   resourceSummary?: string;     // for source_kind='resource'
   now?: Date;                   // the post's scheduled date (for season-correct copy)
   campaignBrief?: string;       // active promo theme — caption should lean into it
+  organicHook?: string;         // source_kind='organic' — the nugget/review hook
+  organicDinnerLine?: string;   // source_kind='organic' — the dinner-table takeaway
 }
 
 /** Generate one caption. Returns null on failure (caller can retry or skip). */
@@ -114,7 +124,7 @@ export async function generateCaption(args: GenerateCaptionArgs): Promise<string
       model: SONNET_MODEL,
       max_tokens: 500,
       system: SYSTEM,
-      messages: [{ role: "user", content: `${dateLine}${promoLine}\n\n${userPrompt(args.sourceKind, args.postType, pi, args.resourceSummary)}` }],
+      messages: [{ role: "user", content: `${dateLine}${promoLine}\n\n${userPrompt(args.sourceKind, args.postType, pi, args.resourceSummary, { hook: args.organicHook, dinnerLine: args.organicDinnerLine })}` }],
     }),
   });
   if (!res.ok) return null;

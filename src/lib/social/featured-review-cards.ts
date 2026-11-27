@@ -1,29 +1,28 @@
 /**
- * Featured-review card generator (spec: automated-social-scheduler).
+ * Featured-review card generator (spec: automated-social-scheduler · organic-nugget-engine Phase 1).
  *
- * Turns ShopCX **featured** reviews (`product_reviews.featured`) into designed
- * testimonial graphics and drops them into the **ad library** (`ad_videos`
- * statics) under a per-product "{Product} Reviews" campaign — so the social
- * poster's `pickTestimonial` finds them with no changes, and the ad tool can
- * reuse them too.
+ * Turns ShopCX **featured** reviews (`product_reviews.featured`) into designed testimonial graphics
+ * and drops them into the **organic library** (`organic_content`, format='review') via the organic
+ * SDK — NO longer into the ads system. Review highlights are organic content, not ad creative, so
+ * they live beside the nugget carousels and animated reels, away from the paid-ad tables. (Existing
+ * `ad_videos` review cards from before this move are left alone.)
  *
- * Reuses the ad-tool's `StaticReview` Remotion template (text-exact, on-brand)
- * via `renderStillCompositionTo`, at 9:16 (story) + 4:5 (feed). Idempotent:
- * tracks which reviews are carded via `meta.review_id`, so a daily run does a
- * few and **stops once every featured review has a card**.
+ * Reuses the ad-tool's `StaticReview` Remotion template (text-exact, on-brand) via
+ * `renderStillCompositionTo`, at 4:5 (feed / carousel, 1080×1350 — the canonical organic ratio; the
+ * 9:16 story variant is derived at post time via story-ratio.ts). Idempotent: skips any review that
+ * already has an organic card (`existingOrganicReviewIds`), so a daily run does a few and **stops
+ * once every featured review has a card**.
  */
 import { createAdminClient } from "@/lib/supabase/admin";
 import { renderStillCompositionTo } from "@/lib/ad-render";
-import { uploadBuffer, signedUrl } from "@/lib/ad-storage";
+import { uploadBuffer, AD_BUCKET } from "@/lib/ad-storage";
 import { DEFAULT_BRAND, type ReviewProps } from "@/lib/ad-static";
 import { uuidLineItemProductIds } from "@/lib/email-storefront";
+import { insertOrganicContentDraft, existingOrganicReviewIds } from "@/lib/social/organic-content";
 
 const COMPOSITION = "StaticReview";
-const SOURCE = "featured_review_card";
-const DIMS: Array<{ format: string; w: number; h: number }> = [
-  { format: "stories_9x16", w: 1080, h: 1920 }, // canonical
-  { format: "feed_4x5", w: 1080, h: 1350 },
-];
+// Organic feed / carousel ratio. The 9:16 story cut is derived at post time (Phase 4 story-ratio.ts).
+const DIM = { w: 1080, h: 1350 };
 
 function trimQuote(s: string, max = 180): string {
   let t = (s || "").replace(/\s+/g, " ").trim();
@@ -43,49 +42,6 @@ interface ReviewRow {
   smart_quote: string | null;
   body: string | null;
   verified_purchase: boolean | null;
-}
-
-/** ad_videos meta payloads, narrowed. */
-type StaticMeta = { source?: string; review_id?: string } | null;
-
-/** review_ids that already have a generated card in this workspace. */
-async function cardedReviewIds(admin: ReturnType<typeof createAdminClient>, workspaceId: string): Promise<Set<string>> {
-  const { data } = await admin
-    .from("ad_videos")
-    .select("meta")
-    .eq("workspace_id", workspaceId)
-    .eq("media_kind", "static");
-  const set = new Set<string>();
-  for (const r of data || []) {
-    const m = r.meta as StaticMeta;
-    if (m?.source === SOURCE && m.review_id) set.add(m.review_id);
-  }
-  return set;
-}
-
-/** Find (or create) the "{Product} Reviews" campaign the cards live under. */
-async function reviewsCampaignId(
-  admin: ReturnType<typeof createAdminClient>,
-  workspaceId: string,
-  productId: string,
-  productTitle: string,
-): Promise<string> {
-  const name = `${productTitle} Reviews`;
-  const { data: existing } = await admin
-    .from("ad_campaigns")
-    .select("id")
-    .eq("workspace_id", workspaceId)
-    .eq("product_id", productId)
-    .eq("name", name)
-    .maybeSingle();
-  if (existing?.id) return existing.id;
-  const { data: created, error } = await admin
-    .from("ad_campaigns")
-    .insert({ workspace_id: workspaceId, product_id: productId, name, status: "ready" })
-    .select("id")
-    .single();
-  if (error || !created) throw new Error(`create reviews campaign failed: ${error?.message}`);
-  return created.id;
 }
 
 /** Resolve the product's isolated pouch, else the main variant image. */
@@ -116,44 +72,38 @@ function reviewProps(r: ReviewRow, productTitle: string, productImageUrl: string
   };
 }
 
-/** Render + store one review's card (9:16 canonical + 4:5 sibling) in the ad library. */
+/** Render + store one review's 4:5 card and insert it into the organic library (status='approved'). */
 async function makeCard(
   admin: ReturnType<typeof createAdminClient>,
   workspaceId: string,
   review: ReviewRow,
   productTitle: string,
   fontKey: string,
-): Promise<{ reviewId: string; canonicalId: string }> {
-  const campaignId = await reviewsCampaignId(admin, workspaceId, review.product_id, productTitle);
+): Promise<{ reviewId: string; contentId: string }> {
   const imageUrl = await productImage(admin, review.product_id);
   const props = reviewProps(review, productTitle, imageUrl, fontKey) as unknown as Record<string, unknown>;
 
-  let canonicalId: string | null = null;
-  for (const dim of DIMS) {
-    const ins = await admin
-      .from("ad_videos")
-      .insert({
-        workspace_id: workspaceId, campaign_id: campaignId, format: dim.format,
-        media_kind: "static", format_variant_of_id: canonicalId, status: "rendering",
-        meta: { archetype: "review", source: SOURCE, review_id: review.id },
-      })
-      .select("id").single();
-    const row = ins.data as { id: string } | null;
-    if (ins.error || !row) throw new Error(`ad_videos insert failed: ${ins.error?.message}`);
-    if (!canonicalId) canonicalId = row.id;
-    const tmp = `/tmp/revcard_${row.id}.jpg`;
-    await renderStillCompositionTo(COMPOSITION, { width: dim.w, height: dim.h, ...props }, tmp);
-    const fs = await import("fs/promises");
-    const buf = await fs.readFile(tmp);
-    const storagePath = `finals/${workspaceId}/${row.id}.jpg`;
-    await uploadBuffer(storagePath, buf, "image/jpeg");
-    const url = await signedUrl(storagePath);
-    await admin.from("ad_videos").update({
-      static_jpg_url: url, status: "ready",
-      meta: { archetype: "review", source: SOURCE, review_id: review.id, storage_path: storagePath },
-    }).eq("id", row.id);
-  }
-  return { reviewId: review.id, canonicalId: canonicalId! };
+  const tmp = `/tmp/revcard_${review.id}.jpg`;
+  await renderStillCompositionTo(COMPOSITION, { width: DIM.w, height: DIM.h, ...props }, tmp);
+  const fs = await import("fs/promises");
+  const buf = await fs.readFile(tmp);
+  // Private bucket asset (re-signed at publish — never persist a signed URL).
+  const storagePath = `organic/reviews/${workspaceId}/${review.id}.jpg`;
+  await uploadBuffer(storagePath, buf, "image/jpeg");
+
+  const headline = trimQuote(review.smart_quote || review.body || "", 140);
+  // Already human-featured, so insert approved (preserves the prior auto-posting behaviour).
+  const content = await insertOrganicContentDraft(admin, workspaceId, {
+    format: "review",
+    title: `${productTitle} — ${review.reviewer_name?.trim() || "Verified Customer"}`,
+    hook: headline,
+    slides: [{ headline, body: review.body || null, image_bucket: AD_BUCKET, image_path: storagePath }],
+    product_id: review.product_id,
+    review_id: review.id,
+    created_by: "featured_review_card",
+    status: "approved",
+  });
+  return { reviewId: review.id, contentId: content.id };
 }
 
 export interface ReviewCardResult {
@@ -175,7 +125,7 @@ export async function generateFeaturedReviewCards(
   // Brand font from Storefront settings (default montserrat).
   const { data: ws } = await admin.from("workspaces").select("storefront_font").eq("id", workspaceId).maybeSingle();
   const fontKey = (ws?.storefront_font as string | null) || "montserrat";
-  const carded = await cardedReviewIds(admin, workspaceId);
+  const carded = await existingOrganicReviewIds(admin, workspaceId);
 
   let q = admin
     .from("product_reviews")
