@@ -13,7 +13,8 @@
  */
 import { inngest } from "@/lib/inngest/client";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { pickBySourceKind, type SourceKind } from "@/lib/social/resources";
+import { pickBySourceKind, pickOrganic, type SourceKind } from "@/lib/social/resources";
+import type { OrganicFormat } from "@/lib/social/organic-content";
 import { ensureStoryRatio } from "@/lib/social/story-ratio";
 import { generateCaption, type PostType } from "@/lib/social/generate-caption";
 import { publishScheduledPost, type ScheduledPostRow } from "@/lib/social/publish";
@@ -51,12 +52,6 @@ function zonedToUtc(dateStr: string, hhmm: string, tz: string): Date {
   return new Date(guess.getTime() - (asUtc - guess.getTime()));
 }
 
-// Which source kind feeds each post type (rotates by day so it varies).
-function kindForType(postType: PostType, dayNum: number): SourceKind {
-  if (postType === "reel") return "ad_video";
-  if (postType === "feed") return (["avatar", "testimonial", "resource"] as SourceKind[])[dayNum % 3];
-  return (["avatar", "testimonial"] as SourceKind[])[dayNum % 2]; // story (image)
-}
 
 export async function planWorkspace(workspaceId: string, config: SchedulerConfig): Promise<number> {
   if (!config.enabled || !config.target_meta_page_ids?.length) return 0;
@@ -114,17 +109,22 @@ export async function planWorkspace(workspaceId: string, config: SchedulerConfig
     const promoMedia = (promo?.generated_media || []) as { post_type: string; url: string }[];
     const capForDay = promo?.boost_per_platform_per_day ? Math.max(dailyCap, promo.boost_per_platform_per_day) : dailyCap;
 
-    // Cadence by weekday: story daily, feed Mon/Wed/Fri/Sun, reel Tue/Thu/Sat.
-    // The blog slot is ALWAYS-ON (every day, IG feed + FB) and added first so the
-    // freshest blog goes out on top of the regular cadence. Feed-type image on IG,
-    // clickable link card on FB. Exempt from the daily cap (priority for diversity).
-    const plan: { type: PostType; pages: typeof igPages; forceKind?: SourceKind }[] = [];
+    // ORGANIC CADENCE (organic-nugget-engine Phase 4 — organic is SEPARATE from ads; avatar/ad_video
+    // are no longer picked). Story daily, 1 carousel/day, 3–4 reels/week, a review highlight ~1 in 5
+    // days replacing the carousel. The blog slot stays ALWAYS-ON (every day, IG feed + FB) and is
+    // added first; it's exempt from the daily cap (priority for diversity).
+    const plan: { type: PostType; pages: typeof igPages; forceKind?: SourceKind; organicFormat?: OrganicFormat }[] = [];
     plan.push({ type: "feed", pages: [...igPages, ...fbPages], forceKind: "blog" });
-    if (config.cadence.story > 0) plan.push({ type: "story", pages: igPages });
-    if (config.cadence.feed > 0 && [0, 1, 3, 5].includes(dow)) plan.push({ type: "feed", pages: [...igPages, ...fbPages] });
-    if (config.cadence.reel > 0 && [2, 4, 6].includes(dow)) plan.push({ type: "reel", pages: igPages });
+    // Stories daily — sourced from the day's organic review card / carousel first slide (9:16 via story-ratio).
+    if (config.cadence.story > 0) plan.push({ type: "story", pages: igPages, organicFormat: "review" });
+    // ~1 in 5 days a review highlight (feed image) replaces the daily carousel.
+    const isReviewDay = dayNum % 5 === 0;
+    if (isReviewDay) plan.push({ type: "feed", pages: [...igPages, ...fbPages], organicFormat: "review" });
+    else plan.push({ type: "carousel", pages: [...igPages, ...fbPages], organicFormat: "carousel" });
+    // Animated reels Tue/Thu/Sat (+ Sun when supply allows — pickOrganic returns null if none).
+    if ([2, 4, 6, 0].includes(dow)) plan.push({ type: "reel", pages: igPages, organicFormat: "reel" });
 
-    for (const { type, pages: targets, forceKind } of plan) {
+    for (const { type, pages: targets, forceKind, organicFormat } of plan) {
       if (!targets.length) continue;
       // Idempotent. The blog slot and the rotating feed are BOTH post_type=feed,
       // so blog keys on source_kind='blog' while the regular slots key on
@@ -143,9 +143,9 @@ export async function planWorkspace(workspaceId: string, config: SchedulerConfig
       if (existing?.length) continue;
 
       // Pick ONE asset + caption, cross-post to every target platform.
-      // During a promo with generated graphics, the feed/story uses the promo
-      // graphic; reels (video) still come from the ad-video library.
-      let kind: SourceKind | "promo";
+      // Precedence: blog slot (forceKind) → active-promo graphic (feed/story) → organic library.
+      // Ad-sourced kinds (avatar/ad_video) are no longer picked — organic is separate from ads.
+      let kind: SourceKind | "promo" | "organic";
       let asset: Awaited<ReturnType<typeof pickBySourceKind>> = null;
       const promoGraphic = !forceKind && (type === "feed" || type === "story") ? promoMedia.find((g) => g.post_type === type) : undefined;
       if (forceKind) {
@@ -154,10 +154,11 @@ export async function planWorkspace(workspaceId: string, config: SchedulerConfig
       } else if (promoGraphic) {
         kind = "promo";
         asset = { sourceRefId: promo!.id, productId: promo!.emphasis_product_id || null, mediaUrl: promoGraphic.url };
+      } else if (organicFormat) {
+        kind = "organic";
+        asset = await pickOrganic(admin, workspaceId, organicFormat, reuseDays, date);
       } else {
-        const k = kindForType(type, dayNum);
-        kind = k;
-        asset = await pickBySourceKind(admin, workspaceId, k, reuseDays, date);
+        continue;
       }
       if (!asset) continue;
 
@@ -186,8 +187,11 @@ export async function planWorkspace(workspaceId: string, config: SchedulerConfig
         workspaceId, sourceKind: kind, postType: type,
         productId: asset.productId, resourceSummary: captionSummary,
         now: date, campaignBrief: promo?.brief || undefined,
+        organicHook: asset.hook, organicDinnerLine: asset.dinnerLine,
       });
-      const candidateSlots = config.time_slots[type] || ["12:00"];
+      // Carousels reuse the feed time slots (config.time_slots has no carousel key).
+      const slotKey = type === "carousel" ? "feed" : type;
+      const candidateSlots = config.time_slots[slotKey] || ["12:00"];
       const status = config.require_approval ? "draft" : "scheduled";
 
       for (const page of targets) {
@@ -290,7 +294,7 @@ export const socialPublish = inngest.createFunction(
       const admin = createAdminClient();
       const { data } = await admin
         .from("scheduled_social_posts")
-        .select("id, workspace_id, meta_page_id, platform, post_type, caption, media_url, media_bucket, media_path, link_url, status")
+        .select("id, workspace_id, meta_page_id, platform, post_type, caption, media_url, media_bucket, media_path, source_ref_id, link_url, status")
         .eq("id", postId).maybeSingle();
       return data as (ScheduledPostRow & { status: string }) | null;
     });
