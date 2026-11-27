@@ -1,0 +1,1 @@
+- **Restarting a sub whose only product is discontinued offers a replacement** · verified 2026-11-27 · → [[../lifecycles/shopcx-subscriptions]]
