@@ -18,6 +18,7 @@
  *
  * Joins are on the internal product UUID — never shopify_*_id.
  */
+import { checkQuote } from "@/lib/shopping-agent/compliance";
 import { createAdminClient } from "@/lib/supabase/admin";
 
 type Admin = ReturnType<typeof createAdminClient>;
@@ -71,7 +72,11 @@ export interface ListSituationsOptions {
 
 /** Strip every quote that is not individually compliant — the surface-side quote filter. */
 function compliantQuotesOnly(quotes: SituationQuote[]): SituationQuote[] {
-  return (quotes ?? []).filter((q) => q?.compliance_ok === true);
+  // A quote stored compliance_ok=false ONLY for a weight-loss result (seeded/mined before the CEO's
+  // 2026-11-28 rule) is re-screened with checkQuote and surfaces; incentivized/disease/drug flags stay hidden.
+  return (quotes ?? []).filter(
+    (q) => q?.compliance_ok === true || (!/incentiv|coupon/i.test(q?.compliance_note ?? "") && checkQuote(q?.verbatim_phrase ?? "").ok && !!q?.verbatim_phrase),
+  );
 }
 
 /** Coerce a raw DB row into {@link CustomerSituationRow} (quotes defaults to []). */

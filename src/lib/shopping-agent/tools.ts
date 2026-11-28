@@ -24,6 +24,8 @@ import {
   checkClaim,
   filterText,
   filterQuotes,
+  quoteNeedsResultsNote,
+  RESULTS_MAY_VARY_NOTE,
   evaluateSafetyGate,
   MANDATORY_DISCLAIMER,
 } from "./compliance";
@@ -338,6 +340,7 @@ async function findProductsForSituation(ctx: ToolContext, args: { situation?: st
       quote: q.verbatim_phrase,
       reviewer: reviewerShortName(q.reviewer),
       rating: q.rating,
+      ...(quoteNeedsResultsNote(q.verbatim_phrase ?? "") ? { note: RESULTS_MAY_VARY_NOTE } : {}),
     }));
     const pi = await getProductIntelligence(ctx.admin, ctx.workspaceId, s.product_id);
     matches.push({
@@ -502,6 +505,7 @@ async function getReviews(ctx: ToolContext, args: { product_id?: string; handle?
       quote: r.verbatim_phrase,
       reviewer: reviewerShortName(r.reviewer),
       rating: r.rating,
+      ...(quoteNeedsResultsNote(r.verbatim_phrase) ? { note: RESULTS_MAY_VARY_NOTE } : {}),
     })),
     disclaimer: MANDATORY_DISCLAIMER,
   };

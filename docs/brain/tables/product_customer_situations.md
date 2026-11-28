@@ -2,7 +2,7 @@
 
 The verifiable, compliance-checked dataset of the real life-situations our customers were in, mined from the best-reviews set. ONE source shared by the AI shopping-agent MCP server ([[../libraries/customer-situations]] · `find_products_for_situation`) and the PDP AI-answers (AEO) work — both read these rows so a situation can't drift between surfaces. Phase 1 of the AI-shopping-agent build.
 
-**Compliance invariant (north star):** every row AND every nested quote carries its own `compliance_ok` flag. Incentivized/coupon reviews and pounds-lost / disease-term quotes are **stored** (for audit) but **never surfaced** to shoppers — the SDK returns only `compliance_ok=true` rows and strips non-compliant quotes on every shopper-facing read (default `compliantOnly=true`).
+**Compliance invariant (north star):** every row AND every nested quote carries its own `compliance_ok` flag. Incentivized/coupon reviews and disease/drug-term quotes are **stored** (for audit) but **never surfaced** to shoppers — the SDK returns only `compliance_ok=true` rows and strips non-compliant quotes on every shopper-facing read (default `compliantOnly=true`). Weight-loss results (pounds lost) are NOT a block reason since 2026-11-28 (CEO): a quote stored `compliance_ok=false` only for that is re-screened on read with `checkQuote` and surfaces with the results-may-vary note.
 
 **Joins on the internal `product_id` UUID** — never `shopify_*_id`. No `customer_id` column, so no Sonnet data tool is required.
 
