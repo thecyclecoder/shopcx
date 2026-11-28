@@ -62,6 +62,7 @@
     "test:all": "tsx scripts/_run-registered-tests.ts",
     "test:run-registered-tests": "tsx --test scripts/_run-registered-tests.test.ts",
     "test:shopping-agent-compliance": "tsx --test src/lib/shopping-agent/compliance.test.ts",
+    "test:shopping-agent-situation-grouping": "tsx --test src/lib/shopping-agent/tools.test.ts",
     "test:journey-cancel-flow": "tsx --test src/lib/journey-cancel-flow.test.ts",
     "test:recovery-migration-bugs": "tsx --test src/lib/recovery-migration-bugs.test.ts",
     "test:portal-pause-renewal-date": "tsx --test src/lib/portal/pause-renewal-date.test.ts",

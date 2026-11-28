@@ -188,6 +188,52 @@ function situationScore(situation: CustomerSituationRow, words: string[]): numbe
   return score;
 }
 
+/**
+ * Light synonym groups (customer-situations-all-products Phase 2). If the shopper uses ANY word in a
+ * group, the others join the search set — so "a healthier morning coffee" also scores a coffee
+ * product's morning-energy situation. These are plain-language QUERY expansions only: never added to
+ * any returned text, so they introduce NO new health claim.
+ */
+const SITUATION_SYNONYM_GROUPS: string[][] = [
+  ["coffee", "morning", "latte"],
+  ["focus", "work", "study"],
+  ["sleep", "calm", "stress"],
+];
+
+/** Expand the shopper's words with any synonym group they touched. Deduped, order-stable. */
+export function expandSituationWords(words: string[]): string[] {
+  const set = new Set(words);
+  for (const group of SITUATION_SYNONYM_GROUPS) {
+    if (group.some((g) => set.has(g))) for (const g of group) set.add(g);
+  }
+  return [...set];
+}
+
+/**
+ * Pick the BEST situation per PRODUCT, then the top `maxProducts` products — so the agent shows a
+ * RANGE of products, never three rows of the same one (the pre-Phase-2 bug). Scores with the
+ * synonym-expanded words; a product keeps its single highest-scoring situation; products are ordered
+ * by that best score. Returns the chosen situation rows (0-score products excluded).
+ */
+export function bestSituationsByProduct(
+  situations: CustomerSituationRow[],
+  words: string[],
+  maxProducts = 3,
+): CustomerSituationRow[] {
+  const expanded = expandSituationWords(words);
+  const bestByProduct = new Map<string, { s: CustomerSituationRow; score: number }>();
+  for (const s of situations) {
+    const score = situationScore(s, expanded);
+    if (score <= 0) continue;
+    const prev = bestByProduct.get(s.product_id);
+    if (!prev || score > prev.score) bestByProduct.set(s.product_id, { s, score });
+  }
+  return [...bestByProduct.values()]
+    .sort((a, b) => b.score - a.score)
+    .slice(0, maxProducts)
+    .map((x) => x.s);
+}
+
 async function findProductsForSituation(ctx: ToolContext, args: { situation?: string }): Promise<unknown> {
   const situationText = String(args.situation ?? "").slice(0, 2000);
 
@@ -217,14 +263,11 @@ async function findProductsForSituation(ctx: ToolContext, args: { situation?: st
 
   const words = situationText.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
   const situations = await listSituations(ctx.admin, ctx.workspaceId, { compliantOnly: true, limit: 200 });
-  const ranked = situations
-    .map((s) => ({ s, score: situationScore(s, words) }))
-    .filter((x) => x.score > 0)
-    .sort((a, b) => b.score - a.score)
-    .slice(0, 3);
+  // Best situation PER PRODUCT, top 3 DISTINCT products — never three rows of the same product.
+  const chosen = bestSituationsByProduct(situations, words, 3);
 
   const matches = [];
-  for (const { s } of ranked) {
+  for (const s of chosen) {
     ctx.productIds.add(s.product_id);
     const { kept } = filterQuotes(s.quotes); // compliant quotes only; already compliance_ok
     const quotes = kept.slice(0, 2).map((q) => ({
