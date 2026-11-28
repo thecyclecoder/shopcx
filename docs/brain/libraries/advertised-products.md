@@ -36,6 +36,7 @@ Every enumeration point that spends on or generates advertising calls the helper
 | Dahlia (cadence enumeration) | `src/lib/inngest/ad-creative-cadence.ts` — `dispatchAdCreativeCadence` | `listAdvertisedProductIds` | The angle-backed product list is intersected with the advertised set before dispatch — a stray `product_ad_angles` row on an attachment SKU never earns a Dahlia job. |
 | Dahlia (all-products loop) | `src/lib/ads/creative-agent.ts` — `runAdCreativeLoop` | `listAdvertisedProductIds` (all-products branch), `isAdvertisedProduct` (per-product branch) | Same intersect on the no-productId branch; per-product jobs are gated on the single target — a stray `productId` snuck into an ad-creative job produces zero creatives. |
 | Angle generation | `src/lib/ad-angles.ts` — `generateAngles` | `isAdvertisedProduct` | Gates BEFORE the Opus call — an attachment SKU angle-gen returns `{ok:false, reason:"not_advertised"}` at 0 tokens. Closes the upstream feeder to the Dahlia cadence. |
+| Situation mining (AI shopping-agent) | `src/lib/situation-miner.ts` — `enqueueSituationMineForAdvertised` | `listAdvertisedProductIds` | Enqueues one `situation-mine` box job per advertised product to mine real customer situations from best reviews, feeding the AI shopping-agent's [[shopping-agent]] `find_products_for_situation` tool. The monthly refresh cron [[../inngest/situation-mine-refresh]] uses the same enumeration so only heroes get fresh situations. |
 
 ### Not-yet-gated (composed elsewhere)
 

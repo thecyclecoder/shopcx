@@ -1,0 +1,1 @@
+- **Mine customer situations for every advertised product** · verified 2026-11-28 · → [[../lifecycles/ai-shopping-agent]]
