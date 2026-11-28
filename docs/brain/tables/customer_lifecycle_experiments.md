@@ -40,5 +40,8 @@ One row per self-running, person-grain lifecycle experiment — the spine the pr
 - **Holdout is sacred + fixed.** `holdout_pct` defines a TRUE holdout that is never reallocated. The M2 reminder sends ask the SDK whether a customer is treatment or holdout; the holdout gets nothing new.
 - **Owner + kill switch.** The harness is a node under the `retention` function in [[../libraries/control-tower-node-registry]] with a [[kill_switches]] ancestry. A trip stops NEW assignments (`assignArm` honours the switch) without destroying existing ones — the supervisable-autonomy north star.
 
+## Monitoring
+- **uuid-LIKE noise filter:** Foreign Supabase Studio / direct-REST queries using LIKE on the uuid `id` primary key are dropped at Control Tower capture time by [[../libraries/error-feed]] `isForeignSupabasePostgresUuidLikeOnCustomerLifecycleExperimentsIdAdhocNoise` — prevents spurious operator-mismatch error events.
+
 ## Related
-[[customer_lifecycle_experiment_assignments]] · [[../libraries/subscriber-experiments]] · [[customer_links]] · [[kill_switches]] · [[../libraries/control-tower-node-registry]] · [[storefront_experiments]] (the visitor-grain sibling this is deliberately NOT)
+[[customer_lifecycle_experiment_assignments]] · [[../libraries/subscriber-experiments]] · [[customer_links]] · [[kill_switches]] · [[../libraries/control-tower-node-registry]] · [[storefront_experiments]] (the visitor-grain sibling this is deliberately NOT) · [[../libraries/error-feed]]
