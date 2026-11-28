@@ -196,9 +196,30 @@ async function variantByFlavor(
     .order("available", { ascending: false })
     .order("position", { ascending: true });
   const rows = (data ?? []) as Array<{ id: string; title: string | null; option1: string | null; option2: string | null; option3: string | null }>;
-  const hit = rows.find((r) => [r.title, r.option1, r.option2, r.option3].some((v) => (v ?? "").toLowerCase() === want))
-    ?? rows.find((r) => [r.title, r.option1, r.option2, r.option3].some((v) => (v ?? "").toLowerCase().includes(want)));
+  const hit = pickFlavorMatch(rows, want);
   return hit ? { id: hit.id } : null;
+}
+
+/**
+ * Rank a shopper's flavor words against variant labels: exact label > whole-word match > substring.
+ * Whole-word first so "berry" picks "Mixed Berry", not "Strawberry Lemonade" (a substring hit that
+ * sorts earlier by position). Exported for the unit test.
+ */
+export function pickFlavorMatch<T extends { title: string | null; option1: string | null; option2: string | null; option3: string | null }>(
+  rows: T[],
+  want: string,
+): T | null {
+  const w = want.trim().toLowerCase();
+  if (!w) return null;
+  const labels = (r: T) => [r.title, r.option1, r.option2, r.option3].map((v) => (v ?? "").toLowerCase()).filter(Boolean);
+  const escaped = w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const word = new RegExp(`(^|[^a-z0-9])${escaped}($|[^a-z0-9])`);
+  return (
+    rows.find((r) => labels(r).some((l) => l === w)) ??
+    rows.find((r) => labels(r).some((l) => word.test(l))) ??
+    rows.find((r) => labels(r).some((l) => l.includes(w))) ??
+    null
+  );
 }
 
 /** The product's distinct variant titles (flavors), for telling the shopper what they can pick. */

@@ -25,7 +25,7 @@ Built across Phases 2–3 of the AI-shopping-agent build (Phase 1 = [[customer-s
 | `answer_product_question` | true | RAG over `retrieveContext` (kb_chunks) + published `product_page_content.faq_items` + ingredient research; policy questions via `getPolicyCustomerFacing` (never internal_summary/rules). |
 | `get_reviews` | true | Best-reviews set (published/featured, rating ≥ 4, featured first), optional topic filter. |
 | `compare_products` | true | 2–4 products side by side. |
-| `build_cart` | false | Prices a product + pack tier (+ optional `flavor`, matched case-insensitively to a variant title/option via `variantByFlavor`, else the primary variant; the result lists `available_flavors`) via `priceCartLines`, writes a `cart_drafts` row, returns a UTM-tagged checkout URL (`utm_source=<chatgpt\|claude\|grok>`, `utm_medium=ai_agent`). |
+| `build_cart` | false | Prices a product + pack tier (+ optional `flavor`, matched case-insensitively to a variant title/option via `variantByFlavor` → `pickFlavorMatch` (exact label, then whole word, then substring, so "berry" picks Mixed Berry not Strawberry Lemonade), else the primary variant; the result lists `available_flavors`) via `priceCartLines`, writes a `cart_drafts` row, returns a UTM-tagged checkout URL (`utm_source=<chatgpt\|claude\|grok>`, `utm_medium=ai_agent`). |
 
 ## Compliance (hard, in code)
 
