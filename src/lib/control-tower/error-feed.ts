@@ -6606,6 +6606,64 @@ export function isForeignSupabasePostgresMissingSubscriptionsRenewalSubtotalCent
 
 /**
  * Foreign-app noise — Postgres reporting a missing column for an ad hoc SELECT lookup of
+ * `pre_renewal_reminders.subscription_id`. Our `pre_renewal_reminders` table is keyed on the
+ * customer identity GROUP (group_id / customer_id), never a per-subscription id — it has no
+ * `subscription_id` column and never did. No ShopCX code path (src/, scripts/,
+ * shopify-extension/, supabase/migrations/, docs/brain/) issues a SELECT that names
+ * `pre_renewal_reminders.subscription_id`. The message appears on Supabase's `postgres_logs`
+ * feed only when an external / stale direct-REST client (a foreign integration, a stale
+ * exploratory query, a third-party tool) does a raw
+ * `select ... subscription_id ... from public.pre_renewal_reminders` lookup — or the PostgREST
+ * `WITH pgrst_source AS ( SELECT ... FROM "public"."pre_renewal_reminders" ... )` CTE wrapper
+ * the same client emits over the REST endpoint. There is no lever from ShopCX to make that
+ * query resolve — paging Platform on it (Control Tower signature
+ * `supabase-logs:fc34a27a1d24f525`) is repair work for a query we don't own.
+ *
+ * Sibling of `isForeignSupabasePostgresMissingSubscriptionsRenewalSubtotalCentsColumnAdhocNoise`
+ * — same narrow-gating shape, scoped to the `pre_renewal_reminders.subscription_id` lookup.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical column-missing shape for THIS column —
+ *      trimmed equal to `column pre_renewal_reminders.subscription_id does not exist` (with or
+ *      without the `public.` qualifier and any leading `ERROR: ` prefix Postgres includes on
+ *      the logs surface), AND
+ *   2. the `parsed.query` attribute is a SELECT-lookup on `public.pre_renewal_reminders` —
+ *      either (a) the bare `select ... from public.pre_renewal_reminders` shape, OR (b) the
+ *      PostgREST-generated `WITH pgrst_source AS ( SELECT ... FROM
+ *      "public"."pre_renewal_reminders" ... )` CTE wrapper form with double-quoted identifiers.
+ *
+ * Narrowly gated so:
+ *   - a column-missing error for ANY OTHER column on `pre_renewal_reminders` still pages,
+ *   - a column-missing error for `subscription_id` on ANY OTHER table still pages,
+ *   - the same message attached to a DIFFERENT statement shape (INSERT / UPDATE / DELETE /
+ *     DDL on `pre_renewal_reminders`) still pages — the pin is the SELECT-lookup shape.
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not record`,
+ * so returning null here fully suppresses the row (no error_event, no loop_alert, no
+ * signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresMissingPreRenewalRemindersSubscriptionIdColumnAdhocNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column pre_renewal_reminders.subscription_id does not exist" ||
+    stripped === "column public.pre_renewal_reminders.subscription_id does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  const bareSelect = /^select\b[\s\S]*\bfrom\s+(?:public\.)?pre_renewal_reminders\b/.test(q);
+  const pgrstCte =
+    /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"?(?:public"?\.)?"?pre_renewal_reminders\b/.test(q);
+  return bareSelect || pgrstCte;
+}
+
+/**
+ * Foreign-app noise — Postgres reporting a missing column for an ad hoc SELECT lookup of
  * `subscriptions.shipping_price_cents`. Our `subscriptions` table does NOT carry a
  * `shipping_price_cents` column — that is a Shopify-subscription-app (Appstle / native
  * Shopify subscription-contract) column shape, not ours. No ShopCX code path (src/,
