@@ -28,7 +28,9 @@ import {
   computeExperimentMetrics,
   welchTwoSampleCI,
   type ArmMetrics,
+  type GroupNetRevenue,
 } from "@/lib/subscriber-experiment-metrics";
+import { isRevenueWindowMatured } from "@/lib/subscriber-experiment-guardrails";
 import {
   getExperiment,
   PRE_RENEWAL_EXPERIMENT_SLUG,
@@ -104,6 +106,13 @@ export interface ArmResults {
   refundRate: number;
   /** Fraction of the arm's groups with ≥1 voluntary cancel in-window. */
   voluntaryCancelRate: number;
+  /** Groups in this arm whose revenue window has MATURED — their reminded renewal has billed +
+   *  settled ([[../subscriber-experiment-guardrails]] `isRevenueWindowMatured`). The net-revenue
+   *  guardrail judges only these, never partial-window groups. */
+  maturedGroups: number;
+  /** Mean net merchandise revenue per MATURED group, in cents (0 when the arm has no matured groups).
+   *  The net-revenue guardrail compares this (not the all-groups mean) so an unmatured $0 can't trip. */
+  maturedNetRevenuePerCustomerCents: number;
 }
 
 /** Live guardrail status derived from the harness row + the secondary metrics. */
@@ -274,10 +283,46 @@ export function rollupEngagement(
   return byArm;
 }
 
-/** Combine the metrics rollup + engagement into one per-arm shape. PURE. */
+/** Per-arm matured-window revenue — exposed so the net-revenue guardrail judges only groups whose
+ *  reminded renewal has billed + settled. */
+export interface MaturedArmRevenue {
+  maturedGroups: number;
+  maturedNetRevenuePerCustomerCents: number;
+}
+
+const EMPTY_MATURED: MaturedArmRevenue = { maturedGroups: 0, maturedNetRevenuePerCustomerCents: 0 };
+
+/**
+ * Fold the per-group net revenue to the MATURED subset for one arm. A group counts only once
+ * `isRevenueWindowMatured` holds for its reminded renewal date (next_billing_date from the ledger,
+ * via `remindedRenewalByGroup`); the mean is over matured groups only. PURE — no I/O.
+ */
+export function computeMaturedArmRevenue(
+  perGroupNet: GroupNetRevenue[],
+  remindedRenewalByGroup: Map<string, string | null>,
+  arm: ExperimentArm,
+  now: Date,
+): MaturedArmRevenue {
+  let count = 0;
+  let sum = 0;
+  for (const g of perGroupNet) {
+    if (g.arm !== arm) continue;
+    const remindedRenewalAt = remindedRenewalByGroup.get(g.groupId) ?? null;
+    if (!isRevenueWindowMatured({ remindedRenewalAt }, now)) continue;
+    count += 1;
+    sum += g.netRevenueCents;
+  }
+  return {
+    maturedGroups: count,
+    maturedNetRevenuePerCustomerCents: count > 0 ? sum / count : 0,
+  };
+}
+
+/** Combine the metrics rollup + engagement (+ matured-window revenue) into one per-arm shape. PURE. */
 export function buildArmResults(
   metrics: ArmMetrics,
   engagement: ArmEngagement,
+  matured: MaturedArmRevenue = EMPTY_MATURED,
 ): ArmResults {
   const refundRate =
     metrics.customerGroups > 0 ? metrics.refundedCustomerGroups / metrics.customerGroups : 0;
@@ -292,6 +337,8 @@ export function buildArmResults(
     refundsCents: metrics.refundsCents,
     refundRate,
     voluntaryCancelRate: metrics.voluntaryCancelRate,
+    maturedGroups: matured.maturedGroups,
+    maturedNetRevenuePerCustomerCents: matured.maturedNetRevenuePerCustomerCents,
   };
 }
 
@@ -476,9 +523,24 @@ export async function getReminderTestResults(
   const optOutAtByCustomer = await fetchSmsOptOuts(admin, workspaceId, textedCustomerIds);
 
   const engagement = rollupEngagement(ledger, lifecycleEvents, optOutAtByCustomer);
+
+  // Reminded renewal date per group (earliest in-window next_billing_date across a group's ledger
+  // rows) — the maturity anchor the net-revenue guardrail gates on. Holdout groups have ledger rows
+  // too, so both arms resolve here.
+  const remindedRenewalByGroup = new Map<string, string | null>();
+  for (const r of ledger) {
+    if (!r.next_billing_date) continue;
+    const existing = remindedRenewalByGroup.get(r.group_id);
+    if (!existing || Date.parse(r.next_billing_date) < Date.parse(existing)) {
+      remindedRenewalByGroup.set(r.group_id, r.next_billing_date);
+    }
+  }
+  const maturedTreatment = computeMaturedArmRevenue(metrics.perGroupNet, remindedRenewalByGroup, "treatment", asOf);
+  const maturedHoldout = computeMaturedArmRevenue(metrics.perGroupNet, remindedRenewalByGroup, "holdout", asOf);
+
   const arms: Record<ExperimentArm, ArmResults> = {
-    treatment: buildArmResults(metrics.arms.treatment, engagement.treatment),
-    holdout: buildArmResults(metrics.arms.holdout, engagement.holdout),
+    treatment: buildArmResults(metrics.arms.treatment, engagement.treatment, maturedTreatment),
+    holdout: buildArmResults(metrics.arms.holdout, engagement.holdout, maturedHoldout),
   };
 
   // Derived first (the pre-evaluation fallback), then overlay the PERSISTED verdict/guardrail state

@@ -65,6 +65,29 @@ export const HARD_FLOORS = {
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
+/** Settle buffer after a reminded renewal bills before its revenue counts as MATURED — the renewal
+ *  has to actually charge AND settle (refunds/retries land within a week) before it can be judged. */
+export const REVENUE_WINDOW_SETTLE_DAYS = 7;
+
+/** A person-group as the maturity gate reads it: the reminded renewal date (next_billing_date from
+ *  the pre_renewal_reminders ledger). Holdout groups carry the same ledger renewal date. */
+export interface MaturableGroup {
+  remindedRenewalAt: string | null;
+}
+
+/**
+ * Has this group's revenue measurement window MATURED — i.e. has its reminded renewal both billed and
+ * had time to settle? True only once `now >= remindedRenewalAt + REVENUE_WINDOW_SETTLE_DAYS`. A group
+ * with no ledger renewal date (or an unparseable one) is NOT matured, so it can't pull a partial-window
+ * $0 into the net-revenue comparison — the 2026-11-28 false-trip root cause. PURE.
+ */
+export function isRevenueWindowMatured(group: MaturableGroup, now: Date): boolean {
+  if (!group.remindedRenewalAt) return false;
+  const renewalMs = Date.parse(group.remindedRenewalAt);
+  if (Number.isNaN(renewalMs)) return false;
+  return now.getTime() >= renewalMs + REVENUE_WINDOW_SETTLE_DAYS * MS_PER_DAY;
+}
+
 /**
  * Anytime-valid confidence radius for a bounded mean — an iterated-logarithm (Howard-style
  * sub-Gaussian) boundary that is valid at EVERY sample size, so peeking daily does not inflate the
@@ -162,15 +185,26 @@ export function evaluateGuardrails(
       reason: tripped ? `treatment SMS STOP opt-out rate ${(pT * 100).toFixed(1)}% (STOP replies to reminder texts)` : "" });
   }
 
-  // Net merchandise revenue per person — trip only on a material relative DROP vs holdout with a
-  // minimum sample (the primary metric; we never trip it on thin data).
+  // Net merchandise revenue per person — judged ONLY on groups whose measurement window has MATURED
+  // (their reminded renewal has billed + settled, `isRevenueWindowMatured`), never partial-window
+  // noise. Trips on a material relative DROP vs holdout, and ONLY once BOTH arms have at least
+  // netRevenueMinN matured groups; below that bar the signal reports 'insufficient matured data' and
+  // cannot trip. This is the 2026-11-28 false-trip fix: a $0.00 vs $0.55 comparison four days in —
+  // before any reminded renewal had billed — must measure as insufficient data, not a revenue drop.
   {
-    const tRev = treatment.netRevenuePerCustomerCents;
-    const hRev = holdout.netRevenuePerCustomerCents;
+    const tRev = treatment.maturedNetRevenuePerCustomerCents;
+    const hRev = holdout.maturedNetRevenuePerCustomerCents;
+    const mT = treatment.maturedGroups;
+    const mH = holdout.maturedGroups;
+    const haveMaturedN = mT >= HARD_FLOORS.netRevenueMinN && mH >= HARD_FLOORS.netRevenueMinN;
     const materialDrop = hRev > 0 && tRev < hRev * (1 - HARD_FLOORS.netRevenueRelativeDrop);
-    const tripped = materialDrop && nT >= HARD_FLOORS.netRevenueMinN && nH >= HARD_FLOORS.netRevenueMinN;
-    signals.push({ key: "net_revenue", tripped, treatment: tRev, holdout: hRev,
-      reason: tripped ? `treatment net merchandise revenue/person ${(tRev / 100).toFixed(2)} vs holdout ${(hRev / 100).toFixed(2)}` : "" });
+    const tripped = haveMaturedN && materialDrop;
+    const reason = tripped
+      ? `treatment net merchandise revenue/person ${(tRev / 100).toFixed(2)} vs holdout ${(hRev / 100).toFixed(2)} (matured groups T ${mT} / H ${mH})`
+      : !haveMaturedN
+        ? `insufficient matured data (T ${mT} / H ${mH})`
+        : "";
+    signals.push({ key: "net_revenue", tripped, treatment: tRev, holdout: hRev, reason });
   }
 
   const tripped = signals.filter((s) => s.tripped);

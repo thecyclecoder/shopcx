@@ -204,6 +204,15 @@ export interface ArmMetrics {
   distinctProductsPerCustomer: number;
 }
 
+/** One person-group's in-window net merchandise revenue, arm-stamped. The matured-window guardrail
+ *  ([[subscriber-experiment-guardrails]] `isRevenueWindowMatured`) filters THIS list to groups whose
+ *  reminded renewal has billed + settled before averaging, so a partial-window $0 can't trip. */
+export interface GroupNetRevenue {
+  groupId: string;
+  arm: ExperimentArm;
+  netRevenueCents: number;
+}
+
 export interface ExperimentMetrics {
   experimentId: string;
   slug: string;
@@ -211,6 +220,9 @@ export interface ExperimentMetrics {
   /** Upper bound of every group's measurement window (defaults to "now" at call time). */
   asOf: string;
   arms: Record<ExperimentArm, ArmMetrics>;
+  /** Per-person-group net revenue in-window (both arms) — the grain the matured-window guardrail
+   *  gates on. Empty when the experiment has no assignments. */
+  perGroupNet: GroupNetRevenue[];
 }
 
 interface GroupAccumulator {
@@ -273,6 +285,7 @@ export async function computeExperimentMetrics(
     windowDays,
     asOf: asOf.toISOString(),
     arms: { treatment: emptyArm("treatment"), holdout: emptyArm("holdout") },
+    perGroupNet: [],
   };
   if (!experiment) return base;
 
@@ -442,6 +455,7 @@ export async function computeExperimentMetrics(
     let distinctSum = 0;
     for (const g of gs) {
       const groupNet = g.chargesCents - g.refundsCents;
+      base.perGroupNet.push({ groupId: g.groupId, arm, netRevenueCents: groupNet });
       net += groupNet;
       netSumSq += groupNet * groupNet;
       gross += g.chargesCents;

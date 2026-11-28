@@ -13,7 +13,7 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { priceSubscription, isBakedIntoLinePrice } from "@/lib/commerce/price";
+import { priceSubscription, isBakedIntoLinePrice, protectionLineCents } from "@/lib/commerce/price";
 
 /** A non-internal (ShopCX-shape) sub: list $69.95 baked to $52.46 after a 25% Subscribe & Save,
  *  one unit, $4.95 shipping. `applied_discounts` carries the S&S entry (baked) that the old
@@ -75,6 +75,80 @@ test("duplicated applied_discounts entries are counted once", async () => {
   const { pricing } = await priceSubscription("ws", shopcxSub([BAKED_SNS, ACTIVE_LOYALTY_15, { ...ACTIVE_LOYALTY_15 }]));
   assert.equal(pricing.discount_cents, 1500);
   assert.equal(pricing.total_cents, 4241);
+});
+
+/* ── Shipping Protection billed as a contract line still lands in the TOTAL (2026-11-28 fix) ──── */
+
+test("protectionLineCents sums Shipping Protection line items (price_cents * quantity), ignores products", () => {
+  assert.equal(protectionLineCents([
+    { title: "Shipping Protection", price_cents: 500, quantity: 1 },
+    { title: "Amazing Creamer", price_cents: 5246, quantity: 1 },
+  ]), 500);
+  // Quantity multiplies; non-protection + zero/absent-price lines contribute nothing.
+  assert.equal(protectionLineCents([{ title: "Shipping Protection", price_cents: 250, quantity: 2 }]), 500);
+  assert.equal(protectionLineCents([{ title: "Daily Greens", price_cents: 5000, quantity: 1 }]), 0);
+  assert.equal(protectionLineCents([{ title: "Shipping Protection", quantity: 1 }]), 0);
+});
+
+test("ground truth 3: Shipping Protection as a LINE (added-column false) is included in the total once", async () => {
+  // Spec ground truth, sub 00d26522: items [1x Shipping Protection @500, 1x Amazing Creamer @5246],
+  // delivery 0, shipping_protection_added=false. The line was dropped from the subtotal AND never
+  // added via the column → displayed $52.46 while the renewal charges $57.46. Now it lands in the
+  // total exactly once.
+  const sub = {
+    id: "00d26522",
+    is_internal: false,
+    comp: false,
+    items: [
+      { title: "Shipping Protection", quantity: 1, price_cents: 500, variant_id: "vp" },
+      { title: "Amazing Creamer", quantity: 1, price_cents: 5246, variant_id: "v1" },
+    ],
+    delivery_price_cents: 0,
+    applied_discounts: [],
+    shipping_protection_added: false,
+    shipping_protection_amount_cents: 0,
+  } as Record<string, unknown>;
+  const { pricing } = await priceSubscription("ws", sub);
+  assert.equal(pricing.subtotal_cents, 5246, "protection is NOT in the product subtotal");
+  assert.equal(pricing.protection_cents, 500, "protection line picked up from items");
+  assert.equal(pricing.total_cents, 5746, "$57.46 — the real charge, not $52.46");
+});
+
+test("ground truth 4: protection is counted ONCE when it is BOTH a line AND the added column", async () => {
+  // Belt-and-suspenders: a sub carrying the $5 protection as a contract line AND the
+  // shipping_protection_added column must not double to $10 — max(column, line) = $5.
+  const sub = {
+    id: "both",
+    is_internal: false,
+    comp: false,
+    items: [
+      { title: "Shipping Protection", quantity: 1, price_cents: 500, variant_id: "vp" },
+      { title: "Amazing Creamer", quantity: 1, price_cents: 5246, variant_id: "v1" },
+    ],
+    delivery_price_cents: 0,
+    applied_discounts: [],
+    shipping_protection_added: true,
+    shipping_protection_amount_cents: 500,
+  } as Record<string, unknown>;
+  const { pricing } = await priceSubscription("ws", sub);
+  assert.equal(pricing.protection_cents, 500, "max(column 500, line 500) = 500, never 1000");
+  assert.equal(pricing.total_cents, 5746);
+});
+
+test("ground truth 5: column-only protection (no line) still counted via resolveProtectionCents", async () => {
+  const sub = {
+    id: "col-only",
+    is_internal: false,
+    comp: false,
+    items: [{ title: "Amazing Creamer", quantity: 1, price_cents: 5246, variant_id: "v1" }],
+    delivery_price_cents: 0,
+    applied_discounts: [],
+    shipping_protection_added: true,
+    shipping_protection_amount_cents: 500,
+  } as Record<string, unknown>;
+  const { pricing } = await priceSubscription("ws", sub);
+  assert.equal(pricing.protection_cents, 500);
+  assert.equal(pricing.total_cents, 5746);
 });
 
 test("isBakedIntoLinePrice: only structural rates are baked; coupons AND Buy-N automatics stay on-top", () => {

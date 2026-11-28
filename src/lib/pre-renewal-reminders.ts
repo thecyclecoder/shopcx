@@ -137,6 +137,10 @@ export interface ReminderLedgerRow {
   /** When the consented text was scheduled/sent (TCPA send instant) — the baseline a post-reminder
    *  SMS opt-out is measured against. Null for rows that never texted. */
   sms_scheduled_send_at: string | null;
+  /** The reminded renewal date (the subscription's next_billing_date captured at reminder time). The
+   *  matured-window guardrail ([[subscriber-experiment-guardrails]] `isRevenueWindowMatured`) reads
+   *  this to decide when a group's revenue window has billed + settled. Holdout rows carry it too. */
+  next_billing_date: string | null;
 }
 
 /**
@@ -151,7 +155,7 @@ export async function listReminderLedger(
   const { data, error } = await admin
     .from("pre_renewal_reminders")
     .select(
-      "group_id, customer_id, experiment_arm, status, channels, journey_session_id, email_status, sms_status, sms_suppression_reason, sms_scheduled_send_at",
+      "group_id, customer_id, experiment_arm, status, channels, journey_session_id, email_status, sms_status, sms_suppression_reason, sms_scheduled_send_at, next_billing_date",
     )
     .eq("workspace_id", workspaceId);
   if (error) throw new Error(`listReminderLedger(${workspaceId}): ${error.message}`);

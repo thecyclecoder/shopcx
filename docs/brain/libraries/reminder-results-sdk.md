@@ -17,6 +17,8 @@ Returns `{ generatedAt, experimentSlug, windowDays, arms: { treatment, holdout }
 
 `customerGroups`, the `engagement` funnel (above), `netRevenueCents` / `netRevenuePerCustomerCents` (primary), `grossRevenueCents` / `refundsCents`, `refundRate` (= `refundedCustomerGroups / customerGroups`), and `voluntaryCancelRate`.
 
+Plus the MATURED-window pair the net-revenue guardrail judges on (2026-11-28 false-trip fix): `maturedGroups` (groups whose reminded renewal has billed + settled) and `maturedNetRevenuePerCustomerCents` (mean net revenue over just those). `computeMaturedArmRevenue(perGroupNet, remindedRenewalByGroup, arm, now)` folds [[subscriber-experiment-metrics]] `perGroupNet` to the matured subset via [[subscriber-experiment-guardrails]] `isRevenueWindowMatured`, keyed on each group's earliest `next_billing_date` from the [[pre-renewal-reminders]] ledger. The net-revenue guardrail can only trip once BOTH arms have ≥`netRevenueMinN` matured groups.
+
 ## Guardrails + verdict — DERIVED in Phase 1
 
 The dedicated guardrail evaluator + verdict engine (`subscriber-experiment-guardrails-verdict` Phases 2–3) are not on main yet, so Phase 1 derives a live read from what the harness + metrics already expose — flagged `derived: true` on the verdict:
@@ -26,7 +28,7 @@ The dedicated guardrail evaluator + verdict engine (`subscriber-experiment-guard
 
 ## Pure core (unit-tested)
 
-`rollupEngagement`, `buildArmResults`, `deriveGuardrails`, `deriveVerdict` are pure (no I/O) and pinned in `src/lib/retention/reminder-results-sdk.test.ts` (`npm run test:reminder-results-sdk`), the same way the testing-results SDK unit-tests its rollup math. `getReminderTestResults` is the only DB-touching function.
+`rollupEngagement`, `buildArmResults`, `computeMaturedArmRevenue`, `deriveGuardrails`, `deriveVerdict` are pure (no I/O) and pinned in `src/lib/retention/reminder-results-sdk.test.ts` (`npm run test:reminder-results-sdk`), the same way the testing-results SDK unit-tests its rollup math. `getReminderTestResults` is the only DB-touching function.
 
 ## Consumers
 

@@ -18,6 +18,8 @@ import assert from "node:assert/strict";
 import {
   evaluateVerdict,
   evaluateGuardrails,
+  isRevenueWindowMatured,
+  REVENUE_WINDOW_SETTLE_DAYS,
   HARD_FLOORS,
 } from "@/lib/subscriber-experiment-guardrails";
 import type { ArmResults, ArmEngagement } from "@/lib/retention/reminder-results-sdk";
@@ -42,6 +44,8 @@ function arm(a: "treatment" | "holdout", over: Partial<ArmResults> = {}): ArmRes
     refundsCents: 0,
     refundRate: 0,
     voluntaryCancelRate: 0,
+    maturedGroups: 0,
+    maturedNetRevenuePerCustomerCents: 0,
     ...over,
   };
 }
@@ -111,6 +115,69 @@ test("SMS STOP opt-out floor stays ABSOLUTE on the treatment arm (post-reminder 
   const h = arm("holdout", { customerGroups: 100, engagement: engagement({ reminded: 100 }) });
   const e = evaluateGuardrails(t, h);
   assert.equal(e.signals.find((s) => s.key === "sms_opt_out")!.tripped, true);
+});
+
+/* ── Net revenue: judged only on MATURED windows ───────────────────────────────────────────── */
+
+test("isRevenueWindowMatured only true once the reminded renewal has billed + settled", () => {
+  const now = new Date("2026-11-28T00:00:00.000Z");
+  const day = 24 * 60 * 60 * 1000;
+  // Reminded renewal 4 days ago — not yet past the settle buffer → not matured.
+  assert.equal(isRevenueWindowMatured({ remindedRenewalAt: new Date(now.getTime() - 4 * day).toISOString() }, now), false);
+  // Reminded renewal more than the settle buffer ago → matured.
+  const settled = new Date(now.getTime() - (REVENUE_WINDOW_SETTLE_DAYS + 1) * day).toISOString();
+  assert.equal(isRevenueWindowMatured({ remindedRenewalAt: settled }, now), true);
+  // Exactly at the boundary (renewal + settle days) → matured.
+  const boundary = new Date(now.getTime() - REVENUE_WINDOW_SETTLE_DAYS * day).toISOString();
+  assert.equal(isRevenueWindowMatured({ remindedRenewalAt: boundary }, now), true);
+  // No / unparseable renewal date → never matured (can't pull a partial-window $0 into the compare).
+  assert.equal(isRevenueWindowMatured({ remindedRenewalAt: null }, now), false);
+  assert.equal(isRevenueWindowMatured({ remindedRenewalAt: "not-a-date" }, now), false);
+});
+
+test("net_revenue does NOT trip before windows mature — the 2026-11-28 false-trip repro", () => {
+  // The live incident: 128 treatment / 109 holdout groups, every reminded renewal within the last 4
+  // days, so NO group has a matured window. Treatment $0.00/person vs holdout $0.55/person would trip
+  // the material-drop floor on all-group revenue, but with zero matured groups the signal must report
+  // insufficient data and NOT trip.
+  const t = arm("treatment", {
+    customerGroups: 128,
+    netRevenuePerCustomerCents: 0,
+    maturedGroups: 0,
+    maturedNetRevenuePerCustomerCents: 0,
+  });
+  const h = arm("holdout", {
+    customerGroups: 109,
+    netRevenuePerCustomerCents: 55,
+    maturedGroups: 0,
+    maturedNetRevenuePerCustomerCents: 55,
+  });
+  const e = evaluateGuardrails(t, h);
+  const net = e.signals.find((s) => s.key === "net_revenue")!;
+  assert.equal(net.tripped, false);
+  assert.match(net.reason, /insufficient matured data \(T 0 \/ H 0\)/);
+  assert.equal(e.anyTripped, false);
+});
+
+test("net_revenue stays insufficient when only ONE arm has enough matured groups", () => {
+  // Treatment fully matured with a real drop, but holdout has too few matured groups → can't trip yet.
+  const t = arm("treatment", { customerGroups: 200, maturedGroups: HARD_FLOORS.netRevenueMinN + 10, maturedNetRevenuePerCustomerCents: 3000 });
+  const h = arm("holdout", { customerGroups: 200, maturedGroups: HARD_FLOORS.netRevenueMinN - 1, maturedNetRevenuePerCustomerCents: 6000 });
+  const net = evaluateGuardrails(t, h).signals.find((s) => s.key === "net_revenue")!;
+  assert.equal(net.tripped, false);
+  assert.match(net.reason, /insufficient matured data/);
+});
+
+test("net_revenue TRIPS on a material drop once BOTH arms have enough matured groups", () => {
+  // Both arms past the matured-min bar; treatment net revenue/person materially below holdout.
+  const minN = HARD_FLOORS.netRevenueMinN;
+  const t = arm("treatment", { customerGroups: 300, maturedGroups: minN + 20, maturedNetRevenuePerCustomerCents: 3000 });
+  const h = arm("holdout", { customerGroups: 300, maturedGroups: minN + 5, maturedNetRevenuePerCustomerCents: 6000 }); // 50% drop ≥ 20% floor
+  const e = evaluateGuardrails(t, h);
+  const net = e.signals.find((s) => s.key === "net_revenue")!;
+  assert.equal(net.tripped, true);
+  assert.match(net.reason, /matured groups T/);
+  assert.equal(e.anyTripped, true);
 });
 
 test("already-unsubscribed customers do NOT trip the SMS floor (2026-11-24 false-trip regression)", () => {

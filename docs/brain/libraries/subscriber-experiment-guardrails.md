@@ -53,7 +53,26 @@ the anytime-valid test OR a hard floor (`HARD_FLOORS`). Takes two `ArmResults`
   post-reminder count is computed in [[reminder-results-sdk]] `rollupEngagement` /
   `fetchSmsOptOuts` and surfaced on the dashboard as **"STOP replies to reminder texts"**, with
   **"already unsubscribed before run"** (`smsAlreadyUnsubscribed`) shown separately as informational.
-- Net-revenue only trips on a material relative drop (`netRevenueRelativeDrop`) with ≥`netRevenueMinN`/arm.
+- **Net-revenue is judged ONLY on MATURED windows** (2026-11-28 false-trip fix). It compares each
+  arm's `maturedNetRevenuePerCustomerCents` — the mean over groups whose reminded renewal has billed +
+  settled (`isRevenueWindowMatured`) — never the partial-window all-groups mean. It trips on a material
+  relative drop (`netRevenueRelativeDrop`) ONLY once BOTH arms have ≥`netRevenueMinN` (50) MATURED
+  groups; below that the signal emits `tripped=false` with reason `insufficient matured data (T x / H y)`
+  and cannot trip. The live incident: four days in, 128 treatment / 109 holdout groups with zero matured
+  renewals, treatment $0.00 vs holdout $0.55/person — the all-groups material-drop floor would have
+  paused the test on noise; the matured gate reads it as insufficient data instead. `maturedGroups` +
+  `maturedNetRevenuePerCustomerCents` are exposed per arm by [[reminder-results-sdk]]
+  (`computeMaturedArmRevenue`, folding [[subscriber-experiment-metrics]] `perGroupNet` against the
+  reminded renewal date from the [[../tables/pre_renewal_reminders]] ledger).
+
+### `isRevenueWindowMatured(group, now)` — pure · `REVENUE_WINDOW_SETTLE_DAYS` = 7
+
+Has a person-group's revenue measurement window MATURED — i.e. has its reminded renewal both billed
+AND had a settle buffer to clear refunds/retries? True only once `now >= group.remindedRenewalAt +
+REVENUE_WINDOW_SETTLE_DAYS`. `remindedRenewalAt` is the `next_billing_date` captured on the
+[[../tables/pre_renewal_reminders]] ledger (holdout rows carry it too). A group with no/unparseable
+renewal date is NEVER matured, so a partial-window $0 can't enter the net-revenue comparison. This is
+the gate the net_revenue signal above counts groups against.
 
 ### `evaluateVerdict(treatment, holdout, alpha?)` — pure → `VerdictResult`
 
