@@ -77,7 +77,9 @@ const nextConfig: NextConfig = {
     // the README folder counts (← the whole tree), so the cron bundle needs all of docs/brain.
     // The creative-finder-video pipeline spawns the bundled ffmpeg-static binary; Vercel's tracer
     // prunes the binary file otherwise, so include it explicitly (see creative-finder-video.md).
-    "/api/inngest": ["./docs/brain/**/*.md", "./node_modules/ffmpeg-static/ffmpeg"],
+    // The organic nugget generator draws slide text from bundled TTFs (src/lib/social/fonts) because
+    // the function has no system fonts; trace them in or every slide renders tofu boxes.
+    "/api/inngest": ["./docs/brain/**/*.md", "./node_modules/ffmpeg-static/ffmpeg", "./src/lib/social/fonts/*.ttf"],
   },
   // Note: we tried experimental.inlineCss — Next.js recommends it for
   // Tailwind — but on a page with 11 sections the inlined <style>

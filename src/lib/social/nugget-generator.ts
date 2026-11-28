@@ -18,6 +18,8 @@
  * approves them in Marketing › Social before anything posts (they make health statements).
  */
 import sharp from "sharp";
+import path from "path";
+import opentype from "opentype.js";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { SONNET_MODEL } from "@/lib/ai-models";
 import { logAiUsage } from "@/lib/ai-usage";
@@ -60,14 +62,21 @@ export interface NuggetDraft {
 const SYSTEM = `You are a science writer for a superfoods/wellness brand's organic Instagram. You write short, accurate, genuinely shareable "nugget" carousels — the kind of fact someone repeats at the dinner table.
 
 HARD RULES (compliance — a human reviews every draft, so be scrupulously honest):
-- Exactly ONE real, verifiable study underpins the carousel. Describe it ACCURATELY. Never exaggerate the finding.
+- Exactly ONE real, verifiable study underpins the carousel. Describe it ACCURATELY. Never exaggerate the finding. study_citation names that ONE study only — never two studies, never a book. If you are not confident the study exists exactly as cited, pick a different, well-known one.
+- No "literally" metaphors that misstate the science (e.g. gut serotonin does NOT directly set your mood; say what the study actually showed).
 - Use "supports / may help / is linked to" language. NEVER "cures", "treats", "prevents disease", or guaranteed results.
 - NEVER claim or imply the brand's product (Superfood Tabs) was itself studied. The study is about an ingredient or a general mechanism, not the product.
 - Plain, kid-simple words. No jargon. Max ~20 words per slide.
 - 5 to 7 slides. Slide 1 is the hook. The LAST slide is a soft brand sign-off (gentle, no hard sell, no price, no discount).
 - Output ONLY valid minified JSON, no markdown, no preamble, matching:
 {"title":string,"hook":string,"slides":[{"headline":string,"body":string}],"dinner_line":string,"study_citation":string}
+- Slide 1 headline is a surprising, specific, TRUE claim that stops the scroll (a number, a reversal, or a "you've been told X, but…"). Never a bland intro like "Meet X" or "Let's talk about X".
 - dinner_line: the single most shareable one-sentence takeaway.
+
+Examples of the bar (style, not topics to copy):
+- Hook "Grandma's after-dinner walk was actually right." → 2-5 minutes of walking after a meal blunts the blood sugar spike (Buffey et al., Sports Medicine, 2022). Dinner line: "A short walk after dinner lowers your blood sugar spike."
+- Hook "Cut sugar and food starts tasting sweeter." → after 3 months on lower sugar, people rated the same pudding sweeter (Wise et al., Am J Clin Nutr, 2016). Dinner line: "Your taste buds recalibrate in about 3 months."
+- Hook "Two short nights of sleep made people about 24% hungrier." (Spiegel et al., Annals of Internal Medicine, 2004).
 - study_citation: a short plain-text citation of the real study (authors/journal/year or a well-known finding).`;
 
 function userPrompt(pillar: OrganicPillar, avoidTitles: string[]): string {
@@ -99,53 +108,104 @@ export async function draftNugget(workspaceId: string, pillar: OrganicPillar, av
   try {
     const d = JSON.parse(raw) as NuggetDraft;
     if (!d.title || !Array.isArray(d.slides) || d.slides.length < 5) return null;
+    if (!hasSingleStudyCitation(d.study_citation)) return null; // one-study rule (first drafts cited two)
     return d;
   } catch {
     return null;
   }
 }
 
-// ── Slide rendering (headline composited in code — never by the image model) ──
-
-function escXml(s: string): string {
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+/** One-study rule guard: a citation naming more than one publication year, or chaining studies
+ *  with ";" / " and also", cites more than one study. */
+export function hasSingleStudyCitation(citation: string | undefined | null): boolean {
+  const c = (citation || "").trim();
+  if (!c) return false;
+  const years = new Set(c.match(/\b(19|20)\d{2}\b/g) || []);
+  if (years.size > 1) return false;
+  if (/;/.test(c)) return false;
+  return true;
 }
 
-function wrapLines(text: string, maxChars: number): string[] {
+// ── Slide rendering (headline composited in code — never by the image model) ──
+
+// Text is drawn as vector PATHS from bundled font files (src/lib/social/fonts, OFL Montserrat), not
+// as SVG <text>. sharp/librsvg resolves <text> fonts through the host's fontconfig, and the Vercel
+// function has no system fonts, so every glyph rendered as a tofu box (first live drafts, 2026-11-28).
+// Paths need no font lookup at render time, so slides look the same on Vercel, the box, and local.
+const FONT_DIR = path.join(process.cwd(), "src/lib/social/fonts");
+let fonts: { bold: opentype.Font; medium: opentype.Font } | null = null;
+function loadFonts() {
+  if (!fonts) {
+    fonts = {
+      bold: opentype.loadSync(path.join(FONT_DIR, "Montserrat-ExtraBold.ttf")),
+      medium: opentype.loadSync(path.join(FONT_DIR, "Montserrat-Medium.ttf")),
+    };
+  }
+  return fonts;
+}
+
+/** Greedy word-wrap by real rendered width (not character count). */
+export function wrapByWidth(font: opentype.Font, text: string, size: number, maxWidth: number): string[] {
   const words = (text || "").split(/\s+/).filter(Boolean);
   const lines: string[] = [];
   let cur = "";
   for (const w of words) {
-    if (cur && (cur + " " + w).length > maxChars) { lines.push(cur); cur = w; }
-    else cur = cur ? `${cur} ${w}` : w;
+    const next = cur ? `${cur} ${w}` : w;
+    if (cur && font.getAdvanceWidth(next, size) > maxWidth) { lines.push(cur); cur = w; }
+    else cur = next;
   }
   if (cur) lines.push(cur);
   return lines;
 }
 
-function textTspans(lines: string[], x: number, startY: number, lineHeight: number, size: number, weight: number, fill: string): string {
-  return lines
-    .map((ln, i) => `<text x="${x}" y="${startY + i * lineHeight}" font-family="Montserrat, Arial, sans-serif" font-size="${size}" font-weight="${weight}" fill="${fill}" text-anchor="middle">${escXml(ln)}</text>`)
-    .join("");
+interface TextBlock { lines: string[]; size: number; lineHeight: number; font: opentype.Font }
+
+/** Fit text into maxLines by stepping the font size down; returns the wrapped block. */
+function fitBlock(font: opentype.Font, text: string, maxSize: number, minSize: number, maxWidth: number, maxLines: number, leading = 1.18): TextBlock {
+  let size = maxSize;
+  let lines = wrapByWidth(font, text, size, maxWidth);
+  while (lines.length > maxLines && size > minSize) {
+    size -= 4;
+    lines = wrapByWidth(font, text, size, maxWidth);
+  }
+  return { lines, size, lineHeight: Math.round(size * leading), font };
 }
 
-/** A bold solid-color typographic slide — headline + body centered, exact wording. */
-function textSlideSvg(headline: string, body: string, bg: string): string {
-  const hl = wrapLines(headline, 18);
-  const bl = wrapLines(body || "", 32);
-  const hStart = H / 2 - (hl.length * 96) / 2 - (bl.length ? 80 : 0);
-  const hSvg = textTspans(hl, W / 2, hStart, 96, 82, 800, "#FFFFFF");
-  const bSvg = bl.length ? textTspans(bl, W / 2, hStart + hl.length * 96 + 70, 52, 38, 500, "#F2F2F2") : "";
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}"><rect width="${W}" height="${H}" fill="${bg}"/>${hSvg}${bSvg}</svg>`;
+/** Centered lines as SVG <path> elements. `top` = top edge of the block. */
+function blockPaths(b: TextBlock, top: number, fill: string): string {
+  return b.lines.map((ln, i) => {
+    const width = b.font.getAdvanceWidth(ln, b.size);
+    const baseline = top + i * b.lineHeight + b.size * 0.8;
+    const d = b.font.getPath(ln, (W - width) / 2, baseline, b.size).toPathData(2);
+    return `<path d="${d}" fill="${fill}"/>`;
+  }).join("");
 }
 
-/** The headline overlay band composited over a photographic background. */
-function photoOverlaySvg(headline: string, bandColor: string): string {
-  const hl = wrapLines(headline, 20);
-  const bandH = Math.min(H, 180 + hl.length * 92);
+const blockHeight = (b: TextBlock) => (b.lines.length ? b.lines.length * b.lineHeight : 0);
+const MAX_TEXT_W = W - 2 * 96;
+
+/** A bold solid-color typographic slide: headline + body centered, exact wording. */
+export function textSlideSvg(headline: string, body: string, bg: string): string {
+  const { bold, medium } = loadFonts();
+  const hb = fitBlock(bold, headline, 88, 56, MAX_TEXT_W, 5);
+  const bb = fitBlock(medium, body || "", 44, 32, MAX_TEXT_W, 7, 1.35);
+  const gap = bb.lines.length ? 56 : 0;
+  const total = blockHeight(hb) + gap + blockHeight(bb);
+  const top = Math.round((H - total) / 2);
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}"><rect width="${W}" height="${H}" fill="${bg}"/>` +
+    blockPaths(hb, top, "#FFFFFF") + (bb.lines.length ? blockPaths(bb, top + blockHeight(hb) + gap, "#EDEDED") : "") + `</svg>`;
+}
+
+/** Headline + body on a solid band over the lower part of a photographic background. */
+export function photoOverlaySvg(headline: string, body: string, bandColor: string): string {
+  const { bold, medium } = loadFonts();
+  const hb = fitBlock(bold, headline, 72, 48, MAX_TEXT_W, 3);
+  const bb = fitBlock(medium, body || "", 38, 28, MAX_TEXT_W, 4, 1.35);
+  const pad = 64, gap = bb.lines.length ? 28 : 0;
+  const bandH = Math.min(Math.round(H * 0.55), pad * 2 + blockHeight(hb) + gap + blockHeight(bb));
   const bandTop = H - bandH;
-  const hSvg = textTspans(hl, W / 2, bandTop + 130, 92, 76, 800, "#FFFFFF");
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}"><rect x="0" y="${bandTop}" width="${W}" height="${bandH}" fill="${bandColor}" fill-opacity="0.78"/>${hSvg}</svg>`;
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}"><rect x="0" y="${bandTop}" width="${W}" height="${bandH}" fill="${bandColor}" fill-opacity="0.88"/>` +
+    blockPaths(hb, bandTop + pad, "#FFFFFF") + (bb.lines.length ? blockPaths(bb, bandTop + pad + blockHeight(hb) + gap, "#EDEDED") : "") + `</svg>`;
 }
 
 /** Render one slide JPEG (4:5). Style 'photo' needs Gemini; falls back to 'text' if it fails. */
@@ -159,7 +219,7 @@ async function renderSlide(
       const { buffer } = await generateNanoBananaProCombine({ workspaceId, prompt, imageUrls: [], aspectRatio: "4:5" });
       const base = await sharp(buffer).resize(W, H, { fit: "cover" }).toBuffer();
       return await sharp(base)
-        .composite([{ input: Buffer.from(photoOverlaySvg(headline, bg)), top: 0, left: 0 }])
+        .composite([{ input: Buffer.from(photoOverlaySvg(headline, body, bg)), top: 0, left: 0 }])
         .jpeg({ quality: 88 })
         .toBuffer();
     } catch {
