@@ -14,11 +14,12 @@ import assert from "node:assert/strict";
 import {
   rollupEngagement,
   buildArmResults,
+  computeMaturedArmRevenue,
   deriveGuardrails,
   deriveVerdict,
   type ArmEngagement,
 } from "@/lib/retention/reminder-results-sdk";
-import type { ArmMetrics } from "@/lib/subscriber-experiment-metrics";
+import type { ArmMetrics, GroupNetRevenue } from "@/lib/subscriber-experiment-metrics";
 import type { ExperimentArm, CustomerLifecycleExperimentRow } from "@/lib/subscriber-experiments";
 import type { ReminderLedgerRow } from "@/lib/pre-renewal-reminders";
 
@@ -34,6 +35,7 @@ function ledgerRow(over: Partial<ReminderLedgerRow>): ReminderLedgerRow {
     sms_status: null,
     sms_suppression_reason: null,
     sms_scheduled_send_at: null,
+    next_billing_date: null,
     ...over,
   };
 }
@@ -156,6 +158,37 @@ test("buildArmResults derives refund rate from refunded groups / total groups", 
   // Zero groups never divides by zero.
   const empty = buildArmResults(metrics("holdout", { customerGroups: 0, refundedCustomerGroups: 0 }), emptyEngagement());
   assert.equal(empty.refundRate, 0);
+});
+
+test("computeMaturedArmRevenue averages ONLY groups whose reminded renewal has billed + settled", () => {
+  const now = new Date("2026-11-28T00:00:00.000Z");
+  const day = 24 * 60 * 60 * 1000;
+  const matured = new Date(now.getTime() - 10 * day).toISOString(); // > 7-day settle buffer
+  const fresh = new Date(now.getTime() - 2 * day).toISOString(); // within the buffer → not matured
+  const perGroupNet: GroupNetRevenue[] = [
+    { groupId: "t-matured-1", arm: "treatment", netRevenueCents: 6000 },
+    { groupId: "t-matured-2", arm: "treatment", netRevenueCents: 4000 },
+    { groupId: "t-fresh", arm: "treatment", netRevenueCents: 0 }, // partial window → excluded
+    { groupId: "t-noledger", arm: "treatment", netRevenueCents: 9999 }, // no renewal date → excluded
+    { groupId: "h-matured", arm: "holdout", netRevenueCents: 5000 },
+  ];
+  const renewals = new Map<string, string | null>([
+    ["t-matured-1", matured],
+    ["t-matured-2", matured],
+    ["t-fresh", fresh],
+    ["h-matured", matured],
+    // t-noledger intentionally absent.
+  ]);
+  const t = computeMaturedArmRevenue(perGroupNet, renewals, "treatment", now);
+  assert.equal(t.maturedGroups, 2);
+  assert.equal(t.maturedNetRevenuePerCustomerCents, 5000); // (6000 + 4000) / 2, fresh + no-ledger excluded
+  const h = computeMaturedArmRevenue(perGroupNet, renewals, "holdout", now);
+  assert.equal(h.maturedGroups, 1);
+  assert.equal(h.maturedNetRevenuePerCustomerCents, 5000);
+  // No matured groups → a clean zero, never a divide-by-zero.
+  const none = computeMaturedArmRevenue(perGroupNet, new Map(), "treatment", now);
+  assert.equal(none.maturedGroups, 0);
+  assert.equal(none.maturedNetRevenuePerCustomerCents, 0);
 });
 
 test("deriveGuardrails flags sample completion and watches a worse treatment refund rate", () => {

@@ -270,12 +270,35 @@ export function resolveProtectionCents(sub: {
   return sub.shipping_protection_added ? Number(sub.shipping_protection_amount_cents || 0) : 0;
 }
 
+/**
+ * Shipping-Protection cents derived from a non-internal sub's contract LINE ITEMS.
+ *
+ * On many Appstle/ShopCX subs the protection fee is NOT the `shipping_protection_added` column — it's
+ * a real contract line (`items[]` titled 'Shipping Protection', `price_cents` 500) with the column
+ * still false. The column path (`resolveProtectionCents`) then returns 0 and the $5 fee silently
+ * drops from the displayed total even though the renewal bills it (2026-11-28: sub 00d26522 showed
+ * $52.46 but charged $57.46). This sums those lines (`price_cents * quantity`). The caller takes
+ * `max(column, line)` so protection is counted EXACTLY once, never doubled. Pure.
+ */
+export function protectionLineCents(
+  items: Array<{ price_cents?: number; quantity?: number; title?: string }>,
+): number {
+  let cents = 0;
+  for (const it of items) {
+    if (!String(it?.title || "").toLowerCase().includes("shipping protection")) continue;
+    const unit = Number(it?.price_cents || 0);
+    if (!Number.isFinite(unit) || unit <= 0) continue;
+    cents += unit * (it?.quantity || 1);
+  }
+  return cents;
+}
+
 export async function priceSubscription(
   workspaceId: string,
   sub: Record<string, unknown>,
 ): Promise<{ priced: Map<string, PricedLineLite>; pricing: ContractPricing }> {
   const subId = String(sub.id ?? "unknown");
-  const protectionCents = resolveProtectionCents({
+  let protectionCents = resolveProtectionCents({
     comp: !!sub.comp,
     shipping_protection_added: !!sub.shipping_protection_added,
     shipping_protection_amount_cents: Number(sub.shipping_protection_amount_cents || 0),
@@ -326,6 +349,10 @@ export async function priceSubscription(
       if (!it.is_gift && !isProt) subtotalCents += unit * (it.quantity || 1);
     }
     msrpCents = subtotalCents;
+    // Shipping Protection billed as a real contract LINE (added-column false) must still land in the
+    // TOTAL — it's out of the item subtotal above (not a product), but the renewal bills it. Take
+    // max(column-derived, line-derived) so it's counted exactly once, never doubled.
+    protectionCents = Math.max(protectionCents, protectionLineCents(items));
   }
 
   const { discountCents, pill } = computeDisplayCoupon(
