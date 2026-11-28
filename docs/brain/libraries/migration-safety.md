@@ -21,12 +21,15 @@ Phase 1's answer is a **deterministic, mechanical rail** that runs BEFORE Ada's 
 | `TRUNCATE` | `irreversible_destructive` |
 | `DELETE FROM x` **without** `WHERE` | `irreversible_destructive` |
 | `UPDATE x SET …` **without** `WHERE` | `irreversible_destructive` |
-| `ALTER … DROP CONSTRAINT` | `reversible_destructive` |
+| `ALTER … DROP CONSTRAINT` (bare — no matching re-add) | `reversible_destructive` |
+| `ALTER … DROP CONSTRAINT` **re-added as `ADD CONSTRAINT <same name>`** in the same file | `additive` |
 | `ALTER … DROP DEFAULT` | `reversible_destructive` |
 | `ON DELETE CASCADE` **added to an existing table** (`ALTER TABLE … ON DELETE CASCADE`) | `reversible_destructive` |
 | `ON DELETE CASCADE` **inside a `CREATE TABLE`** (a new table's FK) | `additive` |
 
 - **Cascade classification is per-statement** (`cascadeAddedToExistingTable`, exported + pinned). A cascade flags destructive ONLY when its statement is an `ALTER TABLE` (adding cascade to a table that already has rows). Inside a `CREATE TABLE` there are no existing rows to cascade-delete → additive. **2026-07-17 drift-bug fix:** the old rule flagged *any* `on delete cascade`, so `ad_creative_copy_qc_verdicts` + `ad_creative_copy_variants` (both `CREATE TABLE` with cascade FKs) were classified `reversible_destructive` and gated by [[control-tower/migration-drift]] `applyMergedMigrations` for an approval that never came — the reconciler ran every 30 min, kept re-flagging them, and never auto-applied them, so the whole Dahlia copy-pack/QC pipeline silently no-op'd on missing tables for weeks. A CREATE-TABLE cascade now auto-applies like any additive DDL.
+
+- **Drop-constraint classification spares idempotent re-statements** (`droppedConstraintNotReAdded`, exported + pinned). A `drop constraint if exists <name>` that is immediately re-added via `add constraint <name>` in the same file is an idempotent CHECK-widening re-statement — the constraint still exists afterward → `additive`. Only a BARE drop (no matching re-add) stays `reversible_destructive`. **2026-11 drift-bug fix:** the old blanket `drop constraint` rule flagged *any* drop, so the `organic_content` migration (a new table plus a CHECK re-statement) was classified `reversible_destructive` and gated by [[control-tower/migration-drift]] `applyMergedMigrations` for an approval that never came — same over-gating class as the 2026-07-17 CREATE-TABLE cascade bug above. A drop+re-add CHECK-widening migration now auto-applies.
 
 - **Comment-stripped, case-insensitive.** Both `-- …` line comments and `/* … */` (nested-safe) block comments are removed before matching, so a keyword hidden behind a comment does not fool the scan and one inside a comment does not false-flag.
 - **Destruction hidden inside `DO $$ … $$` blocks and `CREATE OR REPLACE FUNCTION` bodies is caught.** Dollar-quoted string boundaries are deliberately NOT stripped — a `DROP TABLE` inside a plpgsql body scans identically to a top-level `DROP TABLE`.

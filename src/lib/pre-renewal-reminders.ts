@@ -44,7 +44,7 @@ import {
 import { resolveEffectiveSwitch } from "@/lib/control-tower/kill-switch-resolver";
 import { generateJourneyToken, getJourneyUrl } from "@/lib/journey-tokens";
 import { sendJourneyCTA } from "@/lib/email";
-import { priceSubscription, PriceInvariantError } from "@/lib/commerce/price";
+import { priceSubscription, PriceInvariantError, spentOnTopDiscountCents } from "@/lib/commerce/price";
 import { ensureFreshSubscriptionTaxQuote } from "@/lib/avalara-subscription";
 import {
   resolveRecipientTimezone,
@@ -286,6 +286,145 @@ function isShippingProtectionTitle(title: string): boolean {
   return t.includes("shipping protection") || t.includes("shipping insurance") || t.includes("route protection");
 }
 
+/* ------------------------------------------------------------------------------------------------
+ * Safety cross-check (CEO 2026-11-27: be far more careful) — never show a renewal amount that
+ * silently contradicts what the sub actually paid last time.
+ * --------------------------------------------------------------------------------------------- */
+
+/** $2 — below this a gap is rounding / tax-estimate noise, not a real mismatch. */
+const RENEWAL_CROSSCHECK_TOLERANCE_CENTS = 200;
+
+/** What the sub's last paid renewal actually charged, reduced to the comparable pre-tax base. */
+export interface LastRenewalComparison {
+  /** Last paid renewal's charge, net of tax, in cents (incl shipping + protection). */
+  lastPaidPreTaxCents: number;
+  /** Product-line shape (sorted `variant:qty`) at that renewal — a change here means the price
+   *  legitimately moved, so the amounts are not expected to match. */
+  lineKey: string;
+}
+
+/**
+ * Does the computed pre-tax renewal charge agree with what the sub last actually paid (net of
+ * tax)? With UNCHANGED line items the merchandise + shipping base is stable, so the only
+ * legitimate gap is a coupon change: a one-cycle coupon spent since last renewal makes this charge
+ * cost MORE (add it back), and a coupon active this cycle makes it cost LESS (subtract it). We flag
+ * ONLY the dangerous direction — the computed amount more than $2 BELOW what the numbers say it
+ * should be, with no coupon change to explain it (the double-discount symptom: the reminder said
+ * $29.28 while the real charge was ~$45.17). PURE — no I/O, exported for testing.
+ */
+export function amountMatchesLastRenewal(args: {
+  computedPreTaxCents: number;
+  currentLineKey: string;
+  /** On-top coupon value (cents) active + billed THIS cycle — a legitimate downward explanation. */
+  activeOnTopCents: number;
+  /** On-top coupon value (cents) billed LAST cycle but now spent — a legitimate upward explanation. */
+  spentOnTopCents: number;
+  last: LastRenewalComparison | null;
+}): { matches: boolean; lastPaidPreTaxCents: number | null; reason: string } {
+  const { computedPreTaxCents, currentLineKey, activeOnTopCents, spentOnTopCents, last } = args;
+  if (!last) return { matches: true, lastPaidPreTaxCents: null, reason: "no prior paid renewal to compare" };
+  if (last.lineKey !== currentLineKey) {
+    return {
+      matches: true,
+      lastPaidPreTaxCents: last.lastPaidPreTaxCents,
+      reason: "line items changed since last renewal — a price change is expected",
+    };
+  }
+  // Expected pre-tax now = last paid (net of tax) + coupons spent since + 0, with any currently
+  // active coupon allowed to pull it down. shortfall > 0 ⇒ computed is LOWER than it should be.
+  const expected = last.lastPaidPreTaxCents + spentOnTopCents - activeOnTopCents;
+  const shortfall = expected - computedPreTaxCents;
+  if (shortfall <= RENEWAL_CROSSCHECK_TOLERANCE_CENTS) {
+    return {
+      matches: true,
+      lastPaidPreTaxCents: last.lastPaidPreTaxCents,
+      reason: "within $2 of last renewal (coupon change accounted)",
+    };
+  }
+  return {
+    matches: false,
+    lastPaidPreTaxCents: last.lastPaidPreTaxCents,
+    reason: `computed ${computedPreTaxCents}c is more than $2 below last paid ${last.lastPaidPreTaxCents}c (net of tax) with unchanged line items and no coupon change to explain it`,
+  };
+}
+
+/** Sorted `variant:qty` shape of a line-item set, product lines only (shipping-protection excluded),
+ *  so the cross-check compares like for like whether the lines came from a sub or an order row. */
+function lineShapeKey(items: Array<{ variant_id?: unknown; title?: string; quantity?: number }>): string {
+  return items
+    .filter((i) => !isShippingProtectionTitle(String(i.title || "")))
+    .map((i) => `${String(i.variant_id ?? i.title ?? "?")}:${Number(i.quantity || 1)}`)
+    .sort()
+    .join("|");
+}
+
+/**
+ * The sub's most recent paid renewal, reduced to a comparable pre-tax base. Tax is netted out via
+ * `avalara_total_tax_cents` (internal) or `payment_details.tax_cents` (Shopify/ShopCX). When tax
+ * can't be determined (e.g. a legacy Appstle row with no breakdown) we return null rather than
+ * compare against a tax-inclusive total and raise a false mismatch. Read-only.
+ */
+async function fetchLastPaidRenewalPreTax(
+  workspaceId: string,
+  subscriptionId: string,
+  admin: Admin,
+): Promise<LastRenewalComparison | null> {
+  const { data } = await admin
+    .from("orders")
+    .select("total_cents, avalara_total_tax_cents, payment_details, line_items, created_at")
+    .eq("workspace_id", workspaceId)
+    .eq("subscription_id", subscriptionId)
+    .eq("financial_status", "paid")
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (!data) return null;
+  const pd = (data.payment_details ?? {}) as Record<string, unknown>;
+  const tax =
+    data.avalara_total_tax_cents != null
+      ? Number(data.avalara_total_tax_cents)
+      : pd.tax_cents != null
+        ? Number(pd.tax_cents)
+        : null;
+  if (tax == null) return null; // can't net out tax → don't compare (no false alarm)
+  const total = Number(data.total_cents || 0);
+  const lines = (Array.isArray(data.line_items) ? data.line_items : []) as Array<{
+    variant_id?: unknown; title?: string; quantity?: number;
+  }>;
+  return { lastPaidPreTaxCents: Math.max(0, total - tax), lineKey: lineShapeKey(lines) };
+}
+
+/** Raise ONE high-severity billing_alert when a reminder amount contradicts the last paid renewal.
+ *  `dashboard_notifications` has no severity column, so severity lives in metadata (the convention
+ *  crisis-restock-fulfillment follows). The card carries the sub id + both numbers. */
+async function raiseRenewalMismatchAlert(
+  workspaceId: string,
+  subscriptionId: string,
+  computedPreTaxCents: number,
+  lastPaidPreTaxCents: number | null,
+  admin: Admin,
+): Promise<void> {
+  try {
+    await admin.from("dashboard_notifications").insert({
+      workspace_id: workspaceId,
+      type: "billing_alert",
+      title: "Renewal reminder amount does not match last charge",
+      body:
+        `Subscription ${subscriptionId}: the computed pre-tax renewal amount is ${fmtMoney(computedPreTaxCents)}, ` +
+        `but the last paid renewal was ${lastPaidPreTaxCents == null ? "unknown" : fmtMoney(lastPaidPreTaxCents)} (net of tax) ` +
+        `with unchanged line items. The reminder omitted the amount rather than show a number that may be wrong.`,
+      metadata: {
+        severity: "high",
+        subscription_id: subscriptionId,
+        computed_pretax_cents: computedPreTaxCents,
+        last_paid_pretax_cents: lastPaidPreTaxCents,
+      },
+    });
+  } catch (e) {
+    console.warn(`[pre-renewal] renewal mismatch alert insert failed for ${subscriptionId}:`, errText(e));
+  }
+}
+
 /** The full subscription row `priceSubscription` + the tax quote need to resolve a renewal charge.
  *  Matches the canonical money-resolver select ([[commerce/subscription]]), trimmed to the columns
  *  the reminder preview reads. */
@@ -347,10 +486,14 @@ export async function reminderChargePreview(
   // engine (ShopCX lines carry `price_cents`, internal subs price live). On PriceInvariantError the
   // charge can't be stated → omit the amount rather than guess.
   let base: number | null = null;
+  let subtotalForCrosscheck = 0;
+  let activeOnTopCents = 0;
   try {
     const { pricing } = await priceSubscription(workspaceId, sub as Record<string, unknown>);
     base = pricing.total_cents;
     shippingCents = pricing.shipping_cents;
+    subtotalForCrosscheck = pricing.subtotal_cents;
+    activeOnTopCents = pricing.discount_cents; // on-top coupons the fixed resolver still subtracts
   } catch (e) {
     if (!(e instanceof PriceInvariantError)) {
       // Any other resolver failure also means we can't state the charge exactly — omit it.
@@ -362,6 +505,33 @@ export async function reminderChargePreview(
   // with sub.comp for free subs whose comp flag isn't set).
   if (base === 0 && productItems.length > 0 && productItems.every((i) => Number(i.price_cents ?? i.price ?? 0) === 0)) {
     comp = true;
+  }
+
+  // CEO 2026-11-27 guardrail: cross-check the computed PRE-TAX charge against what this sub's last
+  // paid renewal actually cost (net of tax). If they differ by more than $2 with unchanged line
+  // items and no coupon change explains it, omit the amount and raise one high-severity
+  // billing_alert rather than show a number that may be wrong (the double-discount symptom). The
+  // check is a best-effort backstop — any failure leaves the amount untouched, never blocks it.
+  if (base != null && !comp) {
+    try {
+      const last = await fetchLastPaidRenewalPreTax(workspaceId, sub.id, admin);
+      const check = amountMatchesLastRenewal({
+        computedPreTaxCents: base,
+        currentLineKey: lineShapeKey(rawItems),
+        activeOnTopCents,
+        spentOnTopCents: spentOnTopDiscountCents(
+          (sub.applied_discounts as Array<Record<string, unknown>>) || [],
+          subtotalForCrosscheck,
+        ),
+        last,
+      });
+      if (!check.matches) {
+        await raiseRenewalMismatchAlert(workspaceId, sub.id, base, check.lastPaidPreTaxCents, admin);
+        base = null; // omit the amount — the reminder shows items + date, no (possibly wrong) number
+      }
+    } catch {
+      // A backstop must never block the reminder — on any error leave the resolved amount as-is.
+    }
   }
 
   if (comp) {

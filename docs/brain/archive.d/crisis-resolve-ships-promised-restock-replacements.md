@@ -1,0 +1,1 @@
+- **Crisis resolve ships promised restock replacements** · verified 2026-11-27 · → [[../lifecycles/crisis-campaign]]

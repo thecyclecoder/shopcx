@@ -150,6 +150,7 @@ import { slackRoadmapNotify } from "@/lib/inngest/slack-roadmap-notify";
 import { brainIndexRefresh } from "@/lib/inngest/brain-index-refresh";
 import { creativeFinderVideoProcess } from "@/lib/inngest/creative-finder";
 import { creativeScoutWeeklyCron, creativeScoutManualSweep } from "@/lib/inngest/creative-scout";
+import { situationMineRefreshCron } from "@/lib/inngest/situation-mine-refresh";
 import { competitorScoutDiscover } from "@/lib/inngest/competitor-scout";
 import { landingPageScoutAnalyze } from "@/lib/inngest/landing-page-scout";
 import { acquisitionResearchCadenceCron, acquisitionResearchCadenceManual } from "@/lib/inngest/acquisition-research-cadence";
@@ -354,6 +355,7 @@ export const registeredInngestFunctions = [
   brainIndexRefresh,
   creativeScoutWeeklyCron,
   creativeScoutManualSweep,
+  situationMineRefreshCron,
   creativeFinderVideoProcess,
   competitorScoutDiscover,
   landingPageScoutAnalyze,

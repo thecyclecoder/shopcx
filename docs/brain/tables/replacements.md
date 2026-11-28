@@ -20,7 +20,8 @@ Reshipment/replacement orders. Created by playbooks or agent action. Counts agai
 | `reason` | `text` | — |  |
 | `reason_detail` | `text` | ✓ |  |
 | `items` | `jsonb` | ✓ |  |
-| `status` | `text` | — | default: `'pending'` · values: `pending` / `address_confirmed` / `created` / `shipped` / `completed` / `failed` / `denied` / `superseded` |
+| `crisis_id` | `uuid` | ✓ | → [[crisis_events]].id. Set when the row is a **restock promise** (`status='awaiting_restock'`) recorded against a crisis for a customer with no subscription. Added 20270128120000. |
+| `status` | `text` | — | default: `'pending'` · values: `pending` / `address_confirmed` / `created` / `shipped` / `completed` / `failed` / `denied` / `superseded` / `awaiting_restock` |
 | `customer_error` | `bool` | — | default: `false` |
 | `ticket_id` | `uuid` | ✓ | → [[tickets]].id |
 | `address_validated` | `bool` | ✓ | default: `false` |
@@ -35,6 +36,7 @@ Reshipment/replacement orders. Created by playbooks or agent action. Counts agai
 
 **Out (this → others):**
 
+- `crisis_id` → [[crisis_events]].`id`
 - `customer_id` → [[customers]].`id`
 - `original_order_id` → [[orders]].`id`
 - `replacement_order_id` → [[orders]].`id`
@@ -86,7 +88,15 @@ const { count } = await admin.from("replacements")
   .gte("created_at", since);
 ```
 
+### Restock promises awaiting resolve for a crisis
+```ts
+const { data } = await admin.from("replacements")
+  .select("*").eq("crisis_id", crisisId).eq("status", "awaiting_restock");
+```
+
 ## Gotchas
+
+- **`awaiting_restock` is a recorded PROMISE, not an order.** When support promises a customer with **no subscription** (so there's nothing to swap/resume) that we'll send their out-of-stock flavor once it's back, the `promise_restock_replacement` direct action ([[../libraries/action-executor]]) records a row with `status='awaiting_restock'`, `crisis_id` set, `reason='crisis_restock_promise'`, and the item in `items` — **no Shopify order is created**. Resolving the crisis (Phase 2 — [[../lifecycles/crisis-campaign]]) loads every `awaiting_restock` row for that `crisis_id` and ships it through [[../libraries/replacement-order]] `createReplacementOrder`. The per-variant cap (`REPLACEMENT_MAX_UNITS_PER_VARIANT=4`) is enforced at record time. This replaced the old pattern where such promises lived only as snoozed tickets a human had to remember (Peggy, customer 0897b4e5).
 
 - **Replacements ship to the customer's current address, not the original order's snapshot.** When creating a replacement, the system resolves the destination via [[../libraries/customer-shipping-address]] `resolveCustomerShippingAddress()` — it prefers `customers.default_address` (canonical current), then subscription address, then the original order's snapshot as last resort. This prevents stale address snapshots from silently shipping to the wrong location (ticket 49ddd6c4). The resolved address is validated and stored in `validated_address`; an operator can override via `address_override` on the action.
 

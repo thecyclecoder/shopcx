@@ -1,0 +1,1 @@
+- **Cycle-edit lock lift must also clear the current (already billed) cycle's edit** · verified 2026-11-27 · → [[../lifecycles/shopcx-subscriptions]] § A gift edit on the CURRENT billed cycle also locks the contract

@@ -175,9 +175,69 @@ async function primaryVariant(admin: Admin, workspaceId: string, productId: stri
   return data ? { id: data.id as string } : null;
 }
 
+/**
+ * Resolve the shopper's chosen flavor/option (e.g. "Berry") to one of the product's variants by a
+ * case-insensitive match on `title` / `option1..3`. Null when no flavor was given or none matches —
+ * the caller then falls back to the primary variant and reports the available flavors.
+ */
+async function variantByFlavor(
+  admin: Admin,
+  workspaceId: string,
+  productId: string,
+  flavor: string | null | undefined,
+): Promise<{ id: string } | null> {
+  const want = (flavor ?? "").trim().toLowerCase();
+  if (!want) return null;
+  const { data } = await admin
+    .from("product_variants")
+    .select("id, title, option1, option2, option3, available, position")
+    .eq("workspace_id", workspaceId)
+    .eq("product_id", productId)
+    .order("available", { ascending: false })
+    .order("position", { ascending: true });
+  const rows = (data ?? []) as Array<{ id: string; title: string | null; option1: string | null; option2: string | null; option3: string | null }>;
+  const hit = pickFlavorMatch(rows, want);
+  return hit ? { id: hit.id } : null;
+}
+
+/**
+ * Rank a shopper's flavor words against variant labels: exact label > whole-word match > substring.
+ * Whole-word first so "berry" picks "Mixed Berry", not "Strawberry Lemonade" (a substring hit that
+ * sorts earlier by position). Exported for the unit test.
+ */
+export function pickFlavorMatch<T extends { title: string | null; option1: string | null; option2: string | null; option3: string | null }>(
+  rows: T[],
+  want: string,
+): T | null {
+  const w = want.trim().toLowerCase();
+  if (!w) return null;
+  const labels = (r: T) => [r.title, r.option1, r.option2, r.option3].map((v) => (v ?? "").toLowerCase()).filter(Boolean);
+  const escaped = w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const word = new RegExp(`(^|[^a-z0-9])${escaped}($|[^a-z0-9])`);
+  return (
+    rows.find((r) => labels(r).some((l) => l === w)) ??
+    rows.find((r) => labels(r).some((l) => word.test(l))) ??
+    rows.find((r) => labels(r).some((l) => l.includes(w))) ??
+    null
+  );
+}
+
+/** The product's distinct variant titles (flavors), for telling the shopper what they can pick. */
+export async function listFlavors(admin: Admin, workspaceId: string, productId: string): Promise<string[]> {
+  const { data } = await admin
+    .from("product_variants")
+    .select("title, position")
+    .eq("workspace_id", workspaceId)
+    .eq("product_id", productId)
+    .order("position", { ascending: true });
+  return [...new Set(((data ?? []) as Array<{ title: string | null }>).map((r) => (r.title ?? "").trim()).filter(Boolean))];
+}
+
 export interface BuildCartForAgentInput {
   productId: string;
   packTier: number;
+  /** Optional flavor/option the shopper picked (matched to a variant); falls back to the primary variant. */
+  flavor?: string | null;
   mode: "subscribe" | "onetime";
   frequencyDays: number | null;
   platform: AiAgentPlatform;
@@ -202,7 +262,7 @@ export async function buildCartForAgent(
   workspaceId: string,
   input: BuildCartForAgentInput,
 ): Promise<AgentCartResult> {
-  const variant = await primaryVariant(admin, workspaceId, input.productId);
+  const variant = (await variantByFlavor(admin, workspaceId, input.productId, input.flavor)) ?? (await primaryVariant(admin, workspaceId, input.productId));
   if (!variant) return { token: "", checkout_url: "", subtotal: "$0.00", total: "$0.00", line_items: [], error: "no purchasable variant" };
 
   const priced = await priceCartLines(admin, workspaceId, [{ variant_id: variant.id, quantity: input.packTier }], input.mode, input.frequencyDays);

@@ -1,0 +1,379 @@
+/**
+ * Situation miner — the DETERMINISTIC verify-and-screen apply step for the `situation-mine` box
+ * lane (docs/brain/libraries/situation-miner.md · Phase 1 of the "mine customer situations for
+ * every advertised product" spec).
+ *
+ * THE MODEL ONLY PROPOSES; THIS CODE VERIFIES. A Max box session reads one advertised product's
+ * best reviews and proposes `{situations: [...]}`, but an LLM can paraphrase or invent, so NOTHING
+ * it proposes is trusted. `applySituationMine` is the sole mutator: for every proposed quote it
+ * requires `verbatim_phrase` to be a case-insensitive substring of the cited review's body (drop
+ * otherwise — no fabricated quotes), screens every quote AND every situation text field through
+ * `checkClaim` (src/lib/shopping-agent/compliance.ts — the same FDA/FTC structure/function block
+ * list the shopping agent enforces), and only then upserts through the customer-situations SDK.
+ *
+ * Compliance contract (mirrors the SDK's north-star invariant):
+ *   - A quote that fails `checkClaim` is STORED with `compliance_ok=false` + a note (for audit) —
+ *     the SDK's surface-side filter strips it before it can reach a shopper.
+ *   - A SITUATION whose situation/who/goal/noticed text fails `checkClaim` is DROPPED whole (a
+ *     non-compliant framing must never be published, even stripped of quotes).
+ *   - A situation with zero compliant quotes is STORED with `compliance_ok=false`.
+ *   - `source='mine:<ISO date>'`; a slug already held by a `seed:*` row is NEVER overwritten.
+ *
+ * This module never runs an LLM — same shape as `applyBoxImitationQualityReview`. The box session
+ * in `scripts/builder-worker.ts` `runSituationMineJob` is the only LLM caller; it hands the parsed
+ * proposal here.
+ *
+ * Node-completeness trio (CLAUDE.md hard rule): OWNER `cmo` in
+ * [[control-tower/node-registry]] `KIND_OWNER_FALLBACK` (the CMO owns the organic-discovery
+ * surface); KILL-SWITCH ancestry inherited from `director:cmo` via the node registry; HEARTBEAT
+ * emitted by `runSituationMineJob` via `emitAgentHeartbeat('situation-mine', …)` in a try/finally.
+ */
+import { createAdminClient } from "@/lib/supabase/admin";
+import { checkClaim } from "@/lib/shopping-agent/compliance";
+import {
+  upsertSituations,
+  listSituations,
+  type CustomerSituationRow,
+  type SituationQuote,
+  type UpsertSituationInput,
+} from "@/lib/customer-situations";
+
+type Admin = ReturnType<typeof createAdminClient>;
+
+/** A best-review handed to the box session and re-used here to verify its quotes verbatim. */
+export interface MineReview {
+  id: string;
+  reviewer: string;
+  rating: number;
+  verified_purchase: boolean;
+  featured: boolean;
+  body: string;
+}
+
+/** One quote the box session proposes — cites a review id and the exact phrase it pulled. */
+export interface ProposedQuote {
+  review_id: string;
+  verbatim_phrase: string;
+}
+
+/** One situation the box session proposes. */
+export interface ProposedSituation {
+  slug: string;
+  situation: string;
+  who?: string | null;
+  goal?: string | null;
+  noticed?: string | null;
+  timeframe?: string | null;
+  quotes?: ProposedQuote[];
+}
+
+/** The box session's whole output, post-JSON-parse. */
+export interface SituationMineProposal {
+  situations: ProposedSituation[];
+}
+
+/** Per-run counts the lane logs so the CMO can supervise the proxy (proposed vs written). */
+export interface SituationMineResult {
+  proposed: number;
+  /** quotes dropped because the phrase isn't a verbatim substring of its cited review */
+  verbatimDropped: number;
+  /** situations dropped because a situation/who/goal/noticed field failed the compliance block list */
+  complianceDroppedSituations: number;
+  /** quotes stored compliance_ok=false (failed the block list) — kept for audit, never surfaced */
+  complianceFlaggedQuotes: number;
+  /** situations stored compliance_ok=false because they ended with zero compliant quotes */
+  storedNonCompliant: number;
+  /** slugs skipped because a seed:* row already holds them */
+  skippedSeed: number;
+  written: number;
+  rows: CustomerSituationRow[];
+}
+
+/** A slug normalized for the SDK conflict key — lowercase, kebab, trimmed. */
+function normalizeSlug(raw: string): string {
+  return (raw || "")
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80);
+}
+
+/** True iff `needle` is a case-insensitive substring of `haystack` (verbatim verification). */
+function isVerbatimSubstring(needle: string, haystack: string): boolean {
+  if (!needle || !needle.trim() || !haystack) return false;
+  return haystack.toLowerCase().includes(needle.trim().toLowerCase());
+}
+
+/**
+ * Apply one product's mined situations. The ONLY write path for a mined situation. Verifies every
+ * quote verbatim against the real review body, compliance-screens every quote + situation text,
+ * and upserts through `upsertSituations` with `source='mine:<date>'` — never touching a slug a
+ * `seed:*` row already owns.
+ */
+export async function applySituationMine(input: {
+  admin?: Admin;
+  workspaceId: string;
+  productId: string;
+  /** ISO date (YYYY-MM-DD) stamped into `source='mine:<date>'`. */
+  mineDateISO: string;
+  /** The best-reviews set shown to the box session — used to verify each cited quote verbatim. */
+  reviews: MineReview[];
+  proposal: SituationMineProposal;
+}): Promise<SituationMineResult> {
+  const admin = input.admin ?? createAdminClient();
+  const reviewById = new Map<string, MineReview>(input.reviews.map((r) => [r.id, r]));
+
+  // Slugs already held by a seed:* row must never be overwritten by a mine. Load unfiltered
+  // (compliantOnly:false) so we see every existing row for this product, compliant or not.
+  const existing = await listSituations(admin, input.workspaceId, {
+    productId: input.productId,
+    compliantOnly: false,
+    limit: 500,
+  });
+  const seedSlugs = new Set(
+    existing.filter((r) => (r.source ?? "").startsWith("seed:")).map((r) => r.slug),
+  );
+
+  const result: SituationMineResult = {
+    proposed: 0,
+    verbatimDropped: 0,
+    complianceDroppedSituations: 0,
+    complianceFlaggedQuotes: 0,
+    storedNonCompliant: 0,
+    skippedSeed: 0,
+    written: 0,
+    rows: [],
+  };
+
+  const proposals = Array.isArray(input.proposal?.situations) ? input.proposal.situations : [];
+  const payload: UpsertSituationInput[] = [];
+  const seenSlugs = new Set<string>();
+
+  for (const p of proposals) {
+    result.proposed += 1;
+    const slug = normalizeSlug(p?.slug ?? "");
+    if (!slug || !p?.situation || !p.situation.trim()) continue;
+
+    // Never clobber a hand-seeded row; de-dupe within this batch (last proposal for a slug wins
+    // is avoided — first wins, later dupes skipped so the batch upsert can't collide on itself).
+    if (seedSlugs.has(slug)) {
+      result.skippedSeed += 1;
+      continue;
+    }
+    if (seenSlugs.has(slug)) continue;
+
+    // Screen every situation TEXT field — a non-compliant framing drops the whole situation.
+    const textFields = [p.situation, p.who ?? "", p.goal ?? "", p.noticed ?? ""];
+    let textFailed = false;
+    for (const t of textFields) {
+      if (t && t.trim() && !checkClaim(t).ok) {
+        textFailed = true;
+        break;
+      }
+    }
+    if (textFailed) {
+      result.complianceDroppedSituations += 1;
+      continue;
+    }
+
+    // Verify + screen each quote.
+    const quotes: SituationQuote[] = [];
+    const reviewIds = new Set<string>();
+    for (const q of p.quotes ?? []) {
+      const review = q?.review_id ? reviewById.get(q.review_id) : undefined;
+      if (!review || !isVerbatimSubstring(q?.verbatim_phrase ?? "", review.body ?? "")) {
+        // Not a verbatim substring of the cited review (or the review wasn't in the set) — drop.
+        result.verbatimDropped += 1;
+        continue;
+      }
+      const claim = checkClaim(q.verbatim_phrase);
+      if (!claim.ok) result.complianceFlaggedQuotes += 1;
+      quotes.push({
+        review_id: review.id,
+        reviewer: review.reviewer,
+        rating: review.rating,
+        verified_purchase: review.verified_purchase,
+        featured: review.featured,
+        verbatim_phrase: q.verbatim_phrase,
+        compliance_ok: claim.ok,
+        compliance_note: claim.ok
+          ? ""
+          : `blocked: ${claim.category ?? "unknown"}${claim.matched ? ` ("${claim.matched}")` : ""}`,
+      });
+      reviewIds.add(review.id);
+    }
+
+    const compliantQuotes = quotes.filter((x) => x.compliance_ok);
+    const situationCompliant = compliantQuotes.length > 0;
+    if (!situationCompliant) result.storedNonCompliant += 1;
+
+    seenSlugs.add(slug);
+    payload.push({
+      product_id: input.productId,
+      slug,
+      situation: p.situation.trim(),
+      who: p.who?.trim() || null,
+      goal: p.goal?.trim() || null,
+      noticed: p.noticed?.trim() || null,
+      timeframe: p.timeframe?.trim() || null,
+      verbatim_phrase: compliantQuotes[0]?.verbatim_phrase ?? quotes[0]?.verbatim_phrase ?? null,
+      review_ids: Array.from(reviewIds),
+      quotes,
+      compliance_ok: situationCompliant,
+      compliance_note: situationCompliant ? null : "no compliant verbatim quote survived verification",
+      source: `mine:${input.mineDateISO}`,
+      active: true,
+    });
+  }
+
+  if (payload.length > 0) {
+    const rows = await upsertSituations(admin, input.workspaceId, payload);
+    result.rows = rows;
+    result.written = rows.length;
+  }
+  return result;
+}
+
+/* ------------------------------------------------------------------------------------------------
+ * Enqueue (Phase 2) — the Vercel/script → box handoff that queues a `situation-mine` job.
+ * Shared by the ship-time backfill (scripts/_backfill-mine-situations-advertised.ts) and the monthly
+ * refresh cron (src/lib/inngest/situation-mine-refresh.ts) so idempotency lives in ONE place.
+ * --------------------------------------------------------------------------------------------- */
+
+export const SITUATION_MINE_KIND = "situation-mine" as const;
+
+/** `agent_jobs.spec_slug` is NOT NULL — a per-(kind,product) dedupe key, not a real spec ref. */
+export const situationMineSlug = (productId: string): string => `${SITUATION_MINE_KIND}:${productId}`;
+
+/** A product mined within this many days is not re-enqueued (spec: "mined in the last 7 days"). */
+export const SITUATION_MINE_FRESH_DAYS = 7;
+
+export interface EnqueueSituationMineResult {
+  enqueued: boolean;
+  jobId: string | null;
+  reason?: "already_inflight" | "mined_recently";
+}
+
+/**
+ * Queue ONE `situation-mine` box job for one advertised product. Idempotent per (workspace,
+ * product): skips a product that already has a queued/running job OR whose situations were mined in
+ * the last {@link SITUATION_MINE_FRESH_DAYS} days — so a cron retry, an overlapping backfill, or the
+ * monthly refresh landing on a just-mined product can't double the box spend. The freshness probe
+ * reads through `listSituations` (the SDK chokepoint) — never a raw table query.
+ */
+export async function enqueueSituationMine(input: {
+  workspaceId: string;
+  productId: string;
+  admin?: Admin;
+}): Promise<EnqueueSituationMineResult> {
+  const admin = input.admin ?? createAdminClient();
+  const slug = situationMineSlug(input.productId);
+
+  // Skip if an active job already carries this product.
+  const { data: inflight } = await admin
+    .from("agent_jobs")
+    .select("id")
+    .eq("workspace_id", input.workspaceId)
+    .eq("kind", SITUATION_MINE_KIND)
+    .eq("spec_slug", slug)
+    .in("status", ["queued", "running"])
+    .limit(1);
+  const existing = (inflight ?? []) as Array<{ id: string }>;
+  if (existing.length) return { enqueued: false, jobId: existing[0].id, reason: "already_inflight" };
+
+  // Skip if mined in the last 7 days (through the SDK, unfiltered so we see mine rows regardless of
+  // compliance). Journey rows have no reliable published_at — the SDK sorts/returns updated_at.
+  const rows = await listSituations(admin, input.workspaceId, {
+    productId: input.productId,
+    compliantOnly: false,
+    limit: 500,
+  });
+  const cutoffMs = Date.now() - SITUATION_MINE_FRESH_DAYS * 24 * 60 * 60 * 1000;
+  const minedRecently = rows.some(
+    (r) => (r.source ?? "").startsWith("mine:") && Date.parse(r.updated_at) >= cutoffMs,
+  );
+  if (minedRecently) return { enqueued: false, jobId: null, reason: "mined_recently" };
+
+  const { data, error } = await admin
+    .from("agent_jobs")
+    .insert({
+      workspace_id: input.workspaceId,
+      kind: SITUATION_MINE_KIND,
+      spec_slug: slug,
+      status: "queued",
+      instructions: JSON.stringify({ productId: input.productId }),
+    })
+    .select("id")
+    .single();
+  if (error) throw new Error(`situation-mine enqueue failed: ${error.message}`);
+  return { enqueued: true, jobId: (data as { id: string }).id };
+}
+
+/** Counts from a per-workspace enqueue sweep. */
+export interface EnqueueSituationMineSweep {
+  products: number;
+  enqueued: number;
+  skippedInflight: number;
+  skippedFresh: number;
+  jobIds: string[];
+}
+
+/**
+ * Enqueue a `situation-mine` job for every `is_advertised` product in one workspace, applying the
+ * per-product idempotency of {@link enqueueSituationMine}. The shared body of the ship-time backfill
+ * and the monthly refresh cron.
+ */
+export async function enqueueSituationMineForAdvertised(
+  admin: Admin,
+  workspaceId: string,
+): Promise<EnqueueSituationMineSweep> {
+  const { data } = await admin
+    .from("products")
+    .select("id")
+    .eq("workspace_id", workspaceId)
+    .eq("is_advertised", true);
+  const productIds = ((data ?? []) as Array<{ id: string }>).map((r) => r.id);
+
+  const sweep: EnqueueSituationMineSweep = {
+    products: productIds.length,
+    enqueued: 0,
+    skippedInflight: 0,
+    skippedFresh: 0,
+    jobIds: [],
+  };
+  for (const productId of productIds) {
+    const r = await enqueueSituationMine({ workspaceId, productId, admin });
+    if (r.enqueued) {
+      sweep.enqueued += 1;
+      if (r.jobId) sweep.jobIds.push(r.jobId);
+    } else if (r.reason === "already_inflight") {
+      sweep.skippedInflight += 1;
+    } else if (r.reason === "mined_recently") {
+      sweep.skippedFresh += 1;
+    }
+  }
+  return sweep;
+}
+
+/** Distinct workspace ids that have at least one advertised product (for the monthly cron fan-out). */
+export async function workspacesWithAdvertisedProducts(admin: Admin): Promise<string[]> {
+  const { data } = await admin.from("products").select("workspace_id").eq("is_advertised", true);
+  return [...new Set(((data ?? []) as Array<{ workspace_id: string }>).map((r) => r.workspace_id))];
+}
+
+/** Advertised products in a workspace as `{id, title}` — the backfill dry-run preview. */
+export async function listAdvertisedPreview(
+  admin: Admin,
+  workspaceId: string,
+): Promise<Array<{ id: string; title: string }>> {
+  const { data } = await admin
+    .from("products")
+    .select("id, title")
+    .eq("workspace_id", workspaceId)
+    .eq("is_advertised", true);
+  return ((data ?? []) as Array<{ id: string; title: string | null }>).map((r) => ({
+    id: r.id,
+    title: r.title ?? "(untitled)",
+  }));
+}

@@ -45,7 +45,11 @@ Enabled. `authenticated` SELECT (`auth.uid() is not null`); `service_role` ALL. 
 
 ## Seeding
 
-Idempotent ship-time backfill `scripts/_backfill-customer-situations.ts` reads `fixtures/ai-shopping-agent/superfood-tabs-situations.json` (17 situations, 60 verbatim quotes for Superfood Tabs), resolves `product_id` → workspace (verifying the product exists), and upserts through the SDK on `(workspace_id, product_id, slug)`. Source review set = best-reviews (`status IN ('published','featured')`, `rating >= 4`, featured first — same selection as `getReviewsForProducts`). Tracked ship-time backfill (CLAUDE.md § Ship-time backfill-must-be-tracked).
+Idempotent ship-time backfill `scripts/_backfill-customer-situations.ts` reads `fixtures/ai-shopping-agent/superfood-tabs-situations.json` (17 situations, 60 verbatim quotes for Superfood Tabs), resolves `product_id` → workspace (verifying the product exists), and upserts through the SDK on `(workspace_id, product_id, slug)`. Source review set = best-reviews (`status IN ('published','featured')`, `rating >= 4`, featured first — same selection as `getReviewsForProducts`). `source='seed:*'`. Tracked ship-time backfill (CLAUDE.md § Ship-time backfill-must-be-tracked).
+
+## Mining (every advertised product)
+
+Beyond the hand-seeded Tabs rows, situations for every `is_advertised` product are **mined** from its best reviews by the `situation-mine` box lane — see [[../libraries/situation-miner]]. A Max box session proposes situations; the deterministic `applySituationMine` verifies every quote is a verbatim substring of its cited review, compliance-screens quote + situation text via `checkClaim`, and upserts with `source='mine:<ISO date>'`. A mine **never overwrites a `seed:*` row** (seed rows win on their slug). `compliance_ok` is set per the gate: a situation with no compliant verbatim quote is stored `compliance_ok=false` (audit-only, never surfaced).
 
 ## Migration
 
