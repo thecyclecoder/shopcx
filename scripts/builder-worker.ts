@@ -30,6 +30,7 @@ import { getPersona } from "../src/lib/agents/personas"; // agent-voice: the dir
 // Sol's session dfa7d984 on ticket dfa77b28 died `writeDirection failed: [object Object]` at line
 // ~11538 of this file, so the real cause was unrecoverable. See src/lib/error-text.ts.
 import { errText } from "../src/lib/error-text";
+import { repairInvalidJsonEscapes } from "../src/lib/json-escape-repair";
 import { citesUnverifiedFix, isLoopRecoveredSince, loopIdFromSignature } from "../src/lib/repair-verdict-guard"; // repair-transient-park-verifies-itself — Phase 1 cited-unverified-fix guard + Phase 2 loop-heartbeat auto-verify
 import { RERUNNABLE_JOB_KINDS } from "../src/lib/agents/park-retry"; // shared with the needs-attention re-drive rung — one list, no drift
 import {
@@ -3547,11 +3548,17 @@ function parseStatus(text: string): { status: string; questions?: unknown[]; sum
 // (ada-director-spec-status-cards-fix-tooling-fa6848 P1.)
 function extractJson<T = Record<string, unknown>>(text: string): T | null {
   const tryParse = (s: string): T | null => {
+    const asObject = (o: unknown): T | null => (o && typeof o === "object" ? (o as T) : null);
     try {
-      const o = JSON.parse(s);
-      return o && typeof o === "object" ? (o as T) : null;
+      return asObject(JSON.parse(s));
     } catch {
-      return null;
+      // An agent quoting a regex writes `\s` inside a JSON string — not a legal escape, so the whole
+      // verdict used to read as unparseable. Retry once with only the illegal backslashes doubled.
+      try {
+        return asObject(JSON.parse(repairInvalidJsonEscapes(s)));
+      } catch {
+        return null;
+      }
     }
   };
   let o = tryParse(text.trim());
@@ -5165,6 +5172,51 @@ async function applyMigrationAndRecord(
 // supersedes its stale open card. Routing: routeDestructiveAction, then Platform-routed ⇒ CEO when
 // Platform/Ada is not live+autonomous (resolveGatedMigrationRoute). Never throws into the drift loop
 // (applyMergedMigrations also swallows a hook throw).
+// A gated approval filed for a version that LATER lands (the classifier was fixed and the reconciler
+// auto-applied it, or an operator applied it) must not keep asking the CEO to approve an apply that
+// already happened. Called for every 'applied' / 'already-applied' outcome: closes any still-open
+// needs_approval row for that version (compare-and-set) and dismisses its inbox card. 2026-11-28: two
+// such cards (organic_content, replacements_awaiting_restock) sat on the CEO a day after both applied.
+async function retireGatedMigrationApprovals(version: string, file: string): Promise<void> {
+  const tag = `[migration-drift:gated:${version}]`;
+  try {
+    const lib = await import("../src/lib/control-tower/gated-migration-approval");
+    const { data: open } = await db
+      .from("agent_jobs")
+      .select("id, pending_actions")
+      .eq("kind", lib.GATED_MIGRATION_JOB_KIND)
+      .eq("spec_slug", lib.gatedMigrationSpecSlug(version))
+      .eq("status", "needs_approval")
+      .limit(20);
+    for (const r of (open ?? []) as Array<{ id: string; pending_actions: PendingAction[] | null }>) {
+      const acts = (r.pending_actions ?? []).map((a) =>
+        a.status === "pending" ? { ...a, status: "declined" as const, result: "moot — migration already applied" } : a,
+      );
+      const { data: closed } = await db
+        .from("agent_jobs")
+        .update({
+          status: "completed",
+          pending_actions: acts,
+          log_tail: `${tag} retired — ${file} is applied, so this approval request is moot.`,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", r.id)
+        .eq("status", "needs_approval")
+        .select("id");
+      if ((closed ?? []).length === 1) {
+        await db
+          .from("dashboard_notifications")
+          .update({ dismissed: true })
+          .eq("dismissed", false)
+          .eq("metadata->>agent_job_id", r.id);
+        console.log(`${tag} retired open approval ${r.id.slice(0, 8)} — ${file} already applied`);
+      }
+    }
+  } catch (e) {
+    console.warn(`${tag} retiring stale approvals failed (best-effort): ${(e as Error)?.message ?? e}`);
+  }
+}
+
 async function fileGatedMigrationApproval(input: {
   version: string;
   file: string;
@@ -5363,6 +5415,9 @@ async function runMigrationDriftJob(): Promise<void> {
           fileGatedMigrationApproval({ version, file, sql, severity, matches }),
       });
       for (const p of processed) {
+        if (p.outcome === "applied" || p.outcome === "already-applied") {
+          await retireGatedMigrationApprovals(p.version, p.file);
+        }
         if (p.outcome === "applied") {
           console.log(`[migration-drift] auto-applied ${p.file} (version ${p.version}, additive)`);
         } else if (p.outcome === "already-applied") {
