@@ -55,6 +55,10 @@ test("weight-loss quantification → block", () => {
     "down 3 dress sizes",
     "dropped 15 pounds fast",
     "lost two sizes already",
+    // Live misses found 2026-11-28 on Amazing Coffee reviews: "+" suffix and no-space units.
+    "I lost 40+ pounds!",
+    "I have lost 25lbs since I started drinking it.",
+    "down 10kg",
   ]) {
     const r = checkClaim(s);
     assert.equal(r.ok, false, `expected block: ${s}`);
