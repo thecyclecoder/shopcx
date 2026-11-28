@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getAuthedUser } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { createCrisisEvent } from "@/lib/crisis-events";
 
 // GET — list crisis events for workspace with aggregate counts
 export async function GET(
@@ -121,29 +122,26 @@ export async function POST(
     return NextResponse.json({ error: "name and affected_variant_id are required" }, { status: 400 });
   }
 
-  const { data: crisis, error } = await admin
-    .from("crisis_events")
-    .insert({
-      workspace_id: workspaceId,
+  let crisis: Record<string, unknown>;
+  try {
+    crisis = await createCrisisEvent(admin, workspaceId, {
       name,
-      status: "draft",
       affected_variant_id,
-      affected_sku: affected_sku || null,
-      affected_product_title: affected_product_title || null,
-      default_swap_variant_id: default_swap_variant_id || null,
-      default_swap_title: default_swap_title || null,
-      available_flavor_swaps: available_flavor_swaps || [],
-      available_product_swaps: available_product_swaps || [],
-      tier2_coupon_code: tier2_coupon_code || null,
-      tier2_coupon_percent: tier2_coupon_percent ?? 20,
-      expected_restock_date: expected_restock_date || null,
-      lead_time_days: lead_time_days ?? 7,
-      tier_wait_days: tier_wait_days ?? 3,
-    })
-    .select()
-    .single();
-
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+      affected_sku,
+      affected_product_title,
+      default_swap_variant_id,
+      default_swap_title,
+      available_flavor_swaps,
+      available_product_swaps,
+      tier2_coupon_code,
+      tier2_coupon_percent,
+      expected_restock_date,
+      lead_time_days,
+      tier_wait_days,
+    });
+  } catch (err) {
+    return NextResponse.json({ error: err instanceof Error ? err.message : String(err) }, { status: 500 });
+  }
 
   return NextResponse.json(crisis, { status: 201 });
 }

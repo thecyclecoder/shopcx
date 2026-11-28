@@ -1,6 +1,6 @@
 # crisis_events
 
-Crisis campaigns (e.g. Mixed Berry OOS) — affected variant, swap options, tiers, coupon. See [[../lifecycles/crisis-campaign]].
+Crisis campaigns (e.g. Mixed Berry OOS) — affected variant, swap options, tiers, coupon. See [[../lifecycles/crisis-campaign]]. Writes go through [[../libraries/crisis-events]] (`createCrisisEvent` / `activateCrisisEvent`).
 
 **Primary key:** `id`
 

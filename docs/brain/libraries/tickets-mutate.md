@@ -6,7 +6,7 @@
 
 Mutate the `tickets` row itself. Used by deterministic flows (outreach auto-close, sol-closes-on-resolving-reply) and hand-fixes.
 
-`closeTicket` · `reopenTicket` · `setTicketStatus` · `escalateTicket` · `deescalateTicket` · `assignTicket` · `addTag` / `removeTag` · `armPlaybook` / `advancePlaybookStep` / `clearPlaybook` · `setDoNotReply` · `recordFounderRuling`. `TicketStatus = 'open'|'pending'|'closed'|'archived'`.
+`closeTicket` · `reopenTicket` · `setTicketStatus` · `escalateTicket` · `deescalateTicket` · `assignTicket` · `addTag` / `removeTag` · `armPlaybook` / `advancePlaybookStep` / `clearPlaybook` · `setDoNotReply` · `recordFounderRuling` · `openOutboundTicket` · `addInternalNote`. `TicketStatus = 'open'|'pending'|'closed'|'archived'`.
 
 ### `recordFounderRuling(admin, {workspaceId, ticketId, ruling})` — the founder-ruling note
 
@@ -29,6 +29,14 @@ async function deescalateTicket(admin: Admin, ticketId: string): Promise<void>
 ```
 
 Clears `escalated_to` by setting it to null, while **preserving** `escalated_at` and `escalation_reason` as audit history. Called by [[../libraries/playbook-executor]] `startPlaybook` ([[../specs/playbook-takeover-replies-and-clears-escalation]] Phase 2) when a playbook takes ownership of a ticket — an escalation from an earlier turn is superseded by the playbook's authority, so the ticket is no longer active-escalated. Ground truth: Doreen Johnson (b5aaff03) sat escalated to the CEO from 02:38 while her 11:09 reply started the Refund playbook; the escalation must clear when the playbook owns the response.
+
+### `openOutboundTicket(admin, {workspaceId, customerId, subject, channel?, tags?, status?})` — a ticket for a message we start
+
+Returns the new ticket id. The row is built by the PURE `buildOutboundTicketRow` (validates workspace, customer and subject; dedupes tags). It lands `closed` with `closed_at` by default, like review requests, so a one-way ask stays out of the CS queue; the inbound path reopens it when the customer replies. Pass `status: "open"` to keep it queued. Added 2026-11-25 for the Sleep Gummies discontinue swap offer: before it, outreach to a customer with no ticket meant a raw `tickets` insert. Deliver the message with [[ticket-delivery]] `deliverTicketMessage`.
+
+### `addInternalNote(admin, ticketId, body)` — agent-only note
+
+Inserts a `ticket_messages` row with `visibility='internal'`, `author_type='system'`. Use it to leave the handler the context of an outreach (what was offered, what each answer should trigger). Never reaches the customer.
 
 ## (B) Commerce / journeys / workflows — the ONE executor front door
 
