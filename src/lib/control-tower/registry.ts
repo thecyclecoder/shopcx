@@ -1260,6 +1260,16 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   },
   // ─ Monthly crons (window ~32 days) ─
   {
+    id: "situation-mine-refresh-cron",
+    kind: "cron",
+    owner: "cmo",
+    label: "Situation-mine monthly refresh",
+    description: "Monthly re-enqueue of a situation-mine box job per is_advertised product so new reviews feed new customer situations for the AI shopping agent (customer-situations-all-products Phase 2). Idempotent — skips products with an inflight job or mined in the last 7 days.",
+    expectedCadence: "monthly (0 6 12 * *)",
+    livenessWindowMs: 37 * DAY,
+    registeredAt: "2026-11-28T00:00:00.000Z",
+  },
+  {
     id: "investor-monthly-invite",
     kind: "cron",
     owner: "platform",
