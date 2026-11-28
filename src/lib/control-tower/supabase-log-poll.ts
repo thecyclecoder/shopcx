@@ -121,6 +121,7 @@ import {
   isForeignSupabasePostgresMissingSubscriptionsDeliveryAddressColumnAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsLineItemsColumnAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsRenewalSubtotalCentsColumnAdhocNoise,
+  isForeignSupabasePostgresMissingPreRenewalRemindersSubscriptionIdColumnAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsShippingPriceCentsColumnAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsFreeShippingColumnAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsEngineColumnAdhocNoise,
@@ -3163,6 +3164,18 @@ const LOG_QUERIES: LogQuery[] = [
       // on the table, a different table, or the same message via a non-SELECT statement still
       // pages.
       if (isForeignSupabasePostgresMissingSubscriptionsDiscountsColumnAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: a foreign/stale direct-REST client SELECTs a
+      // `subscription_id` column from `pre_renewal_reminders` that the table never owned —
+      // its grain is the customer identity GROUP (group_id / customer_id), never a
+      // per-subscription id — and no ShopCX code path reads it. The resulting
+      // undefined_column ERROR is repair work for a query we don't own
+      // ([[../specs/error-feed-drop-pre-renewal-reminders-subscription-id-column]], Control
+      // Tower signature `supabase-logs:fc34a27a1d24f525`). Narrowly gated to require BOTH the
+      // exact `column pre_renewal_reminders.subscription_id does not exist` message AND the
+      // SELECT-lookup shape on `pre_renewal_reminders` (bare or PostgREST CTE wrapper) — a
+      // different missing column on the table, a different table, or the same message via a
+      // non-SELECT statement still pages.
+      if (isForeignSupabasePostgresMissingPreRenewalRemindersSubscriptionIdColumnAdhocNoise(message, query)) return null;
       // Drop expected-by-design noise at capture: Postgres reporting the 23505
       // unique-violation raised by our own `dashboard_notifications_dedupe_key_open_uniq`
       // partial index on an INSERT INTO `public.dashboard_notifications`. That index
