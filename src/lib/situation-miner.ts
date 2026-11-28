@@ -234,3 +234,146 @@ export async function applySituationMine(input: {
   }
   return result;
 }
+
+/* ------------------------------------------------------------------------------------------------
+ * Enqueue (Phase 2) — the Vercel/script → box handoff that queues a `situation-mine` job.
+ * Shared by the ship-time backfill (scripts/_backfill-mine-situations-advertised.ts) and the monthly
+ * refresh cron (src/lib/inngest/situation-mine-refresh.ts) so idempotency lives in ONE place.
+ * --------------------------------------------------------------------------------------------- */
+
+export const SITUATION_MINE_KIND = "situation-mine" as const;
+
+/** `agent_jobs.spec_slug` is NOT NULL — a per-(kind,product) dedupe key, not a real spec ref. */
+export const situationMineSlug = (productId: string): string => `${SITUATION_MINE_KIND}:${productId}`;
+
+/** A product mined within this many days is not re-enqueued (spec: "mined in the last 7 days"). */
+export const SITUATION_MINE_FRESH_DAYS = 7;
+
+export interface EnqueueSituationMineResult {
+  enqueued: boolean;
+  jobId: string | null;
+  reason?: "already_inflight" | "mined_recently";
+}
+
+/**
+ * Queue ONE `situation-mine` box job for one advertised product. Idempotent per (workspace,
+ * product): skips a product that already has a queued/running job OR whose situations were mined in
+ * the last {@link SITUATION_MINE_FRESH_DAYS} days — so a cron retry, an overlapping backfill, or the
+ * monthly refresh landing on a just-mined product can't double the box spend. The freshness probe
+ * reads through `listSituations` (the SDK chokepoint) — never a raw table query.
+ */
+export async function enqueueSituationMine(input: {
+  workspaceId: string;
+  productId: string;
+  admin?: Admin;
+}): Promise<EnqueueSituationMineResult> {
+  const admin = input.admin ?? createAdminClient();
+  const slug = situationMineSlug(input.productId);
+
+  // Skip if an active job already carries this product.
+  const { data: inflight } = await admin
+    .from("agent_jobs")
+    .select("id")
+    .eq("workspace_id", input.workspaceId)
+    .eq("kind", SITUATION_MINE_KIND)
+    .eq("spec_slug", slug)
+    .in("status", ["queued", "running"])
+    .limit(1);
+  const existing = (inflight ?? []) as Array<{ id: string }>;
+  if (existing.length) return { enqueued: false, jobId: existing[0].id, reason: "already_inflight" };
+
+  // Skip if mined in the last 7 days (through the SDK, unfiltered so we see mine rows regardless of
+  // compliance). Journey rows have no reliable published_at — the SDK sorts/returns updated_at.
+  const rows = await listSituations(admin, input.workspaceId, {
+    productId: input.productId,
+    compliantOnly: false,
+    limit: 500,
+  });
+  const cutoffMs = Date.now() - SITUATION_MINE_FRESH_DAYS * 24 * 60 * 60 * 1000;
+  const minedRecently = rows.some(
+    (r) => (r.source ?? "").startsWith("mine:") && Date.parse(r.updated_at) >= cutoffMs,
+  );
+  if (minedRecently) return { enqueued: false, jobId: null, reason: "mined_recently" };
+
+  const { data, error } = await admin
+    .from("agent_jobs")
+    .insert({
+      workspace_id: input.workspaceId,
+      kind: SITUATION_MINE_KIND,
+      spec_slug: slug,
+      status: "queued",
+      instructions: JSON.stringify({ productId: input.productId }),
+    })
+    .select("id")
+    .single();
+  if (error) throw new Error(`situation-mine enqueue failed: ${error.message}`);
+  return { enqueued: true, jobId: (data as { id: string }).id };
+}
+
+/** Counts from a per-workspace enqueue sweep. */
+export interface EnqueueSituationMineSweep {
+  products: number;
+  enqueued: number;
+  skippedInflight: number;
+  skippedFresh: number;
+  jobIds: string[];
+}
+
+/**
+ * Enqueue a `situation-mine` job for every `is_advertised` product in one workspace, applying the
+ * per-product idempotency of {@link enqueueSituationMine}. The shared body of the ship-time backfill
+ * and the monthly refresh cron.
+ */
+export async function enqueueSituationMineForAdvertised(
+  admin: Admin,
+  workspaceId: string,
+): Promise<EnqueueSituationMineSweep> {
+  const { data } = await admin
+    .from("products")
+    .select("id")
+    .eq("workspace_id", workspaceId)
+    .eq("is_advertised", true);
+  const productIds = ((data ?? []) as Array<{ id: string }>).map((r) => r.id);
+
+  const sweep: EnqueueSituationMineSweep = {
+    products: productIds.length,
+    enqueued: 0,
+    skippedInflight: 0,
+    skippedFresh: 0,
+    jobIds: [],
+  };
+  for (const productId of productIds) {
+    const r = await enqueueSituationMine({ workspaceId, productId, admin });
+    if (r.enqueued) {
+      sweep.enqueued += 1;
+      if (r.jobId) sweep.jobIds.push(r.jobId);
+    } else if (r.reason === "already_inflight") {
+      sweep.skippedInflight += 1;
+    } else if (r.reason === "mined_recently") {
+      sweep.skippedFresh += 1;
+    }
+  }
+  return sweep;
+}
+
+/** Distinct workspace ids that have at least one advertised product (for the monthly cron fan-out). */
+export async function workspacesWithAdvertisedProducts(admin: Admin): Promise<string[]> {
+  const { data } = await admin.from("products").select("workspace_id").eq("is_advertised", true);
+  return [...new Set(((data ?? []) as Array<{ workspace_id: string }>).map((r) => r.workspace_id))];
+}
+
+/** Advertised products in a workspace as `{id, title}` — the backfill dry-run preview. */
+export async function listAdvertisedPreview(
+  admin: Admin,
+  workspaceId: string,
+): Promise<Array<{ id: string; title: string }>> {
+  const { data } = await admin
+    .from("products")
+    .select("id, title")
+    .eq("workspace_id", workspaceId)
+    .eq("is_advertised", true);
+  return ((data ?? []) as Array<{ id: string; title: string | null }>).map((r) => ({
+    id: r.id,
+    title: r.title ?? "(untitled)",
+  }));
+}

@@ -33,10 +33,21 @@ Surviving situations upsert through `upsertSituations` on `(workspace_id, produc
 - **KILL-SWITCH ANCESTRY** — inherits the CMO's ancestry via the node registry (`parentIdForOwner('cmo')` → `director:cmo`), so a `dept:cmo` / `director:cmo` `kill_switches` row cascades to this lane.
 - **HEARTBEAT** — `runSituationMineJob` emits `emitAgentHeartbeat('situation-mine', …)` from an end-of-run try/finally so a throw still beats `ok:false`. Per-run counts are logged to the job `log_tail` + stdout so the CMO can supervise the proxy (proposed vs written).
 
+## Enqueue (Phase 2)
+
+The Vercel/script → box handoff lives here too, so idempotency is in ONE place:
+
+| Export | Notes |
+|---|---|
+| `enqueueSituationMine({workspaceId, productId, admin?})` | Queue ONE job. Idempotent per (workspace, product): skips a queued/running job OR a product mined in the last `SITUATION_MINE_FRESH_DAYS` (7) days. Freshness probe reads through `listSituations` (SDK) — never a raw `.from`. |
+| `enqueueSituationMineForAdvertised(admin, workspaceId)` | Enqueue for every `is_advertised` product in a workspace. Returns `{products, enqueued, skippedInflight, skippedFresh, jobIds}`. Shared by the backfill + cron. |
+| `workspacesWithAdvertisedProducts(admin)` / `listAdvertisedPreview(admin, workspaceId)` | Fan-out + dry-run helpers. |
+
 ## Callers
 
 - `scripts/builder-worker.ts` `runSituationMineJob` — loads one advertised product's title + lead benefits + up to ~300 best reviews, runs the box session, parses `{situations}`, and hands it here.
-- (Phase 2) `scripts/_backfill-mine-situations-advertised.ts` + a monthly refresh cron enqueue one `situation-mine` job per `is_advertised` product.
+- `scripts/_backfill-mine-situations-advertised.ts` — tracked ship-time backfill; initial run across the advertised lineup (dry-run by default, `--apply` to enqueue).
+- `src/lib/inngest/situation-mine-refresh.ts` `situation-mine-refresh-cron` — monthly re-enqueue so new reviews feed new situations (MONITORED_LOOPS 37d window, owner `cmo`).
 
 ## Related
 
