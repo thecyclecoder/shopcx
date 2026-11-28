@@ -62,10 +62,11 @@ const DRUG_TERMS = [
   "tirzepatide", "phentermine", "metformin", "like a prescription", "instead of medication",
 ];
 
-/** Weight-loss guarantee / hype phrases → block (spec Phase 2). */
+/** Weight-loss guarantee / hype phrases — DETECTION ONLY since 2026-11-28 (adds the results-may-vary note, never blocks). */
 const WEIGHT_LOSS_PHRASES = [
-  "guaranteed", "guarantee you will", "100% results", "melt fat", "burn fat",
-  "fat burner", "detox your", "flush toxins", "miracle", "overnight results",
+  // "burn fat" / "fat burner" removed — CEO 2026-11-28: "burn fat is fine".
+  "guaranteed", "guarantee you will", "100% results", "melt fat",
+  "detox your", "flush toxins", "miracle", "overnight results",
 ];
 
 /** Units that, when a number sits next to a lose/lost/down/dropped verb, trip the quantification rule. */
@@ -96,9 +97,12 @@ const DRUG_RE = buildMatcher(DRUG_TERMS);
 const WEIGHT_PHRASE_RE = buildMatcher(WEIGHT_LOSS_PHRASES);
 const SAFETY_RE = buildMatcher(SAFETY_INPUT_TERMS);
 
-/** number + weight-unit adjacency, e.g. "20 lbs", "25lbs", "40+ pounds", "two dress sizes", "3 inches". */
+/**
+ * number + weight-unit adjacency, e.g. "20 lbs", "25lbs", "40+ pounds", "two dress sizes", "3 inches".
+ * Vague amounts ("a few pounds", "some weight") are deliberately ALLOWED — CEO call 2026-11-28.
+ */
 const WEIGHT_UNIT_RE = new RegExp(
-  `((?<![A-Za-z0-9.])\\d+(?:\\.\\d+)?\\+?|\\b(?:one|two|three|four|five|six|seven|eight|nine|ten|a few|few|a couple|couple|several)\\b)\\s*(?:${WEIGHT_UNITS.map(esc).join("|")})(?![A-Za-z])`,
+  `((?<![A-Za-z0-9.])\\d+(?:\\.\\d+)?\\+?|\\b(?:one|two|three|four|five|six|seven|eight|nine|ten)\\b)\\s*(?:${WEIGHT_UNITS.map(esc).join("|")})(?![A-Za-z])`,
   "i",
 );
 /** lose/lost/down/dropped verbs that make a quantified weight claim. */
@@ -119,16 +123,36 @@ export function checkClaim(text: string): ClaimCheck {
   const disease = DISEASE_RE.exec(text);
   if (disease) return { ok: false, category: "disease", matched: disease[1] };
 
-  const phrase = WEIGHT_PHRASE_RE.exec(text);
-  if (phrase) return { ok: false, category: "weight_loss", matched: phrase[1] };
-
-  // Quantified weight loss: a number+unit AND a lose/lost/down/dropped verb in the same string.
-  const unit = WEIGHT_UNIT_RE.exec(text);
-  if (unit && WEIGHT_VERB_RE.test(text)) {
-    return { ok: false, category: "weight_loss", matched: unit[0] };
-  }
-
+  // Weight-loss language is NOT blocked (CEO 2026-11-28: "no disease or drug terms"; the weight-loss
+  // filter was "overzealous" and "weakening our product"). It only drives RESULTS_MAY_VARY_NOTE.
   return { ok: true };
+}
+
+/** A weight-loss result or hype phrase is present (detection only — never blocks). */
+function mentionsWeightResult(text: string): boolean {
+  if (WEIGHT_PHRASE_RE.test(text)) return true;
+  return WEIGHT_UNIT_RE.test(text) && WEIGHT_VERB_RE.test(text);
+}
+
+/**
+ * Note attached to a customer quote that reports a specific result (e.g. pounds lost). CEO rule
+ * 2026-11-28: a real customer's own words are shown as written, with this note — never blocked.
+ */
+export const RESULTS_MAY_VARY_NOTE = "*This is an individual customer's experience. Your results may vary.";
+
+/**
+ * Screen a VERBATIM CUSTOMER QUOTE (a real review, not our copy). CEO rule 2026-11-28: "if a
+ * customer put that as a review, allow it, we didn't make it up." Same rule as `checkClaim` now:
+ * only disease and drug-comparison terms block; pair weight-loss results with RESULTS_MAY_VARY_NOTE
+ * via `quoteNeedsResultsNote`.
+ */
+export function checkQuote(text: string): ClaimCheck {
+  return checkClaim(text);
+}
+
+/** True when a customer quote states a weight-loss result, so the caller attaches RESULTS_MAY_VARY_NOTE. */
+export function quoteNeedsResultsNote(text: string): boolean {
+  return !!text && mentionsWeightResult(text);
 }
 
 /** Split text into sentences on ., !, ? boundaries (keeps it simple + deterministic). */
@@ -162,8 +186,8 @@ export function filterText(text: string): FilterResult {
 }
 
 /**
- * Filter a list of verbatim quotes: a quote with ANY block-list hit is DROPPED whole (never
- * rewritten). Returns the surviving quotes + how many were dropped.
+ * Filter a list of verbatim customer quotes via `checkQuote`: a quote with a disease or
+ * drug-comparison hit is DROPPED whole (never rewritten); weight-loss results pass. Returns the surviving quotes + how many were dropped.
  */
 export function filterQuotes<T extends { verbatim_phrase?: string | null }>(
   quotes: T[],
@@ -171,7 +195,7 @@ export function filterQuotes<T extends { verbatim_phrase?: string | null }>(
   const kept: T[] = [];
   let droppedCount = 0;
   for (const q of quotes) {
-    if (checkClaim(q.verbatim_phrase ?? "").ok) kept.push(q);
+    if (checkQuote(q.verbatim_phrase ?? "").ok) kept.push(q);
     else droppedCount++;
   }
   return { kept, droppedCount };

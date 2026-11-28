@@ -29,7 +29,7 @@
  * emitted by `runSituationMineJob` via `emitAgentHeartbeat('situation-mine', …)` in a try/finally.
  */
 import { createAdminClient } from "@/lib/supabase/admin";
-import { checkClaim } from "@/lib/shopping-agent/compliance";
+import { checkClaim, checkQuote } from "@/lib/shopping-agent/compliance";
 import {
   upsertSituations,
   listSituations,
@@ -187,7 +187,7 @@ export async function applySituationMine(input: {
         result.verbatimDropped += 1;
         continue;
       }
-      const claim = checkClaim(q.verbatim_phrase);
+      const claim = checkQuote(q.verbatim_phrase); // customer words: weight-loss results allowed (CEO 2026-11-28)
       if (!claim.ok) result.complianceFlaggedQuotes += 1;
       quotes.push({
         review_id: review.id,
