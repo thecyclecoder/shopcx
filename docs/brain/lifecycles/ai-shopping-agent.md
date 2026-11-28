@@ -44,8 +44,10 @@ Nothing existing covered health claims (`safeCore` is image geometry; `claim-gua
 - Phase 2 — MCP server, 6 read-only tools, compliance module (+ unit test `test:shopping-agent-compliance`), calls log, control-tower node.
 - Phase 3 — shared pricing, `build_cart`, MCP Apps cards, funnel `aiChannelBreakdown`.
 - Phase 4 — privacy section, support page, domain-verification route, listing recipe.
+- **Situations for every advertised product — Phase 1 (miner).** The `situation-mine` box lane ([[../libraries/situation-miner]] · skill `.claude/skills/situation-mine/SKILL.md` · worker `runSituationMineJob`) mines one advertised product's best reviews into real customer situations. The model only proposes; the deterministic `applySituationMine` verifies every quote verbatim + compliance-screens via `checkClaim` before upserting through the SDK with `source='mine:<date>'` (never overwriting a `seed:*` row). Owner `cmo`; kill-switch via `director:cmo`; end-of-run heartbeat.
 
 **Open work / not yet done:**
+- **Situations Phase 2 — run + refresh + group.** `scripts/_backfill-mine-situations-advertised.ts` to enqueue one `situation-mine` job per `is_advertised` product, a monthly refresh cron, and a `find_products_for_situation` change so top matches span distinct products (today it can return three rows of the same product).
 - **Submit the listings:** Claude self-serve (claude.ai/directory/manage) and ChatGPT after OpenAI org + domain verification — human steps, see [[../recipes/list-ai-shopping-agent]]. Grok custom-connector-by-URL (contact xAI).
 - Rate limiting is in-memory per instance (best-effort); a shared store would tighten it across instances.
 - `find_products_for_situation` matching is keyword-overlap; embedding similarity is a future upgrade.

@@ -472,6 +472,11 @@ const GAP_GRADE_TIMEOUT_MS = 20 * 60 * 1000;
 // card per sweep to confirm/override (never a silent proxy-optimizer). Concurrency-1 own lane,
 // no ANTHROPIC_API_KEY billed. See docs/brain/libraries/imitation-quality-review.md.
 const IMITATION_QUALITY_REVIEW_TIMEOUT_MS = 15 * 60 * 1000;
+// Situation-mine lane (customer-situations-all-products Phase 1): one Max `claude -p` session reads
+// ONE advertised product's best reviews and proposes customer situations; the deterministic
+// applySituationMine verifies every quote verbatim + compliance-screens before upserting via the
+// customer-situations SDK. Reading ~300 reviews + clustering is a long read — 20 min cap.
+const SITUATION_MINE_TIMEOUT_MS = 20 * 60 * 1000;
 // Research lane (rhea-url-sensor Phase 2): the box-hosted URL-teardown loop for Rhea (Growth
 // research agent). One Max `claude -p` session per workspace reads a batch of unreviewed
 // research_urls, drives the Playwright capture helper (mobile viewport / overlay-kill / DOM-first
@@ -553,6 +558,9 @@ const MAX_ADS_SUPERVISOR = Number(process.env.AGENT_TODO_MAX_ADS_SUPERVISOR || 1
 // mirrors ads-supervisor (own supervisory lane, single-workspace at a time so we don't run two Max
 // sessions against the same scout output).
 const MAX_IMITATION_QUALITY_REVIEW = Number(process.env.AGENT_TODO_MAX_IMITATION_QUALITY_REVIEW || 1);
+// situation-mine: concurrency-1 — one product mined at a time keeps the box reading one ~300-review
+// brief rather than contending several large Max sessions. See customer-situations-all-products.
+const MAX_SITUATION_MINE = Number(process.env.AGENT_TODO_MAX_SITUATION_MINE || 1);
 // creative-scout holds a chromium session open for a whole product sweep (Meta publishes no media
 // url — every static costs a rendered page-load). Concurrency-1 so two sweeps can never contend for
 // the box's memory with parallel browsers.
@@ -800,7 +808,7 @@ interface Job {
   workspace_id: string;
   spec_slug: string; // for kind='plan' this is the GOAL slug; for kind='fold' a 'fold-batch' sentinel
   spec_branch: string | null;
-  kind: "build" | "plan" | "fold" | "goal-fold" | "product-seed" | "ticket-improve" | "ticket-handle" | "review-candidacy" | "spec-chat" | "triage-escalations" | "spec-test" | "migration-fix" | "dev-ask" | "god-mode" | "director-coach" | "pr-resolve" | "repair" | "regression" | "storefront-optimizer" | "db_health" | "coverage-register" | "platform-director" | "director-bounce-back" | "growth-director" | "proposed-goal" | "security-review" | "proposed-model-tier" | "audit-spec-shipped-state" | "agent-grade" | "agent-coach" | "director-grade" | "campaign-grade" | "gap-grade" | "research" | "ceo-authorized-out-of-leash" | "dr-content" | "deploy-review" | "cs-director-call" | "media-buyer" | "media-buyer-grade" | "sensor-trust-probe" | "cold-scaler-cac-ltv" | "calibrate-media-buyer-policy" | "ad-creative" | "ad-creative-copy-author" | "ad-creative-copy-qc" | "ad-review-feedback" | "ads-supervisor" | "imitation-quality-review" | "ticket-analyze" | "prompt-review" | "playbook-compile" | "mario" | "creative-scout";
+  kind: "build" | "plan" | "fold" | "goal-fold" | "product-seed" | "ticket-improve" | "ticket-handle" | "review-candidacy" | "spec-chat" | "triage-escalations" | "spec-test" | "migration-fix" | "dev-ask" | "god-mode" | "director-coach" | "pr-resolve" | "repair" | "regression" | "storefront-optimizer" | "db_health" | "coverage-register" | "platform-director" | "director-bounce-back" | "growth-director" | "proposed-goal" | "security-review" | "proposed-model-tier" | "audit-spec-shipped-state" | "agent-grade" | "agent-coach" | "director-grade" | "campaign-grade" | "gap-grade" | "research" | "ceo-authorized-out-of-leash" | "dr-content" | "deploy-review" | "cs-director-call" | "media-buyer" | "media-buyer-grade" | "sensor-trust-probe" | "cold-scaler-cac-ltv" | "calibrate-media-buyer-policy" | "ad-creative" | "ad-creative-copy-author" | "ad-creative-copy-qc" | "ad-review-feedback" | "ads-supervisor" | "imitation-quality-review" | "ticket-analyze" | "prompt-review" | "playbook-compile" | "mario" | "creative-scout" | "situation-mine";
   status: JobStatus;
   claude_session_id: string | null;
   // The CLAUDE_CONFIG_DIR (Max account) that CREATED claude_session_id. A resume MUST pin to it — a
@@ -889,6 +897,7 @@ const KNOWN_JOB_KINDS: ReadonlySet<Job["kind"]> = new Set<Job["kind"]>([
   "prompt-review",
   "playbook-compile",
   "mario",
+  "situation-mine",
 ]);
 
 async function admin() {
@@ -4760,7 +4769,7 @@ const LANE_GROUPS = {
       "migration-fix", "deploy-review", "mario", "playbook-compile", "prompt-review", "dev-ask", "god-mode",
       "pr-resolve", "repair", "regression", "security-review", "agent-grade", "agent-coach",
       "director-grade", "campaign-grade", "gap-grade", "research", "dr-content", "media-buyer",
-      "media-buyer-grade", "ad-creative", "ad-creative-copy-author", "ad-creative-copy-qc", "ad-review-feedback", "imitation-quality-review", "creative-scout", "storefront-optimizer", "db_health", "coverage-register", "proposed-goal",
+      "media-buyer-grade", "ad-creative", "ad-creative-copy-author", "ad-creative-copy-qc", "ad-review-feedback", "imitation-quality-review", "creative-scout", "situation-mine", "storefront-optimizer", "db_health", "coverage-register", "proposed-goal",
       "proposed-model-tier", "audit-spec-shipped-state", "ceo-authorized-out-of-leash",
     ] as const,
   },
@@ -25554,6 +25563,206 @@ async function runImitationQualityReviewJob(job: Job) {
   }
 }
 
+// ── Situation-mine lane (customer-situations-all-products Phase 1) ────────────────────
+// One Max box session reads ONE advertised product's best reviews and PROPOSES the real customer
+// situations it fits (who, goal, what they noticed, verbatim quotes), so the AI shopping agent can
+// recommend that product by a shopper's life situation (today only hand-seeded Superfood Tabs can
+// be). The LLM only proposes — the deterministic applySituationMine (src/lib/situation-miner.ts)
+// is the SOLE mutator: it drops any quote that isn't a verbatim substring of its cited review and
+// compliance-screens every quote + situation through checkClaim before upserting via the
+// customer-situations SDK with source='mine:<date>' (never overwriting a seed row). Node-completeness
+// trio: OWNER=cmo (KIND_OWNER_FALLBACK + BUILDER_WORKER_KINDS + the Job.kind union); KILL-SWITCH via
+// the cmo-department ancestor row in kill_switches (cascade in kill-switch-resolver); HEARTBEAT
+// emitted here via emitAgentHeartbeat in a try/finally so a throw still beats ok:false.
+async function runSituationMineClaude(prompt: string, sessionId: string | null, cwd: string, configDir?: string, jobId?: string | null) {
+  return runBoxSession(prompt, sessionId, cwd, { configDir, jobId, kind: "situation-mine", sandbox: "max", timeout: SITUATION_MINE_TIMEOUT_MS });
+}
+
+/** Reviewer display: first name + last initial (e.g. "Mindy Smith" → "Mindy S."). */
+function shortReviewerName(name: string | null | undefined): string {
+  const parts = (name ?? "").trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return "A customer";
+  if (parts.length === 1) return parts[0];
+  const last = parts[parts.length - 1];
+  return `${parts[0]} ${last[0].toUpperCase()}.`;
+}
+
+async function runSituationMineJob(job: Job) {
+  const tag = `[situation-mine:${job.id.slice(0, 8)}]`;
+  const { emitAgentHeartbeat } = await import("../src/lib/control-tower/heartbeat");
+  const startedAt = Date.now();
+  let ok = true;
+  let detail = "";
+  try {
+    let instr: { productId?: unknown } = {};
+    try { instr = job.instructions ? JSON.parse(job.instructions) : {}; } catch { /* not JSON — degrade */ }
+    const productId = typeof instr.productId === "string" && instr.productId ? instr.productId : null;
+    if (!productId) {
+      detail = "no productId in instructions — nothing to mine";
+      await update(job.id, { status: "needs_attention", error: detail, log_tail: detail });
+      console.error(`${tag} ${detail}`);
+      ok = false;
+      return;
+    }
+
+    const a = await admin();
+    const { isAdvertisedProduct } = await import("../src/lib/advertised-products");
+    const { applySituationMine } = await import("../src/lib/situation-miner");
+    type MineReview = import("../src/lib/situation-miner").MineReview;
+
+    // Only mine advertised (hero) products — the organic-discovery surface is for the SKUs we market.
+    if (!(await isAdvertisedProduct(a, productId))) {
+      detail = `product ${productId.slice(0, 8)} is not advertised — skipping`;
+      await update(job.id, { status: "completed", log_tail: detail });
+      console.log(`${tag} ${detail}`);
+      return;
+    }
+
+    const { data: product } = await a
+      .from("products")
+      .select("id, title, description")
+      .eq("workspace_id", job.workspace_id)
+      .eq("id", productId)
+      .maybeSingle();
+    if (!product) {
+      detail = `product ${productId.slice(0, 8)} not found in workspace`;
+      await update(job.id, { status: "needs_attention", error: detail, log_tail: detail });
+      console.error(`${tag} ${detail}`);
+      ok = false;
+      return;
+    }
+    const prod = product as { id: string; title: string; description: string | null };
+
+    // Lead benefits (role='lead' first, then display_order) — context for the clustering, not claims.
+    const { data: benefitRows } = await a
+      .from("product_benefit_selections")
+      .select("benefit_name, role, display_order")
+      .eq("workspace_id", job.workspace_id)
+      .eq("product_id", productId)
+      .order("display_order", { ascending: true })
+      .limit(12);
+    const leadBenefits = ((benefitRows ?? []) as Array<{ benefit_name: string; role: string | null }>)
+      .filter((b) => (b.role ?? "").toLowerCase() === "lead")
+      .map((b) => b.benefit_name);
+    const benefitList = (leadBenefits.length ? leadBenefits : ((benefitRows ?? []) as Array<{ benefit_name: string }>).map((b) => b.benefit_name)).slice(0, 6);
+
+    // Best reviews: published/featured, rating >= 4, featured first, then most recent (journey rows
+    // have published_at NULL so order on created_at). Cap at ~300 to bound the prompt.
+    const REVIEW_CAP = 300;
+    const { data: reviewRows } = await a
+      .from("product_reviews")
+      .select("id, reviewer_name, rating, featured, verified_purchase, body, created_at")
+      .eq("workspace_id", job.workspace_id)
+      .eq("product_id", productId)
+      .in("status", ["published", "featured"])
+      .gte("rating", 4)
+      .order("featured", { ascending: false })
+      .order("created_at", { ascending: false })
+      .limit(REVIEW_CAP);
+    const reviews: MineReview[] = ((reviewRows ?? []) as Array<{
+      id: string; reviewer_name: string | null; rating: number | null; featured: boolean | null;
+      verified_purchase: boolean | null; body: string | null;
+    }>)
+      .filter((r) => (r.body ?? "").trim().length > 0)
+      .map((r) => ({
+        id: r.id,
+        reviewer: shortReviewerName(r.reviewer_name),
+        rating: r.rating ?? 0,
+        verified_purchase: Boolean(r.verified_purchase),
+        featured: Boolean(r.featured),
+        body: r.body ?? "",
+      }));
+    if (reviews.length === 0) {
+      detail = `no best reviews (published/featured, rating>=4) for ${prod.title}`;
+      await update(job.id, { status: "completed", log_tail: detail });
+      console.log(`${tag} ${detail}`);
+      return;
+    }
+
+    const reviewsBlock = reviews
+      .map((r) =>
+        [
+          `review_id=${r.id}`,
+          `  reviewer: ${r.reviewer} · rating=${r.rating} · featured=${r.featured} · verified_purchase=${r.verified_purchase}`,
+          `  body: ${r.body.replace(/\s+/g, " ").trim()}`,
+        ].join("\n"),
+      )
+      .join("\n\n");
+
+    const prompt = [
+      `You are the CMO's situation miner for ShopCX on the box, running the situation-mine skill (cwd is the repo root). Web + Read/Grep on, NO ANTHROPIC_API_KEY. Read-only against repo + DB — the WORKER (deterministic Node) is the only mutator: it runs applySituationMine (src/lib/situation-miner.ts), which DROPS any quote that is not a verbatim substring of its cited review and compliance-screens every quote + situation via checkClaim before upserting through the customer-situations SDK.`,
+      ``,
+      `PRODUCT: ${prod.title} (id=${prod.id})`,
+      benefitList.length ? `LEAD BENEFITS: ${benefitList.join(" · ")}` : ``,
+      prod.description ? `DESCRIPTION: ${prod.description.replace(/\s+/g, " ").trim().slice(0, 600)}` : ``,
+      ``,
+      `TASK: cluster the ${reviews.length} best reviews below into 8-20 DISTINCT customer situations. For each, write {slug, situation, who, goal, noticed, timeframe, quotes:[{review_id, verbatim_phrase}]}.`,
+      `  • verbatim_phrase MUST be copyable character-for-character from the cited review's body — do NOT paraphrase, stitch, or fix typos (the worker drops anything that isn't a substring).`,
+      `  • Structure/function framing ONLY — describe what customers DID and NOTICED, attributed to them, never a promise. NO disease/condition terms, drug comparisons, or weight-loss claims (the worker drops a situation whose text trips the block list).`,
+      `  • Skip incentivized/coupon reviews when choosing quotes. Prefer featured + verified + recent. Cover a RANGE of situations.`,
+      ``,
+      `BEST REVIEWS (${reviews.length}):`,
+      ``,
+      reviewsBlock,
+      ``,
+      `🚨 Read-only: NEVER edit a file, NEVER commit, NEVER run a mutating command. Your final message is ONE JSON object — no prose before/after (if fenced, the JSON is the last thing):`,
+      `  {"status":"completed","situations":[{"slug":"…","situation":"…","who":"…","goal":"…","noticed":"…","timeframe":"…","quotes":[{"review_id":"…","verbatim_phrase":"…"}]}]}`,
+      `  {"status":"error","error":"<one-line why you cannot proceed>"}`,
+    ].filter(Boolean).join("\n");
+
+    const { session, resultText, isError, raw, usage, model, configDir: mineDir } = await runBoxLane(
+      (cfg, sid) => runSituationMineClaude(prompt, sid, REPO_DIR, cfg, job.id),
+    );
+    await meterAgentJob(job, mineDir ?? undefined, usage, model);
+    if (session) await update(job.id, { claude_session_id: session });
+
+    const parsed = extractJson<{ status?: string; error?: string; situations?: unknown }>(resultText);
+    if (parsed?.status === "error") {
+      detail = `agent reported error: ${(parsed.error || "").slice(0, 200)}`;
+      await update(job.id, { status: "needs_attention", error: `situation-mine error: ${(parsed.error || "").slice(0, 300)}`, log_tail: raw.slice(-2000) });
+      console.error(`${tag} ${detail}`);
+      ok = false;
+      return;
+    }
+    if (!parsed || !Array.isArray(parsed.situations)) {
+      detail = "no parseable situations";
+      await update(job.id, { status: isError ? "failed" : "needs_attention", error: "situation-mine produced no parseable situations", log_tail: raw.slice(-2000) });
+      console.error(`${tag} ${detail}`);
+      ok = false;
+      return;
+    }
+
+    const mineDateISO = new Date().toISOString().slice(0, 10);
+    const applied = await applySituationMine({
+      admin: a,
+      workspaceId: job.workspace_id,
+      productId,
+      mineDateISO,
+      reviews,
+      proposal: { situations: parsed.situations as import("../src/lib/situation-miner").ProposedSituation[] },
+    });
+    // Per-run counts so the CMO can supervise the proxy (proposed vs actually written).
+    detail =
+      `${prod.title}: proposed=${applied.proposed} verbatim-dropped=${applied.verbatimDropped} ` +
+      `compliance-dropped-situations=${applied.complianceDroppedSituations} compliance-flagged-quotes=${applied.complianceFlaggedQuotes} ` +
+      `stored-non-compliant=${applied.storedNonCompliant} skipped-seed=${applied.skippedSeed} written=${applied.written}`;
+    await update(job.id, { status: "completed", log_tail: detail });
+    console.log(`${tag} ${detail}`);
+  } catch (err) {
+    ok = false;
+    const msg = errText(err);
+    detail = `threw: ${msg}`;
+    console.error(`${tag} ${detail}`);
+    await update(job.id, { status: "failed", error: msg.slice(0, 300), log_tail: detail.slice(-2000) });
+  } finally {
+    await emitAgentHeartbeat("situation-mine", {
+      ok,
+      detail: detail.slice(0, 300),
+      durationMs: Date.now() - startedAt,
+    }).catch(() => {});
+  }
+}
+
 async function runCampaignGradeJob(job: Job) {
   const tag = `[campaign-grade:${job.id.slice(0, 8)}]`;
   let instr: { candidates?: unknown } = {};
@@ -28887,6 +29096,7 @@ async function dispatchJob(job: Job) {
   if (job.kind === "calibrate-media-buyer-policy") return runCalibrateMediaBuyerPolicyJob(job);
   if (job.kind === "ads-supervisor") return runAdsSupervisorJob(job);
   if (job.kind === "imitation-quality-review") return runImitationQualityReviewJob(job);
+  if (job.kind === "situation-mine") return runSituationMineJob(job);
   if (job.kind === "creative-scout") return runCreativeScoutJob(job);
   // dispatcher-fallthrough: kind === "build" — the build flow below is the implicit default.
   // (Mirrored in scripts/_check-worker-lanes.ts's DISPATCH_BY_FALLTHROUGH so the static check passes
@@ -31375,6 +31585,7 @@ async function main() {
   const countCalibrateMediaBuyerPolicy = () => [...active.values()].filter((v) => v.kind === "calibrate-media-buyer-policy").length;
   const countAdsSupervisor = () => [...active.values()].filter((v) => v.kind === "ads-supervisor").length;
   const countImitationQualityReview = () => [...active.values()].filter((v) => v.kind === "imitation-quality-review").length;
+  const countSituationMine = () => [...active.values()].filter((v) => v.kind === "situation-mine").length;
   const countCreativeScout = () => [...active.values()].filter((v) => v.kind === "creative-scout").length;
   const countAgentCoach = () => [...active.values()].filter((v) => v.kind === "agent-coach").length;
   const countStorefrontOptimizer = () => [...active.values()].filter((v) => v.kind === "storefront-optimizer").length;
@@ -32061,6 +32272,17 @@ async function main() {
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
         console.log(`claimed imitation-quality-review ${job.id.slice(0, 8)} → ${countImitationQualityReview() + 1}/${MAX_IMITATION_QUALITY_REVIEW} imitation-quality-review lane`);
+        launch(job);
+      }
+      // Fill the situation-mine lane (customer-situations-all-products Phase 1): one Max box session
+      // reads ONE advertised product's best reviews and proposes customer situations; the
+      // deterministic applySituationMine verifies every quote verbatim + compliance-screens before
+      // upserting via the customer-situations SDK. Concurrency-1 mirrors imitation-quality-review.
+      while (laneHasQueued(queuedKinds, ["situation-mine"]) && countSituationMine() < MAX_SITUATION_MINE) {
+        const { data } = await db.rpc("claim_agent_job", { p_kinds: ["situation-mine"] });
+        const job = (Array.isArray(data) ? data[0] : data) as Job | null;
+        if (!job || !job.id) break;
+        console.log(`claimed situation-mine ${job.id.slice(0, 8)} → ${countSituationMine() + 1}/${MAX_SITUATION_MINE} situation-mine lane`);
         launch(job);
       }
       // Fill the creative-scout lane (meta-ad-library migration): collect a product's competitor

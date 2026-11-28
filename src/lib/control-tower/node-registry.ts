@@ -130,6 +130,7 @@ export const BUILDER_WORKER_KINDS = [
   "ads-supervisor",
   "imitation-quality-review",
   "creative-scout",
+  "situation-mine",
   "build",
 ] as const;
 
@@ -187,6 +188,7 @@ const KIND_OWNER_FALLBACK: Record<string, OwnerFunction> = {
   "media_buyer_retarget": "growth", // retarget-campaign-warm-hot-mixed-content — Bianca's THIRD (retarget) campaign replenish loop (media-buyer-retarget-cadence daily cron), owner Max
   "creative-scout": "growth", // meta-ad-library migration — collects a product's competitor ads off Meta's own Ad Library, renders the statics (Playwright: Meta publishes no media url, only a JS-rendered ad_snapshot_url), visions them into creative_skeletons. Enqueued per-product by the creative-scout-weekly-cron Inngest fn; owner Max
   "imitation-quality-review": "growth", // flag-a-competitor-ad-do-not-use Phase 3 — Max reviews each scout sweep's newly-ingested competitor ads and auto-flags the obvious junk (packshot-only / no hook / no benefit) as do_not_use with reason='max_weak_imitation_base'; CEO gets a review card to confirm/override (never a silent proxy-optimizer)
+  "situation-mine": "cmo", // customer-situations-all-products Phase 1 — the CMO's situation miner reads one advertised product's best reviews and proposes the real customer situations it fits; applySituationMine (deterministic) verifies every quote verbatim + compliance-screens via checkClaim before upserting through the customer-situations SDK. Organic-discovery surface = situational recommendations inside AI assistants, owned by the CMO
 };
 
 /**
