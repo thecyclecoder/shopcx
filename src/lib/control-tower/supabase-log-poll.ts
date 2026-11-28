@@ -48,6 +48,7 @@ import {
   isForeignSupabasePostgresMissingSpecsOverallStatusColumnAdhocNoise,
   isForeignSupabasePostgresMissingCouponsStatusColumnAdhocNoise,
   isForeignSupabasePostgresMissingCouponsValueCentsColumnAdhocNoise,
+  isForeignSupabasePostgresMissingCouponsOneTimeColumnAdhocNoise,
   isForeignSupabasePostgresMissingDirectorActivityDetailColumnAdhocNoise,
   isForeignSupabasePostgresMissingTicketDirectionsCreatedAtAdhocNoise,
   isForeignSupabasePostgresMissingSpecTestRunsVerdictColumnAdhocNoise,
@@ -506,6 +507,15 @@ const LOG_QUERIES: LogQuery[] = [
       // `coupons` (bare or PostgREST CTE wrapper) — a real `value_cents`-missing on another table,
       // a different `coupons` column, or a non-SELECT write still surfaces / pages.
       if (isForeignSupabasePostgresMissingCouponsValueCentsColumnAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: a foreign/stale direct-REST client reads
+      // `public.coupons` expecting an Appstle-style boolean `one_time` column that our schema has
+      // never carried — a ShopCX coupon has no one-time flag ([[../tables/coupons]]). There is no
+      // lever from ShopCX to make the query resolve (Control Tower signature
+      // `supabase-logs:391074d76ddc779c`). Gated on the exact `column coupons.one_time does not
+      // exist` message AND the SELECT-lookup shape on `coupons` (bare or PostgREST CTE wrapper) — a
+      // real `one_time`-missing on another table, a different `coupons` column, or a non-SELECT
+      // write still surfaces / pages.
+      if (isForeignSupabasePostgresMissingCouponsOneTimeColumnAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: a foreign/stale direct-REST client reads
       // `public.director_activity` expecting a `detail` column that the table never carried —
       // there is no lever from ShopCX to make the query resolve ([[../tables/director_activity]],

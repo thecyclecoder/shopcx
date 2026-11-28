@@ -2408,6 +2408,60 @@ export function isForeignSupabasePostgresMissingCouponsValueCentsColumnAdhocNois
 }
 
 /**
+ * Foreign-app noise — Postgres reporting `column coupons.one_time does not exist` for an ad hoc
+ * SELECT lookup / PostgREST direct-REST call against `public.coupons`. A foreign/stale PostgREST
+ * client reads `coupons` expecting an Appstle-style boolean `one_time` column that our schema has
+ * never carried — ShopCX coupons have no one-time flag ([[../tables/coupons]]). The offending read
+ * is not ShopCX code; it only reaches Supabase's `postgres_logs` feed when an external / stale
+ * PostgREST client (a foreign app assuming an Appstle `one_time` shape, a deprecated integration, a
+ * stale SQL Editor session) issues a `select=...one_time...` against `/rest/v1/coupons`. There is
+ * no lever from ShopCX to make that query resolve — paging Platform on it (Control Tower signature
+ * `supabase-logs:391074d76ddc779c`) is repair work for a query we do not own.
+ *
+ * Sibling of `isForeignSupabasePostgresMissingCouponsValueCentsColumnAdhocNoise` — same
+ * narrow-gating shape (exact `column <table>.<name> does not exist` message + SELECT-lookup shape
+ * that covers BOTH the bare SELECT and the PostgREST CTE wrapper), scoped to the
+ * `coupons.one_time` direct-REST shape.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the `message` once trimmed equals `column coupons.one_time does not exist`
+ *      (or the `public.` qualified variant, with any leading `ERROR: ` prefix stripped), AND
+ *   2. the `parsed.query` attribute is a SELECT-lookup on `public.coupons` — either the bare
+ *      `select ... from (public.)?coupons` shape (any WHERE/LIMIT/ORDER BY tail is fine), or
+ *      PostgREST's `WITH pgrst_source AS ( SELECT ... FROM "public"."coupons" ... )` direct-REST
+ *      wrapper (double-quoted identifiers).
+ *
+ * Narrowly gated so a column-missing error for ANY OTHER table, a DIFFERENT column on `coupons`
+ * (e.g. the sibling `coupons.status` / `coupons.value_cents` foreign-reads are separate signatures),
+ * or a non-SELECT statement against the table still pages — the CTE branch requires the wrapped op
+ * to be a SELECT. Empty / nullish message OR query returns `false`. Consumed by the `postgres`
+ * LogQuery's `mapRow` in [[./supabase-log-poll]]: returning null drops the row (no error_event, no
+ * loop_alert, no signature). A capture-time drop, not a transient flag.
+ */
+export function isForeignSupabasePostgresMissingCouponsOneTimeColumnAdhocNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column coupons.one_time does not exist" ||
+    stripped === "column public.coupons.one_time does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  // Bare SELECT-lookup on `coupons` — any trailing WHERE/LIMIT/ORDER BY is fine; the pin is the
+  // SELECT-FROM shape only, so a non-SELECT / different-FROM statement (real code-bug shape)
+  // stays captured and pages.
+  if (/^select\b[\s\S]*\bfrom\s+(?:public\.)?coupons\b/.test(q)) return true;
+  // PostgREST direct-REST wraps the same lookup as `WITH pgrst_source AS ( SELECT ... FROM
+  // "public"."coupons" ... )` with double-quoted identifiers. The CTE branch requires the wrapped
+  // op to be a SELECT, so a PostgREST write still pages.
+  return /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"public"\."coupons"/.test(q);
+}
+
+/**
  * Foreign-app noise — Postgres reporting `column director_activity.detail does not exist` for an
  * ad hoc SELECT lookup / PostgREST direct-REST call against `public.director_activity`. A
  * foreign/stale PostgREST client reads `director_activity` expecting a `detail` column that
