@@ -255,7 +255,7 @@ export async function quoteSubscriptionTax(
 
   const { data: sub } = await admin
     .from("subscriptions")
-    .select("id, workspace_id, customer_id, items, applied_discounts, shipping_address, delivery_price_cents, shipping_protection_added, shipping_protection_amount_cents, shipping_method_code, status, is_internal, comp")
+    .select("id, workspace_id, customer_id, items, applied_discounts, shipping_address, delivery_price_cents, shipping_protection_added, shipping_protection_amount_cents, shipping_method_code, status, is_internal, comp, pricing_offer_id")
     .eq("id", subscriptionId)
     .single();
   if (!sub || !sub.is_internal) return null;
@@ -347,7 +347,7 @@ export async function ensureFreshSubscriptionTaxQuote(
   const admin = createAdminClient();
   const { data: sub } = await admin
     .from("subscriptions")
-    .select("id, customer_id, items, applied_discounts, shipping_address, delivery_price_cents, shipping_protection_added, shipping_protection_amount_cents, shipping_method_code, status, is_internal, comp, avalara_quote_hash, avalara_quote_tax_cents, avalara_quote_total_cents")
+    .select("id, customer_id, items, applied_discounts, shipping_address, delivery_price_cents, shipping_protection_added, shipping_protection_amount_cents, shipping_method_code, status, is_internal, comp, pricing_offer_id, avalara_quote_hash, avalara_quote_tax_cents, avalara_quote_total_cents")
     .eq("id", subscriptionId)
     .single();
   if (!sub) return null;
