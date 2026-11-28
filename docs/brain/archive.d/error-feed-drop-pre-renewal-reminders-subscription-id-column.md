@@ -1,0 +1,1 @@
+- **Scope out the foreign PostgREST "pre_renewal_reminders.subscription_id does not exist" noise from the error feed** · verified 2026-11-28 · → [[../libraries/error-feed]]
