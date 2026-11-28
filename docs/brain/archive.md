@@ -12,6 +12,13 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Mine customer situations for every advertised product** · verified 2026-11-28 · → [[../lifecycles/ai-shopping-agent]]
+- **Crisis resolve ships promised restock replacements** · verified 2026-11-27 · → [[../lifecycles/crisis-campaign]]
+- **Cycle-edit lock lift must also clear the current (already billed) cycle's edit** · verified 2026-11-27 · → [[../lifecycles/shopcx-subscriptions]] § A gift edit on the CURRENT billed cycle also locks the contract
+- **Stop the migration classifier from gating idempotent drop+re-add CHECK-constraint re-statements as destructive** · verified 2026-11-27 · → [[../libraries/migration-safety]]
+- **Organic social engine: nugget slideshows + animated reels, separated from ads** · verified 2026-11-27 · → [[../lifecycles/social-scheduler]]
+- **Restarting a sub whose only product is discontinued offers a replacement** · verified 2026-11-27 · → [[../lifecycles/shopcx-subscriptions]]
+- **Displayed totals for ShopCX-billed subs take Subscribe & Save off twice** · verified 2026-11-27 · → [[../libraries/commerce__price]]
 - **Cancel journey: confirming a cancel must actually cancel** · verified 2026-11-26 · → [[../lifecycles/cancel-flow]]
 - **Restart out-of-stock swap must respect customers who chose to wait for restock** · verified 2026-11-26 · → [[../lifecycles/crisis-campaign]]
 - **Drop foreign-app noise: customer_payment_methods.card_last4 ad-hoc SELECT** · verified 2026-11-26 · → [[../libraries/error-feed]]
