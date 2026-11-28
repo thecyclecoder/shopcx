@@ -23,6 +23,7 @@ The single read/write chokepoint for [[../tables/product_customer_situations]] �
 ## Callers
 
 - `scripts/_backfill-customer-situations.ts` — the idempotent ship-time seed from the Tabs situations fixture.
+- [[situation-miner]] `applySituationMine` — the deterministic verify-and-screen gate that upserts mined situations from box sessions (Phase 2 / every advertised product).
 - (Phase 2) the AI shopping-agent MCP server `find_products_for_situation` tool reads via `listSituations` (compliant-only).
 
 ## Related
