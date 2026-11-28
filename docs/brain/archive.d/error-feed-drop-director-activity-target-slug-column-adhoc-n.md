@@ -1,0 +1,1 @@
+- **Scope out foreign PostgREST noise: director_activity.target_slug column-missing** · verified 2026-11-28 · → [[../libraries/error-feed]]
