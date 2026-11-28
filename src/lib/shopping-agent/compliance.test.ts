@@ -59,6 +59,7 @@ test("weight-loss quantification → block", () => {
     "I lost 40+ pounds!",
     "I have lost 25lbs since I started drinking it.",
     "down 10kg",
+    "I have lost few pounds while using this product.",
   ]) {
     const r = checkClaim(s);
     assert.equal(r.ok, false, `expected block: ${s}`);

@@ -98,7 +98,7 @@ const SAFETY_RE = buildMatcher(SAFETY_INPUT_TERMS);
 
 /** number + weight-unit adjacency, e.g. "20 lbs", "25lbs", "40+ pounds", "two dress sizes", "3 inches". */
 const WEIGHT_UNIT_RE = new RegExp(
-  `((?<![A-Za-z0-9.])\\d+(?:\\.\\d+)?\\+?|\\b(?:one|two|three|four|five|six|seven|eight|nine|ten|a few|several)\\b)\\s*(?:${WEIGHT_UNITS.map(esc).join("|")})(?![A-Za-z])`,
+  `((?<![A-Za-z0-9.])\\d+(?:\\.\\d+)?\\+?|\\b(?:one|two|three|four|five|six|seven|eight|nine|ten|a few|few|a couple|couple|several)\\b)\\s*(?:${WEIGHT_UNITS.map(esc).join("|")})(?![A-Za-z])`,
   "i",
 );
 /** lose/lost/down/dropped verbs that make a quantified weight claim. */

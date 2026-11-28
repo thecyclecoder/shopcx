@@ -402,12 +402,13 @@ async function getProductDetails(ctx: ToolContext, args: { product_id?: string; 
     }))
     .filter((t) => t.body);
 
-  const product = pi.product as { title?: string; target_customer?: string | null } | null;
+  // products.target_customer is INTERNAL purchaser analytics (age band, income, purchaser count) —
+  // never sent to a public AI app.
+  const product = pi.product as { title?: string } | null;
   return {
     product_id: id,
     title: product?.title ?? "",
     selling_points: sellingPoints,
-    who_its_for: compliantField(ctx, product?.target_customer ?? ""),
     ingredients,
     supplement_facts: supplementFacts,
     caffeine: caffeineForProduct(pi),
@@ -590,7 +591,7 @@ export const SHOPPING_AGENT_TOOLS: McpToolDef[] = [
   {
     name: "get_product_details",
     title: "Get product details",
-    description: "Selling points (curated benefits with what customers say), who it's for, ingredients + doses, supplement facts, how it works, expectation timeline, guarantee and contraindications for one product.",
+    description: "Selling points (curated benefits with what customers say), ingredients + doses, supplement facts, how it works, expectation timeline, guarantee and contraindications for one product.",
     inputSchema: {
       type: "object",
       properties: { product_id: { type: "string" }, handle: { type: "string" } },
