@@ -1,0 +1,1 @@
+- **Drop foreign Studio uuid-LIKE probe noise on customer_lifecycle_experiments.id** · verified 2026-11-28 · → [[../libraries/error-feed]], [[../tables/customer_lifecycle_experiments]]
