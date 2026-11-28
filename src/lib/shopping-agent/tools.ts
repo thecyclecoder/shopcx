@@ -27,7 +27,7 @@ import {
   evaluateSafetyGate,
   MANDATORY_DISCLAIMER,
 } from "./compliance";
-import { buildCartForAgent, type AiAgentPlatform } from "./cart";
+import { buildCartForAgent, listFlavors, type AiAgentPlatform } from "./cart";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -392,7 +392,7 @@ async function compareProducts(ctx: ToolContext, args: { product_ids?: string[];
 
 async function buildCart(
   ctx: ToolContext,
-  args: { product_id?: string; handle?: string; pack_tier?: number; mode?: string; frequency_days?: number },
+  args: { product_id?: string; handle?: string; pack_tier?: number; flavor?: string; mode?: string; frequency_days?: number },
 ): Promise<unknown> {
   const key = String(args.product_id ?? args.handle ?? "");
   const id = key ? await resolveProductId(ctx, key) : null;
@@ -401,11 +401,13 @@ async function buildCart(
   const result = await buildCartForAgent(ctx.admin, ctx.workspaceId, {
     productId: id,
     packTier: Math.max(1, Number(args.pack_tier ?? 1)),
+    flavor: typeof args.flavor === "string" ? args.flavor : null,
     mode: args.mode === "subscribe" ? "subscribe" : "onetime",
     frequencyDays: args.frequency_days ?? null,
     platform: ctx.platform,
   });
-  return { ...result, disclaimer: MANDATORY_DISCLAIMER };
+  const flavors = await listFlavors(ctx.admin, ctx.workspaceId, id);
+  return { ...result, available_flavors: flavors, disclaimer: MANDATORY_DISCLAIMER };
 }
 
 /* ------------------------------------------------------------------------------------------------
@@ -511,6 +513,7 @@ export const SHOPPING_AGENT_TOOLS: McpToolDef[] = [
         product_id: { type: "string" },
         handle: { type: "string" },
         pack_tier: { type: "number", description: "Quantity of units (1, 2, 3+)." },
+        flavor: { type: "string", description: "The flavor or option the shopper wants (e.g. Berry). Omit to use the default; the result lists available_flavors." },
         mode: { type: "string", enum: ["subscribe", "onetime"] },
         frequency_days: { type: "number" },
       },

@@ -53,6 +53,15 @@ function clientIp(req: Request): string {
 
 /* ── JSON-RPC helpers. ───────────────────────────────────────────────────────────────────────── */
 type JsonRpcId = string | number | null;
+/**
+ * MCP Apps tool `_meta`: the spec shape is the NESTED `_meta.ui.resourceUri` (SEP-1865); the flat
+ * `ui/resourceUri` key is the deprecated alias older hosts read; `openai/outputTemplate` is ChatGPT's
+ * Apps SDK alias. A dotted flat key ("ui.resourceUri") is read by no host, so cards never rendered.
+ */
+function uiMeta(uri: string): Record<string, unknown> {
+  return { ui: { resourceUri: uri }, "ui/resourceUri": uri, "openai/outputTemplate": uri };
+}
+
 interface JsonRpcReq { jsonrpc?: string; id?: JsonRpcId; method?: string; params?: Record<string, unknown> }
 function ok(id: JsonRpcId, result: unknown) { return { jsonrpc: "2.0", id: id ?? null, result }; }
 function err(id: JsonRpcId, code: number, message: string) { return { jsonrpc: "2.0", id: id ?? null, error: { code, message } }; }
@@ -123,7 +132,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ wor
             inputSchema: t.inputSchema,
             annotations: t.annotations,
             ...(t.uiResourceUri
-              ? { _meta: { "ui.resourceUri": t.uiResourceUri, "openai/outputTemplate": t.uiResourceUri } }
+              ? { _meta: uiMeta(t.uiResourceUri) }
               : {}),
           })),
         }));
@@ -179,7 +188,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ wor
           content: [{ type: "text", text: JSON.stringify(structured) }],
           structuredContent: structured,
           ...(tool.uiResourceUri
-            ? { _meta: { "ui.resourceUri": tool.uiResourceUri, "openai/outputTemplate": tool.uiResourceUri } }
+            ? { _meta: uiMeta(tool.uiResourceUri) }
             : {}),
         }));
       }
