@@ -19,9 +19,9 @@ Built across Phases 2–3 of the AI-shopping-agent build (Phase 1 = [[customer-s
 
 | Tool | readOnlyHint | What |
 |---|---|---|
-| `search_products` | true | Active products: title, image, rating + review count, lead benefit, price/serving. |
+| `search_products` | true | Optional `query` (scored by `productQueryScore`: title/handle 3, type/tags 2, description 1; no match → full lineup + a `note`). Active `reviewable=true` products only, Shipping Protection excluded, products with no benefits/ingredients (accessories) dropped, `is_advertised` first. Card: title, image, rating + review count, lead benefit, price/serving, caffeine. |
 | `find_products_for_situation` | true | Matches the shopper's situation against [[../tables/product_customer_situations]] (via [[customer-situations]], compliant-only); returns product + what customers noticed + 1–2 compliant quotes (first name + initial). Input-side safety gate. |
-| `get_product_details` | true | Ingredients + doses, supplement facts quoted ONLY from `product_variants.supplement_facts` (never PDP copy), how-to-use, expectation timeline, guarantee, contraindications from `product_ingredient_research`. Caffeine always stated. |
+| `get_product_details` | true | `selling_points` (the `product_benefit_selections` spine, lead → supporting, each with ≤3 compliant `customer_phrases`), `who_its_for` (`products.target_customer`), ingredients + doses, supplement facts quoted ONLY from `product_variants.supplement_facts` (never PDP copy), how-to-use, expectation timeline (each headline/body screened by the compliance filter — it is PDP marketing copy), guarantee, contraindications from `product_ingredient_research`. Caffeine always stated: a nutrient row wins, else EVERY `<n> mg caffeine` source in the proprietary blend is summed (Amazing Coffee = 60 coffee + 105 anhydrous = 165 mg; the card said 60 mg before 2026-11-28). |
 | `answer_product_question` | true | RAG over `retrieveContext` (kb_chunks) + published `product_page_content.faq_items` + ingredient research; policy questions via `getPolicyCustomerFacing` (never internal_summary/rules). |
 | `get_reviews` | true | Best-reviews set (published/featured, rating ≥ 4, featured first), optional topic filter. |
 | `compare_products` | true | 2–4 products side by side. |
@@ -29,7 +29,7 @@ Built across Phases 2–3 of the AI-shopping-agent build (Phase 1 = [[customer-s
 
 ## Compliance (hard, in code)
 
-Applied to EVERY string a tool returns before it leaves the server. A blocked **quote** is dropped whole (never rewritten); a blocked generated **sentence** is dropped and counted (the count feeds [[../tables/shopping_agent_calls]]). Rules (word-boundary, case-insensitive): disease/condition terms, drug comparisons (GLP-1/Ozempic/semaglutide/…), weight-loss quantification + guarantee/hype phrases. Allowed: structure/function + customer-attributed experience framing. Mandatory disclaimer on every product payload (exempt from the block list). Input-side safety gate on pregnancy/nursing/medication/under-18/medical condition/disease term → doctor note + contraindications, no recommendation/quote. No raw shopper health text is ever persisted.
+Applied to EVERY string a tool returns before it leaves the server. A blocked **quote** is dropped whole (never rewritten); a blocked generated **sentence** is dropped and counted (the count feeds [[../tables/shopping_agent_calls]]). Rules (word-boundary, case-insensitive): disease/condition terms, drug comparisons (GLP-1/Ozempic/semaglutide/…), weight-loss quantification (a number next to lb/lbs/pounds/kg/sizes/inches plus a lose/lost/down/dropped verb, including "40+ pounds" and no-space "25lbs", both of which slipped through before 2026-11-28) + guarantee/hype phrases. Allowed: structure/function + customer-attributed experience framing. Mandatory disclaimer on every product payload (exempt from the block list). Input-side safety gate on pregnancy/nursing/medication/under-18/medical condition/disease term → doctor note + contraindications, no recommendation/quote. No raw shopper health text is ever persisted.
 
 ## Supervision (north-star trio)
 

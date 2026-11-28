@@ -82,7 +82,11 @@ function extractCaffeine(facts: SupplementFactsShape | null | undefined): string
   const n = (facts.nutrients ?? []).find((x) => x.name?.toLowerCase().includes("caffeine"));
   if (n?.amount) return n.amount;
   const blend = facts.proprietary_blend?.ingredients ?? "";
-  const m = blend.match(/(\d+\s*mg)\s*caffeine/i) ?? blend.match(/caffeine[^)]*?(\d+\s*mg)/i);
+  // A blend can carry several caffeine sources, e.g. Amazing Coffee = "French roast coffee (60 mg
+  // caffeine) ... Caffeine anhydrous (105 mg caffeine)" → 165 mg. Sum them; never report just the first.
+  const sources = [...blend.matchAll(/(\d+(?:\.\d+)?)\s*mg\s*caffeine/gi)].map((x) => Number(x[1]));
+  if (sources.length) return `${sources.reduce((a, b) => a + b, 0)} mg`;
+  const m = blend.match(/caffeine[^)]*?(\d+\s*mg)/i);
   return m ? m[1] : null;
 }
 
@@ -141,14 +145,65 @@ function toCard(ctx: ToolContext, pi: ProductIntelligence): ProductCard | null {
  * Product resolution + active listing.
  * --------------------------------------------------------------------------------------------- */
 
-async function listActiveProducts(ctx: ToolContext, limit = 12): Promise<string[]> {
+interface ActiveProductRow {
+  id: string;
+  title: string | null;
+  handle: string | null;
+  product_type: string | null;
+  tags: string[] | null;
+  description: string | null;
+  is_advertised: boolean | null;
+}
+
+/** Words a shopper might type that never identify a product on their own. */
+const QUERY_STOPWORDS = new Set(["the", "and", "for", "with", "best", "your", "superfoods", "company", "product", "products"]);
+
+/** Score a product row against the shopper's query words (title/handle weigh most). 0 = no match. */
+export function productQueryScore(row: Pick<ActiveProductRow, "title" | "handle" | "product_type" | "tags" | "description">, query: string): number {
+  const words = query.toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length >= 3 && !QUERY_STOPWORDS.has(w));
+  if (!words.length) return 0;
+  const name = `${row.title ?? ""} ${row.handle ?? ""}`.toLowerCase();
+  const meta = `${row.product_type ?? ""} ${(row.tags ?? []).join(" ")}`.toLowerCase();
+  const desc = (row.description ?? "").toLowerCase();
+  let score = 0;
+  for (const w of words) {
+    if (name.includes(w)) score += 3;
+    else if (meta.includes(w)) score += 2;
+    else if (desc.includes(w)) score += 1;
+  }
+  return score;
+}
+
+/**
+ * Active, sellable products for the agent. Add-ons the customer never chose on their own
+ * (Shipping Protection, reviewable=false) are excluded at the query; accessories with no product
+ * intelligence are dropped later by `hasIntelligence`. Advertised hero SKUs sort first. With a
+ * `query`, only matching products are returned (best match first).
+ */
+async function listActiveProducts(ctx: ToolContext, limit = 12, query = ""): Promise<string[]> {
   const { data } = await ctx.admin
     .from("products")
-    .select("id")
+    .select("id, title, handle, product_type, tags, description, is_advertised")
     .eq("workspace_id", ctx.workspaceId)
     .eq("status", "active")
-    .limit(limit);
-  return (data ?? []).map((r) => r.id as string);
+    .eq("reviewable", true)
+    .limit(200);
+  let rows = ((data ?? []) as ActiveProductRow[]).filter((r) => !/shipping protection|shipping insurance/i.test(r.title ?? ""));
+  if (query.trim()) {
+    rows = rows
+      .map((r) => ({ r, score: productQueryScore(r, query) }))
+      .filter((x) => x.score > 0)
+      .sort((a, b) => b.score - a.score || Number(!!b.r.is_advertised) - Number(!!a.r.is_advertised))
+      .map((x) => x.r);
+  } else {
+    rows = rows.sort((a, b) => Number(!!b.is_advertised) - Number(!!a.is_advertised));
+  }
+  return rows.slice(0, limit).map((r) => r.id);
+}
+
+/** A product the agent can actually talk about: it has curated benefits or ingredients on file. */
+function hasIntelligence(pi: ProductIntelligence): boolean {
+  return pi.benefits.length > 0 || pi.ingredients.length > 0;
 }
 
 async function resolveProductId(ctx: ToolContext, idOrHandle: string): Promise<string | null> {
@@ -166,15 +221,24 @@ async function resolveProductId(ctx: ToolContext, idOrHandle: string): Promise<s
  * Tool handlers.
  * --------------------------------------------------------------------------------------------- */
 
-async function searchProducts(ctx: ToolContext): Promise<unknown> {
-  const ids = await listActiveProducts(ctx);
+async function searchProducts(ctx: ToolContext, args: { query?: string }): Promise<unknown> {
+  const query = String(args.query ?? "").slice(0, 200);
+  let ids = await listActiveProducts(ctx, 12, query);
+  // Nothing matched the words → show the full lineup rather than an empty shelf.
+  const matched = !query.trim() || ids.length > 0;
+  if (!matched) ids = await listActiveProducts(ctx, 12);
+  const intel = await Promise.all(ids.map((id) => getProductIntelligence(ctx.admin, ctx.workspaceId, id)));
   const cards: ProductCard[] = [];
-  for (const id of ids) {
-    const pi = await getProductIntelligence(ctx.admin, ctx.workspaceId, id);
+  for (const pi of intel) {
+    if (!hasIntelligence(pi)) continue;
     const card = toCard(ctx, pi);
     if (card) cards.push(card);
   }
-  return { products: cards, disclaimer: MANDATORY_DISCLAIMER };
+  return {
+    products: cards,
+    ...(matched ? {} : { note: `No product matched "${query}", so this is the full lineup.` }),
+    disclaimer: MANDATORY_DISCLAIMER,
+  };
 }
 
 /** Naive keyword overlap score between the shopper's words and a situation row's text. */
@@ -272,14 +336,40 @@ async function getProductDetails(ctx: ToolContext, args: { product_id?: string; 
     ),
   ];
 
+  // Selling points = the curated benefit spine (product_benefit_selections), lead first, each with
+  // up to 3 compliant customer phrases. Never composed here.
+  const rolePriority = (r: string | undefined) => (r === "lead" ? 0 : r === "supporting" ? 1 : 2);
+  const sellingPoints = [...pi.benefits]
+    .map((b) => b as { benefit_name?: string; role?: string; display_order?: number; customer_phrases?: string[] | null })
+    .sort((a, b) => rolePriority(a.role) - rolePriority(b.role) || (a.display_order ?? 0) - (b.display_order ?? 0))
+    .map((b) => ({
+      benefit: compliantField(ctx, b.benefit_name ?? ""),
+      role: b.role ?? null,
+      customers_say: (b.customer_phrases ?? []).map((p) => compliantField(ctx, p)).filter(Boolean).slice(0, 3),
+    }))
+    .filter((b) => b.benefit);
+
+  // The PDP expectation timeline is marketing copy: screen every headline/body like any other text.
+  const timeline = (Array.isArray(pc.expectation_timeline) ? pc.expectation_timeline : [])
+    .map((t) => t as { time_label?: string; headline?: string; body?: string })
+    .map((t) => ({
+      time_label: t.time_label ?? "",
+      headline: compliantField(ctx, t.headline ?? ""),
+      body: compliantParagraph(ctx, t.body ?? ""),
+    }))
+    .filter((t) => t.body);
+
+  const product = pi.product as { title?: string; target_customer?: string | null } | null;
   return {
     product_id: id,
-    title: (pi.product as { title?: string } | null)?.title ?? "",
+    title: product?.title ?? "",
+    selling_points: sellingPoints,
+    who_its_for: compliantField(ctx, product?.target_customer ?? ""),
     ingredients,
     supplement_facts: supplementFacts,
     caffeine: caffeineForProduct(pi),
     how_to_use: compliantParagraph(ctx, String(pc.mechanism_copy ?? pc.how_to_use ?? "")),
-    expectation_timeline: Array.isArray(pc.expectation_timeline) ? pc.expectation_timeline : [],
+    expectation_timeline: timeline,
     guarantee: compliantParagraph(ctx, String(pc.guarantee_copy ?? "")),
     contraindications,
     disclaimer: MANDATORY_DISCLAIMER,
@@ -425,17 +515,20 @@ export interface McpToolDef {
   handler: (ctx: ToolContext, args: Record<string, unknown>) => Promise<unknown>;
 }
 
-const emptySchema = { type: "object", properties: {}, additionalProperties: false };
 
 export const SHOPPING_AGENT_TOOLS: McpToolDef[] = [
   {
     name: "search_products",
     title: "Search products",
-    description: "List the store's active products with rating, review count, lead benefit and price per serving.",
-    inputSchema: emptySchema,
+    description: "Find the store's products by name or keyword (e.g. coffee, creamer, tabs), with rating, review count, lead benefit, price per serving and caffeine. Omit query for the full lineup.",
+    inputSchema: {
+      type: "object",
+      properties: { query: { type: "string", description: "Product name or keyword. Omit to list everything." } },
+      additionalProperties: false,
+    },
     annotations: { readOnlyHint: true },
     uiResourceUri: "ui://shopping-agent/product-card.html",
-    handler: (ctx) => searchProducts(ctx),
+    handler: (ctx, args) => searchProducts(ctx, args as { query?: string }),
   },
   {
     name: "find_products_for_situation",
@@ -454,7 +547,7 @@ export const SHOPPING_AGENT_TOOLS: McpToolDef[] = [
   {
     name: "get_product_details",
     title: "Get product details",
-    description: "Ingredients + doses, supplement facts, how to use, expectation timeline, guarantee and contraindications for one product.",
+    description: "Selling points (curated benefits with what customers say), who it's for, ingredients + doses, supplement facts, how it works, expectation timeline, guarantee and contraindications for one product.",
     inputSchema: {
       type: "object",
       properties: { product_id: { type: "string" }, handle: { type: "string" } },
