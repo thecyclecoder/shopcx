@@ -3801,6 +3801,75 @@ export function isForeignSupabasePostgresUuidLikeOnSubscriptionsIdAdhocNoise(
 }
 
 /**
+ * Foreign-app noise — Postgres rejecting a `WHERE "customer_lifecycle_experiments"."id" LIKE $1`
+ * text search typed against the uuid `customer_lifecycle_experiments.id` column with `operator
+ * does not exist: uuid ~~ unknown`. The uuid LIKE is an invalid operator pairing (PostgreSQL has
+ * no `uuid ~~ text` operator), and the query shape is the exact fingerprint of a Supabase Studio
+ * Table Editor quick-filter / direct-REST probe typed against the uuid primary key: the Table
+ * Editor UI passes the filter value as text, which collides with `id`'s uuid type at planning
+ * time. No ShopCX code path issues a `id LIKE` text match on `customer_lifecycle_experiments` —
+ * every in-tree reader joins/filters the uuid `id` with equality (a predeploy guard forbids LIKE
+ * on uuid columns, so a real in-tree uuid LIKE never ships), so the resulting ERROR is repair
+ * work for a query no code owns (Control Tower signature `supabase-logs:a3e4adaac3bc5983`) and is
+ * indistinguishable from the uuid-LIKE sibling probes on subscriptions / migration_audits /
+ * tickets / returns already filtered the same way.
+ *
+ * Sibling of `isForeignSupabasePostgresUuidLikeOnSubscriptionsIdAdhocNoise` — same narrow-
+ * gating shape (exact operator-missing message + SELECT-lookup shape covering BOTH bare and
+ * PostgREST CTE wrapper forms), scoped to the uuid-LIKE-on-customer_lifecycle_experiments.id
+ * probe instead of the subscriptions.id twin.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical operator-missing shape for the uuid LIKE —
+ *      trimmed equal to `operator does not exist: uuid ~~ unknown` (any leading `ERROR: `
+ *      prefix Postgres includes on the logs surface stripped), AND
+ *   2. the `parsed.query` attribute (quote-stripped + lowercased) is a SELECT-shape on
+ *      `customer_lifecycle_experiments` — either (a) the bare `select ... from
+ *      (public.)?customer_lifecycle_experiments` shape, OR (b) the PostgREST-generated `with
+ *      pgrst_source as ( select ... from public.customer_lifecycle_experiments` CTE wrapper form
+ *      — AND contains the `id like` marker.
+ *
+ * Narrowly gated so:
+ *   - a uuid-LIKE operator-missing error on ANY OTHER table (a real code bug issuing a uuid
+ *     LIKE elsewhere) still pages,
+ *   - a DIFFERENT operator-missing error on `customer_lifecycle_experiments` (a real code bug
+ *     with a different operator mismatch) still pages,
+ *   - the same message attached to a non-SELECT statement on `customer_lifecycle_experiments`
+ *     (INSERT / UPDATE / DELETE / DDL — a real code-bug shape) still pages.
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before `keyParts`
+ * is constructed — the mapRow contract treats `null` as `drop, do not record`, so returning
+ * null here fully suppresses the row (no error_event, no loop_alert, no signature). Not a
+ * `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresUuidLikeOnCustomerLifecycleExperimentsIdAdhocNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  if (stripped !== "operator does not exist: uuid ~~ unknown") return false;
+  // Quote-stripped + lowercased so `"public"."customer_lifecycle_experiments"` collapses to
+  // `public.customer_lifecycle_experiments` and `"id" like` collapses to `id like`, covering
+  // both the bare and the double-quoted PostgREST-wrapper forms with one shape predicate.
+  const q = (query ?? "").trim().toLowerCase().replace(/"/g, "");
+  if (!q) return false;
+  // The uuid-id LIKE marker — the tell that distinguishes the Studio-click/REST quick-filter
+  // against the uuid primary key from any equality join/filter our own code issues.
+  if (!/\bid\s+like\b/.test(q)) return false;
+  const bareSelect =
+    /^select\b[\s\S]*\bfrom\s+(?:public\.)?customer_lifecycle_experiments\b/.test(q);
+  // PostgREST wraps direct-REST row reads as `WITH pgrst_source AS ( SELECT ... FROM
+  // public.customer_lifecycle_experiments ... )` — the branch requires the wrapped op to be a
+  // SELECT so a PostgREST INSERT/UPDATE inside the same envelope (a real code-write) stays
+  // captured/paged.
+  const pgrstCte =
+    /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+public\.customer_lifecycle_experiments\b/.test(q);
+  return bareSelect || pgrstCte;
+}
+
+/**
  * Foreign-app noise — Postgres rejecting a `WHERE "migration_audits"."id" LIKE $1` text search
  * typed against the uuid `migration_audits.id` column with `operator does not exist: uuid ~~
  * unknown`. The uuid LIKE is an invalid operator pairing (PostgreSQL has no `uuid ~~ text`

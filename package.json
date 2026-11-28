@@ -360,6 +360,7 @@
     "test:error-feed-loyalty-transactions-customer-id-noise": "tsx --test src/lib/control-tower/error-feed.loyalty-transactions-customer-id-noise.test.ts",
     "test:error-feed-returns-id-invalid-uuid-noise": "tsx --test src/lib/control-tower/error-feed.returns-id-invalid-uuid-noise.test.ts",
     "test:error-feed-subscriptions-customer-id-invalid-uuid-noise": "tsx --test src/lib/control-tower/error-feed.subscriptions-customer-id-invalid-uuid-noise.test.ts",
+    "test:error-feed-customer-lifecycle-experiments-id-uuid-like-noise": "tsx --test src/lib/control-tower/error-feed.customer-lifecycle-experiments-id-uuid-like-noise.test.ts",
     "test:error-feed-spec-phases-phase-num-noise": "tsx --test src/lib/control-tower/error-feed.spec-phases-phase-num-noise.test.ts",
     "test:error-feed-agent-jobs-ticket-id-noise": "tsx --test src/lib/control-tower/error-feed.agent-jobs-ticket-id-noise.test.ts",
     "test:error-feed-tickets-assignee-type-noise": "tsx --test src/lib/control-tower/error-feed.tickets-assignee-type-noise.test.ts",
