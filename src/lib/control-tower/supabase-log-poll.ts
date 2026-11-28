@@ -49,6 +49,7 @@ import {
   isForeignSupabasePostgresMissingCouponsStatusColumnAdhocNoise,
   isForeignSupabasePostgresMissingCouponsValueCentsColumnAdhocNoise,
   isForeignSupabasePostgresMissingDirectorActivityDetailColumnAdhocNoise,
+  isForeignSupabasePostgresMissingDirectorActivityTargetSlugColumnAdhocNoise,
   isForeignSupabasePostgresMissingTicketDirectionsCreatedAtAdhocNoise,
   isForeignSupabasePostgresMissingSpecTestRunsVerdictColumnAdhocNoise,
   isForeignSupabasePostgresMissingSpecTestRunsOverallVerdictColumnAdhocNoise,
@@ -514,6 +515,14 @@ const LOG_QUERIES: LogQuery[] = [
       // `director_activity` (bare or PostgREST CTE wrapper) — a real `detail`-missing on another
       // table, a different `director_activity` column, or a non-SELECT write still pages.
       if (isForeignSupabasePostgresMissingDirectorActivityDetailColumnAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: a foreign/stale direct-REST client reads
+      // `public.director_activity` expecting a `target_slug` column that the table never carried —
+      // there is no lever from ShopCX to make the query resolve ([[../tables/director_activity]],
+      // Control Tower signature `supabase-logs:d7ed3e7a4e0ef65f`). Gated on the exact
+      // `column director_activity.target_slug does not exist` message AND the SELECT-lookup shape on
+      // `director_activity` (bare or PostgREST CTE wrapper) — a real `target_slug`-missing on another
+      // table, a different `director_activity` column, or a non-SELECT write still pages.
+      if (isForeignSupabasePostgresMissingDirectorActivityTargetSlugColumnAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: a foreign/stale direct-REST client reads
       // `public.spec_test_runs` expecting a `verdict` column that the table never carried —
       // the real column is `agent_verdict` (the spec-test agent's stamp). The resulting
